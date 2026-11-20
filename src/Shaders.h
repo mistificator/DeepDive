@@ -3,12 +3,12 @@
 namespace Shaders {
 
 // ============================================================================
-// ШЕЙДЕРЫ ПРОХОДА КАРТЫ ТЕНЕЙ (Shadow Map Pass — учитывают анимацию водорослей и фауны)
+// ШЕЙДЕРЫ ПРОХОДА КАРТЫ ТЕНЕЙ
 // ============================================================================
 
 inline const char* ShadowEnvVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 3) in vec2 aParam;
+layout(location = 3) in vec2 aParam; // x: 0=rock, 1=wood, 2=reef/grass, 3=kelp, 4=abyssalGlow; y: sway/heightFactor
 
 uniform mat4 uLightSpaceMatrix;
 uniform float uTime;
@@ -16,7 +16,12 @@ uniform float uTime;
 void main() {
     vec3 pos = aPos;
 
-    if (aParam.x > 2.5) {
+    if (aParam.x > 3.5) {
+        float h = clamp(aParam.y, 0.0, 1.0);
+        float phase = uTime * 1.45 + pos.x * 0.25 + pos.z * 0.22;
+        pos.x += sin(phase + h * 2.4) * 0.24 * (h * h);
+        pos.z += cos(phase * 0.85 + h * 2.8) * 0.20 * (h * h);
+    } else if (aParam.x > 2.5) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.15 + pos.x * 0.12 + pos.z * 0.10;
         float hCurve = h * sqrt(h);
@@ -25,10 +30,12 @@ void main() {
         float flutter = sin(uTime * 2.8 + pos.y * 1.1 + pos.x * 0.5) * 0.14 * h;
         pos.x += swayX + flutter;
         pos.z += swayZ + flutter;
-    } else if (aParam.x > 1.5 && aParam.y > 0.05) {
+    } else if (aParam.x > 1.5 && aParam.y > 0.01) {
         float h = clamp(aParam.y, 0.0, 1.0);
-        pos.x += sin(uTime * 1.8 + pos.y * 2.0 + pos.x) * 0.10 * h;
-        pos.z += cos(uTime * 1.5 + pos.y * 2.0 + pos.z) * 0.10 * h;
+        float phase = uTime * 1.85 + pos.x * 0.28 + pos.z * 0.24;
+        float bend = h * sqrt(h);
+        pos.x += sin(phase + h * 2.1) * 0.28 * bend;
+        pos.z += cos(phase * 0.82 + h * 2.5) * 0.24 * bend;
     }
 
     gl_Position = uLightSpaceMatrix * vec4(pos, 1.0);
@@ -38,7 +45,8 @@ void main() {
 inline const char* ShadowFaunaVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 3) in vec4 aInstPosScale;
-layout(location = 4) in vec4 aInstRotPhase; // z: 0=fish, 1=manta, 2=whale
+layout(location = 4) in vec4 aInstRotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler), w: bank
+layout(location = 5) in vec4 aInstPitchTint; // x: pitch, yzw: tint
 
 uniform mat4 uLightSpaceMatrix;
 uniform float uTime;
@@ -55,38 +63,46 @@ void main() {
         float wingDist = abs(localPos.x);
         float wf = clamp(wingDist / 1.8, 0.0, 1.2);
         localPos.y += sin(phase - wingDist * 1.15 - localPos.z * 0.35) * 0.42 * (wf * sqrt(wf));
-    } else {
-        // Медленный вертикальный взмах хвоста гигантского кита
+    } else if (aInstRotPhase.z < 2.5) {
         float phase = aInstRotPhase.y + uTime * 1.35;
         float tailWeight = smoothstep(1.2, -5.2, localPos.z);
         float spineWave = sin(phase - localPos.z * 0.55) * 0.55 * (tailWeight * tailWeight);
         float finSway = sin(phase - abs(localPos.x) * 0.6) * 0.12 * clamp((abs(localPos.x) - 0.8) / 2.0, 0.0, 1.0);
         localPos.y += spineWave + finSway;
+    } else {
+        float phase = aInstRotPhase.y + uTime * 3.2;
+        float tailW = smoothstep(-0.1, -1.6, localPos.z);
+        localPos.x += sin(phase - localPos.z * 2.2) * 0.16 * tailW;
+        float lureW = smoothstep(0.45, 1.35, localPos.z) * smoothstep(0.15, 0.85, localPos.y);
+        localPos.x += sin(uTime * 2.1 + aInstRotPhase.y) * 0.09 * lureW;
+        localPos.y += cos(uTime * 1.7 + aInstRotPhase.y) * 0.07 * lureW;
     }
 
     localPos *= aInstPosScale.w;
 
     float yaw = aInstRotPhase.x;
+    float pitch = aInstPitchTint.x;
     float bank = aInstRotPhase.w;
+
     float cy = cos(yaw), sy = sin(yaw);
+    float cp = cos(pitch), sp = sin(pitch);
     float cb = cos(bank), sb = sin(bank);
 
     mat3 rotY = mat3(cy, 0.0, -sy,  0.0, 1.0, 0.0,  sy, 0.0, cy);
-    mat3 rotZ = mat3(cb, sb, 0.0,  -sb, cb, 0.0,   0.0, 0.0, 1.0);
-    vec3 worldPos = (rotY * rotZ) * localPos + aInstPosScale.xyz;
+    mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp);
+    mat3 rotZ = mat3(cb, sb, 0.0,   -sb, cb, 0.0,   0.0, 0.0, 1.0);
 
+    vec3 worldPos = (rotY * rotX * rotZ) * localPos + aInstPosScale.xyz;
     gl_Position = uLightSpaceMatrix * vec4(worldPos, 1.0);
 }
 )";
 
 inline const char* ShadowDepthFrag = R"(#version 330 core
-void main() {
-    // Запись глубины выполняется аппаратно
-}
+void main() {}
 )";
 
 // ============================================================================
-// ОСНОВНЫЕ ШЕЙДЕРЫ ОКРУЖЕНИЯ С РАССЕЯННЫМИ ТЕНЯМИ
+// ОСНОВНЫЕ ШЕЙДЕРЫ ОКРУЖЕНИЯ (Поглощение света Бэра-Ламберта + Анти-полосы на склонах)
 // ============================================================================
 
 inline const char* EnvironmentVert = R"(#version 330 core
@@ -109,7 +125,15 @@ void main() {
     vec3 pos = aPos;
     vec3 norm = aNormal;
 
-    if (aParam.x > 2.5) {
+    if (aParam.x > 3.5) {
+        float h = clamp(aParam.y, 0.0, 1.0);
+        float phase = uTime * 1.45 + pos.x * 0.25 + pos.z * 0.22;
+        float swayX = sin(phase + h * 2.4) * 0.24 * (h * h);
+        float swayZ = cos(phase * 0.85 + h * 2.8) * 0.20 * (h * h);
+        pos.x += swayX;
+        pos.z += swayZ;
+        norm = normalize(norm + vec3(swayX * 0.25, 0.0, swayZ * 0.25));
+    } else if (aParam.x > 2.5) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.15 + pos.x * 0.12 + pos.z * 0.10;
         float hCurve = h * sqrt(h);
@@ -119,10 +143,15 @@ void main() {
         pos.x += swayX + flutter;
         pos.z += swayZ + flutter;
         norm = normalize(norm + vec3(swayX * 0.15, 0.0, swayZ * 0.15));
-    } else if (aParam.x > 1.5 && aParam.y > 0.05) {
+    } else if (aParam.x > 1.5 && aParam.y > 0.01) {
         float h = clamp(aParam.y, 0.0, 1.0);
-        pos.x += sin(uTime * 1.8 + pos.y * 2.0 + pos.x) * 0.10 * h;
-        pos.z += cos(uTime * 1.5 + pos.y * 2.0 + pos.z) * 0.10 * h;
+        float phase = uTime * 1.85 + pos.x * 0.28 + pos.z * 0.24;
+        float bend = h * sqrt(h);
+        float swayX = sin(phase + h * 2.1) * 0.28 * bend;
+        float swayZ = cos(phase * 0.82 + h * 2.5) * 0.24 * bend;
+        pos.x += swayX;
+        pos.z += swayZ;
+        norm = normalize(norm + vec3(swayX * 0.22, 0.0, swayZ * 0.22));
     }
 
     vWorldPos = pos;
@@ -145,12 +174,24 @@ uniform sampler2D uRockTex;
 uniform sampler2D uShadowMap;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
+uniform vec3 uSunColor;
 uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
+uniform float uVibrance;
+uniform float uFogScale;
 uniform float uTime;
 uniform int uEnableShadows;
+uniform int uLureCount;
+uniform vec3 uLurePos[8];
 
 out vec4 FragColor;
+
+vec3 applyVibrance(vec3 col, float vib) {
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    float sat = max(col.r, max(col.g, col.b)) - min(col.r, min(col.g, col.b));
+    float boost = mix(vib, 1.0 + (vib - 1.0) * 0.45, sat);
+    return clamp(mix(vec3(lum), col, boost), 0.0, 1.20);
+}
 
 vec4 sampleTriplanar(sampler2D tex, vec3 p, vec3 blend) {
     vec4 tx = texture(tex, p.yz);
@@ -176,8 +217,7 @@ float organicCaustics(vec2 p, float t) {
     return c2 * c2;
 }
 
-// 16-точечный фильтр Фогеля (Vogel Disk PCF) с учетом рассеяния полутени в толще воды
-float calcUnderwaterShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
+float calcUnderwaterShadow(vec4 lightSpacePos, vec3 geomN, vec3 faceN, vec3 L) {
     if (uEnableShadows == 0) return 1.0;
 
     vec3 projCoords = lightSpacePos.xyz / max(lightSpacePos.w, 0.0001);
@@ -187,20 +227,17 @@ float calcUnderwaterShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
         return 1.0;
     }
 
-    // Плавное затухание карты теней у границ каскада
     vec2 edgeDist = smoothstep(vec2(0.0), vec2(0.08), projCoords.xy) * (1.0 - smoothstep(vec2(0.92), vec2(1.0), projCoords.xy));
     float cascadeFade = edgeDist.x * edgeDist.y;
 
-    float cosTheta = clamp(dot(N, L), 0.0, 1.0);
-    float bias = max(0.0035 * (1.0 - cosTheta), 0.0012);
+    float cosTheta = clamp(min(dot(geomN, L), dot(faceN, L)), 0.0, 1.0);
+    float bias = max(0.0046 * (1.0 - cosTheta), 0.0014);
 
-    // Псевдослучайный поворот диска сэмплирования по мировым координатам
     float rndAngle = fract(sin(dot(vWorldPos.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
     float s = sin(rndAngle);
     float c = cos(rndAngle);
     mat2 rot = mat2(c, -s, s, c);
 
-    // Оценка расстояния от преграды (Blocker Distance) для расширения подводной полутени
     float avgBlockerDepth = 0.0;
     int blockers = 0;
     vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
@@ -217,7 +254,6 @@ float calcUnderwaterShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
         }
     }
 
-    // Если преграда высоко в воде (например, плывущий кит или верхушка ламинарии), тень сильнее размывается водой
     float penumbraRadius = 2.4;
     if (blockers > 0) {
         avgBlockerDepth /= float(blockers);
@@ -229,115 +265,160 @@ float calcUnderwaterShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
     for (int i = 0; i < 16; ++i) {
         float fi = float(i) + 0.5;
         float r = sqrt(fi / 16.0) * penumbraRadius;
-        float theta = fi * 2.3999632; // золотой угол
+        float theta = fi * 2.3999632;
         vec2 offset = (rot * vec2(cos(theta), sin(theta))) * r * texelSize;
         float pcfDepth = texture(uShadowMap, projCoords.xy + offset).r;
         shadowSum += (projCoords.z - bias > pcfDepth) ? 0.0 : 1.0;
     }
 
-    float rawShadow = shadowSum / 16.0;
-    return mix(1.0, rawShadow, cascadeFade);
+    return mix(1.0, shadowSum / 16.0, cascadeFade);
 }
 
 void main() {
     vec3 safeN = length(vNormal) > 0.0001 ? normalize(vNormal) : vec3(0.0, 1.0, 0.0);
     vec3 geomN = gl_FrontFacing ? safeN : -safeN;
+
+    // Фактическая нормаль грани убирает вертикальные растяжки текстур и каустики на обрывах
+    vec3 rawFaceN = cross(dFdx(vWorldPos), dFdy(vWorldPos));
+    float faceLen = length(rawFaceN);
+    vec3 trueFaceN = (faceLen > 1e-6) ? (rawFaceN / faceLen) : geomN;
+    if (dot(trueFaceN, geomN) < 0.0) trueFaceN = -trueFaceN;
+
     vec3 viewVec = uCamPos - vWorldPos;
     float dist = length(viewVec);
     vec3 V = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
     vec3 L = normalize(uSunDir);
 
-    vec3 blend = max(abs(geomN), vec3(0.0001));
+    vec3 triN = geomN;
+    if (vParam.x < 0.5) {
+        float steepMismatch = smoothstep(0.08, 0.32, geomN.y - max(trueFaceN.y, 0.0));
+        triN = normalize(mix(geomN, trueFaceN, steepMismatch));
+    }
+
+    vec3 blend = max(abs(triN), vec3(0.0001));
     blend = blend * blend;
     blend = blend * blend;
     blend /= (blend.x + blend.y + blend.z);
 
-    vec3 N = geomN;
-    vec3 baseCol = clamp(vColor, 0.0, 1.0);
+    vec3 N = triN;
+    float vibStrength = (vParam.x > 1.5) ? uVibrance : mix(1.0, uVibrance, 0.45);
+    vec3 baseCol = applyVibrance(clamp(vColor, 0.0, 1.0), vibStrength);
     float ao = 1.0;
 
     if (vParam.x < 1.5) {
-        vec4 macroSample = sampleTriplanar(uRockTex, vWorldPos * 0.06, blend);
-        vec4 microSample = sampleTriplanar(uRockTex, vWorldPos * 0.30, blend);
-        vec4 fineSample  = sampleTriplanar(uRockTex, vWorldPos * 1.05, blend);
+        vec4 macroSample = sampleTriplanar(uRockTex, vWorldPos * 0.045, blend);
+        vec4 microSample = sampleTriplanar(uRockTex, vWorldPos * 0.24, blend);
+        float fineWeight = 1.0 - smoothstep(95.0, 225.0, dist);
+        vec4 fineSample  = (fineWeight > 0.01) ? sampleTriplanar(uRockTex, vWorldPos * 0.95, blend) : microSample;
 
         vec3 nMacro = macroSample.rgb * 2.0 - 1.0;
         vec3 nMicro = microSample.rgb * 2.0 - 1.0;
         vec3 nFine  = fineSample.rgb  * 2.0 - 1.0;
 
-        vec3 perturb = (nMacro * 0.50 + nMicro * 0.40 + nFine * 0.22);
-        N = normalize(geomN + perturb * 0.60);
+        vec3 perturb = (nMacro * 0.55 + nMicro * 0.44 + nFine * (0.24 * fineWeight));
+        N = normalize(triN + perturb * 0.72);
 
-        float strata = sin(vWorldPos.y * 1.6 + macroSample.a * 3.8) * 0.05;
-        float detailHeight = macroSample.a * 0.5 + microSample.a * 0.35 + fineSample.a * 0.15;
-        ao = smoothstep(0.10, 0.75, detailHeight) * 0.45 + 0.55;
+        float strata = sin(vWorldPos.y * 1.65 + macroSample.a * 4.8) * 0.075;
+        float detailHeight = macroSample.a * 0.52 + microSample.a * 0.34 + fineSample.a * 0.14;
+        ao = smoothstep(0.10, 0.78, detailHeight) * 0.52 + 0.48;
 
-        baseCol = clamp(baseCol * (0.74 + detailHeight * 0.52 + strata), 0.0, 1.0);
+        baseCol = clamp(baseCol * (0.68 + detailHeight * 0.52 + strata), 0.0, 1.15);
     } else {
         vec4 orgSample = sampleTriplanar(uRockTex, vWorldPos * 0.40, blend);
         N = normalize(geomN + (orgSample.rgb * 2.0 - 1.0) * 0.20);
-        baseCol *= (0.85 + orgSample.a * 0.32);
+        baseCol *= (0.86 + orgSample.a * 0.30);
     }
 
-    // Вычисляем коэффициент рассеянной подводной тени (1.0 = свет, 0.0 = полная тень)
-    float shadow = calcUnderwaterShadow(vLightSpacePos, geomN, L);
-    // В воде даже в глубокой тени остается мягкое рассеянное свечение толщи океана
-    float directShadow = mix(0.12, 1.0, shadow);
+    float shadow = calcUnderwaterShadow(vLightSpacePos, triN, trueFaceN, L);
+    float directShadow = mix(0.14, 1.0, shadow);
 
-    float wrapDiff = clamp((dot(N, L) + 0.50) / 1.50, 0.0, 1.0);
+    float abyssDark = smoothstep(-22.0, -56.0, vWorldPos.y);
+    float sunSurvival = mix(1.0, 0.03, abyssDark);
+    float ambSurvival = mix(1.0, 0.07, abyssDark);
+
+    float wrapDiff = clamp((dot(N, L) + 0.46) / 1.46, 0.0, 1.0);
     float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 H = normalize(L + V + vec3(0.0001));
     float specBase = clamp(dot(N, H), 0.0, 1.0);
-    float spec = pow(max(specBase, 0.0001), 24.0) * step(0.0002, specBase) * 0.20 * ao * shadow;
+    float spec = pow(max(specBase, 0.0001), 28.0) * step(0.0002, specBase) * 0.18 * ao * shadow * sunSurvival;
 
     float rimBase = clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0);
-    float rim = rimBase * rimBase * rimBase * 0.35 * mix(0.4, 1.0, shadow);
+    float rim = rimBase * rimBase * rimBase * 0.24 * mix(0.4, 1.0, shadow) * ambSurvival;
 
     float sss = 0.0;
     if (vParam.x > 1.5) {
         float backLight = clamp(dot(V, -L + N * 0.30), 0.0, 1.0);
-        sss = ((backLight * backLight) * 0.80 + 0.18) * mix(0.35, 1.0, shadow);
+        sss = ((backLight * backLight) * 0.65 + 0.14) * mix(0.35, 1.0, shadow) * sunSurvival;
     }
 
-    // Солнечная каустика гасится внутри теней от скал, кораблей, водорослей и плывущего кита!
-    float caust = organicCaustics(vWorldPos.xz + vWorldPos.y * 0.25, uTime);
-    float depthAtten = clamp((vWorldPos.y + 30.0) / 45.0, 0.18, 1.0);
-    float nyPos = clamp(N.y, 0.0, 1.0);
-    float caustMask = sqrt(nyPos) * depthAtten * ao * shadow;
+    // Проекция каустики вдоль солнечного луча + гашение на крутых обрывах
+    vec2 caustProj = vWorldPos.xz - vWorldPos.y * (L.xz / max(L.y, 0.45));
+    float caust = organicCaustics(caustProj, uTime);
+    float depthAtten = clamp((vWorldPos.y + 34.0) / 58.0, 0.05, 1.0);
+    float underwaterMask = 1.0 - smoothstep(26.2, 28.4, vWorldPos.y);
+    float slopeUp = min(max(triN.y, 0.0), max(trueFaceN.y, 0.0) + 0.08);
+    float slopeCaustFade = smoothstep(0.35, 0.80, slopeUp);
+    float sunFaceFade = smoothstep(0.08, 0.46, dot(trueFaceN, L));
+    float caustMask = slopeCaustFade * sunFaceFade * depthAtten * ao * shadow * underwaterMask * (1.0 - abyssDark);
 
-    vec3 sunColor = vec3(0.52, 0.96, 1.05);
-    // В тени окружающий свет смещается в более глубокий сине-бирюзовый оттенок воды
-    vec3 ambientColor = mix(uWaterColorDeep * 0.85, uWaterColorShallow,
+    vec3 sunColor = uSunColor;
+    vec3 ambientColor = mix(uWaterColorDeep * 0.90, uWaterColorShallow * 0.95,
                             clamp(hemi * 0.55 + depthAtten * 0.45, 0.0, 1.0) * mix(0.55, 1.0, shadow));
+    ambientColor *= ambSurvival;
 
-    vec3 litColor = baseCol * ao * (ambientColor * 0.72 + sunColor * wrapDiff * 0.98 * directShadow)
+    vec3 litColor = baseCol * ao * (ambientColor * 0.66 + sunColor * wrapDiff * 0.82 * directShadow * sunSurvival)
                   + sunColor * spec
                   + uWaterColorShallow * rim * depthAtten;
-    litColor += sunColor * caust * caustMask * 0.85;
-    litColor += vec3(0.32, 1.05, 0.72) * sss;
+    litColor += sunColor * caust * caustMask * 0.64;
+    litColor += mix(vec3(0.24, 0.88, 0.60), baseCol * 0.95, step(1.5, vParam.x) * (1.0 - step(2.5, vParam.x))) * sss;
 
-    if (vParam.x > 2.5) {
+    // Динамический биолюминесцентный свет от фонариков рыб-удильщиков
+    vec3 lureCol = vec3(0.45, 1.25, 1.15);
+    for (int i = 0; i < uLureCount; ++i) {
+        vec3 toL = uLurePos[i] - vWorldPos;
+        float d2 = dot(toL, toL);
+        if (d2 < 1150.0) {
+            float d = sqrt(max(d2, 0.01));
+            vec3 lDir = toL / d;
+            float pulse = 0.84 + 0.16 * sin(uTime * 3.1 + float(i) * 1.9);
+            float atten = pulse / (1.0 + 0.018 * d2);
+            float ndl = clamp((dot(N, lDir) + 0.25) / 1.25, 0.0, 1.0);
+            litColor += baseCol * lureCol * (ndl * atten * 3.4);
+        }
+    }
+
+    float bioFogScale = 1.0;
+    if (vParam.x > 3.5) {
+        float tip = clamp(vParam.y, 0.0, 1.0);
+        float pulse = 0.68 + 0.32 * sin(uTime * 2.2 + vWorldPos.x * 0.35 + vWorldPos.z * 0.35 + tip * 3.0);
+        litColor += vColor * (0.35 + tip * tip * 1.75) * pulse;
+        bioFogScale = 1.0 - tip * 0.52;
+    } else if (vParam.x > 2.5) {
         vec4 bioSample = sampleTriplanar(uRockTex, vWorldPos * 1.35, blend);
         float glowMask = smoothstep(0.77, 0.87, bioSample.a);
         float pulse = 0.55 + 0.45 * sin(uTime * 2.8 + vWorldPos.y * 1.5 + vWorldPos.x);
-        // Биолюминесценция еще ярче выделяется в затененных участках рифа
-        litColor += vec3(0.45, 1.35, 0.85) * glowMask * pulse * 1.25;
+        litColor += vec3(0.42, 1.25, 0.80) * glowMask * pulse * 1.05;
     }
 
-    float fogFactor = 1.0 - exp(-dist * 0.0145);
-    float sunDot = clamp(dot(V, -L), 0.0, 1.0);
-    float sunScatter = (sunDot * sunDot * sunDot * sunDot) * 0.35;
-    float viewY = clamp(V.y * -0.5 + 0.5, 0.0, 1.0);
-    vec3 fogColor = mix(uWaterColorShallow, uWaterColorDeep, clamp(viewY * 0.72 + (1.0 - depthAtten) * 0.35, 0.0, 1.0));
-    fogColor += sunColor * sunScatter * depthAtten;
+    // Спектральное поглощение воды по Бэру-Ламберту (красный гаснет быстрее синего/зелёного)
+    float fogDensity = mix(0.0112 * uFogScale, 0.0180, abyssDark);
+    vec3 transmittance = exp(-dist * bioFogScale * fogDensity * vec3(2.15, 1.12, 0.84));
 
-    vec3 outCol = mix(litColor, fogColor, clamp(fogFactor, 0.0, 1.0));
-    FragColor = vec4(clamp(outCol, 0.0, 10.0), 1.0);
+    vec3 rayDir = -V;
+    float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
+    float sunScatter = (sunDot * sunDot * sunDot * sunDot) * 0.16 * sunSurvival;
+    float viewUp = clamp(rayDir.y * 0.55 + 0.45, 0.0, 1.0);
+    vec3 fogColor = mix(uWaterColorDeep * 0.58, uWaterColorShallow * 0.82, viewUp * sqrt(viewUp));
+    fogColor += sunColor * sunScatter * depthAtten;
+    fogColor = mix(fogColor, vec3(0.004, 0.014, 0.028), abyssDark * 0.92);
+
+    vec3 outCol = litColor * transmittance + fogColor * (1.0 - transmittance);
+    FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
 }
 )";
 
 // ============================================================================
-// ШЕЙДЕРЫ ФАУНЫ (Рыбы, Скаты-манты и Гигантский Кит + Прием теней)
+// ШЕЙДЕРЫ ФАУНЫ (Рыбы, Скаты-манты, Кит, Рыба-удильщик)
 // ============================================================================
 
 inline const char* FaunaVert = R"(#version 330 core
@@ -345,7 +426,8 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec3 aColor;
 layout(location = 3) in vec4 aInstPosScale;
-layout(location = 4) in vec4 aInstRotPhase; // z: 0=fish, 1=manta, 2=whale
+layout(location = 4) in vec4 aInstRotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler), w: bank
+layout(location = 5) in vec4 aInstPitchTint; // x: pitch, yzw: colorTint
 
 uniform mat4 uViewProj;
 uniform mat4 uLightSpaceMatrix;
@@ -355,13 +437,13 @@ out vec3 vWorldPos;
 out vec3 vNormal;
 out vec3 vColor;
 out vec4 vLightSpacePos;
+out float vEmissive;
 
 void main() {
     vec3 localPos = aPos;
     vec3 localN = aNormal;
 
     if (aInstRotPhase.z < 0.5) {
-        // 0: Рыбы (горизонтальный изгиб хвоста)
         float phase = aInstRotPhase.y + uTime * 9.5;
         float tailWeight = smoothstep(0.35, -0.75, localPos.z);
         float wave = sin(phase - localPos.z * 3.8) * 0.14 * tailWeight;
@@ -369,7 +451,6 @@ void main() {
         localPos.x += wave;
         localN = normalize(vec3(localN.x - dWaveDz * localN.z, localN.y, localN.z));
     } else if (aInstRotPhase.z < 1.5) {
-        // 1: Скаты-манты (взмахи широких крыльев)
         float phase = aInstRotPhase.y + uTime * 2.6;
         float wingDist = abs(localPos.x);
         float wf = clamp(wingDist / 1.8, 0.0, 1.2);
@@ -379,8 +460,7 @@ void main() {
         float dFlapDx = -1.15 * sign(localPos.x) * cos(waveArg) * 0.42 * wingFactor;
         localPos.y += flap;
         localN = normalize(vec3(localN.x - dFlapDx * localN.y, localN.y, localN.z));
-    } else {
-        // 2: Гигантский горбатый кит (мощная вертикальная волна позвоночника и хвостовых лопастей)
+    } else if (aInstRotPhase.z < 2.5) {
         float phase = aInstRotPhase.y + uTime * 1.35;
         float tailWeight = smoothstep(1.2, -5.2, localPos.z);
         float w2 = tailWeight * tailWeight;
@@ -388,37 +468,46 @@ void main() {
         float spineWave = sin(waveArg) * 0.55 * w2;
         float dWaveDz = -0.55 * cos(waveArg) * 0.55 * w2;
 
-        // Плавное покачивание длинных грудных плавников кита
         float flipperWeight = clamp((abs(localPos.x) - 0.8) / 2.0, 0.0, 1.0);
         float finSway = sin(phase - abs(localPos.x) * 0.6) * 0.12 * flipperWeight;
 
         localPos.y += spineWave + finSway;
         localN = normalize(vec3(localN.x, localN.y, localN.z - dWaveDz * localN.y));
+    } else {
+        float phase = aInstRotPhase.y + uTime * 3.2;
+        float tailW = smoothstep(-0.1, -1.6, localPos.z);
+        localPos.x += sin(phase - localPos.z * 2.2) * 0.16 * tailW;
+
+        float finW = smoothstep(0.65, 1.25, abs(localPos.x));
+        localPos.y += sin(uTime * 4.2 + aInstRotPhase.y) * 0.08 * finW;
+
+        float lureW = smoothstep(0.45, 1.35, localPos.z) * smoothstep(0.15, 0.85, localPos.y);
+        localPos.x += sin(uTime * 2.1 + aInstRotPhase.y) * 0.09 * lureW;
+        localPos.y += cos(uTime * 1.7 + aInstRotPhase.y) * 0.07 * lureW;
     }
 
     localPos *= aInstPosScale.w;
 
     float yaw = aInstRotPhase.x;
+    float pitch = aInstPitchTint.x;
     float bank = aInstRotPhase.w;
+
     float cy = cos(yaw), sy = sin(yaw);
+    float cp = cos(pitch), sp = sin(pitch);
     float cb = cos(bank), sb = sin(bank);
 
-    mat3 rotY = mat3(
-        cy, 0.0, -sy,
-        0.0, 1.0, 0.0,
-        sy, 0.0, cy
-    );
-    mat3 rotZ = mat3(
-        cb, sb, 0.0,
-        -sb, cb, 0.0,
-        0.0, 0.0, 1.0
-    );
-    mat3 rot = rotY * rotZ;
+    mat3 rotY = mat3(cy, 0.0, -sy,  0.0, 1.0, 0.0,  sy, 0.0, cy);
+    mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp);
+    mat3 rotZ = mat3(cb, sb, 0.0,   -sb, cb, 0.0,   0.0, 0.0, 1.0);
+    mat3 rot = rotY * rotX * rotZ;
 
     vec3 worldPos = rot * localPos + aInstPosScale.xyz;
     vWorldPos = worldPos;
     vNormal = normalize(rot * localN);
-    vColor = aColor;
+
+    float maxC = max(aColor.r, max(aColor.g, aColor.b));
+    vEmissive = smoothstep(1.20, 1.65, maxC);
+    vColor = aColor * aInstPitchTint.yzw;
     vLightSpacePos = uLightSpaceMatrix * vec4(worldPos, 1.0);
 
     gl_Position = uViewProj * vec4(worldPos, 1.0);
@@ -430,17 +519,30 @@ in vec3 vWorldPos;
 in vec3 vNormal;
 in vec3 vColor;
 in vec4 vLightSpacePos;
+in float vEmissive;
 
 uniform sampler2D uRockTex;
 uniform sampler2D uShadowMap;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
+uniform vec3 uSunColor;
 uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
+uniform float uVibrance;
+uniform float uFogScale;
 uniform float uTime;
 uniform int uEnableShadows;
+uniform int uLureCount;
+uniform vec3 uLurePos[8];
 
 out vec4 FragColor;
+
+vec3 applyVibrance(vec3 col, float vib) {
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    float sat = max(col.r, max(col.g, col.b)) - min(col.r, min(col.g, col.b));
+    float boost = mix(vib, 1.0 + (vib - 1.0) * 0.45, sat);
+    return clamp(mix(vec3(lum), col, boost), 0.0, 1.25);
+}
 
 float sampleFaunaShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
     if (uEnableShadows == 0) return 1.0;
@@ -450,13 +552,13 @@ float sampleFaunaShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
         return 1.0;
     }
 
-    float bias = max(0.0035 * (1.0 - clamp(dot(N, L), 0.0, 1.0)), 0.0012);
+    float bias = max(0.0038 * (1.0 - clamp(dot(N, L), 0.0, 1.0)), 0.0014);
     vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap, 0));
     float shadow = 0.0;
     for (int x = -1; x <= 1; ++x) {
         for (int y = -1; y <= 1; ++y) {
             float d = texture(uShadowMap, projCoords.xy + vec2(x, y) * texelSize * 2.0).r;
-            shadow += (projCoords.z - bias > d) ? 0.20 : 1.0;
+            shadow += (projCoords.z - bias > d) ? 0.22 : 1.0;
         }
     }
     return shadow / 9.0;
@@ -464,43 +566,264 @@ float sampleFaunaShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
 
 void main() {
     vec3 N = length(vNormal) > 0.0001 ? normalize(vNormal) : vec3(0.0, 1.0, 0.0);
+    if (!gl_FrontFacing) N = -N;
     vec3 viewVec = uCamPos - vWorldPos;
     float dist = length(viewVec);
     vec3 V = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
     vec3 L = normalize(uSunDir);
 
     float shadow = sampleFaunaShadow(vLightSpacePos, N, L);
+    float abyssDark = smoothstep(-22.0, -56.0, vWorldPos.y);
+    float sunSurvival = mix(1.0, 0.04, abyssDark);
+    float ambSurvival = mix(1.0, 0.08, abyssDark);
 
-    float diff = clamp((dot(N, L) + 0.40) / 1.40, 0.0, 1.0) * shadow;
+    float diff = clamp((dot(N, L) + 0.40) / 1.40, 0.0, 1.0) * shadow * sunSurvival;
     vec3 H = normalize(L + V + vec3(0.0001));
     float specBase = clamp(dot(N, H), 0.0, 1.0);
-    float spec = pow(max(specBase, 0.0001), 32.0) * step(0.0002, specBase) * 0.40 * shadow;
+    float spec = pow(max(specBase, 0.0001), 32.0) * step(0.0002, specBase) * 0.36 * shadow * sunSurvival;
     float rimBase = clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0);
-    float rim = rimBase * rimBase * sqrt(rimBase) * 0.38;
+    float rim = rimBase * rimBase * sqrt(rimBase) * 0.28 * ambSurvival;
 
-    // Проекция водной каустики на спину кита и скатов
     vec2 caustUV = vWorldPos.xz * 0.12 + vec2(uTime * 0.05, -uTime * 0.04);
     float h1 = texture(uRockTex, caustUV).a;
     float h2 = texture(uRockTex, caustUV * 1.4 - vec2(uTime * 0.04)).a;
-    float caust = pow(clamp(1.0 - abs(h1 - h2) * 2.1, 0.0, 1.0), 4.0) * clamp(N.y, 0.0, 1.0) * shadow;
+    float caust = pow(clamp(1.0 - abs(h1 - h2) * 2.1, 0.0, 1.0), 4.0) * clamp(N.y, 0.0, 1.0) * shadow * (1.0 - abyssDark);
 
-    float depthAtten = clamp((vWorldPos.y + 30.0) / 45.0, 0.18, 1.0);
-    vec3 ambient = mix(uWaterColorDeep, uWaterColorShallow, depthAtten);
-    vec3 sunColor = vec3(0.58, 0.98, 1.05);
+    float depthAtten = clamp((vWorldPos.y + 34.0) / 58.0, 0.05, 1.0);
+    vec3 ambient = mix(uWaterColorDeep, uWaterColorShallow, depthAtten) * ambSurvival;
+    vec3 sunColor = uSunColor;
 
-    vec3 lit = vColor * (ambient * 0.72 + sunColor * diff * 0.88) + sunColor * (spec + rim + caust * 0.55);
+    vec3 baseCol = applyVibrance(clamp(vColor, 0.0, 1.0), uVibrance);
+    vec3 lit = baseCol * (ambient * 0.68 + sunColor * diff * 0.80) + sunColor * (spec + rim + caust * 0.45);
 
-    float fogFactor = 1.0 - exp(-dist * 0.0145);
-    float viewY = clamp(V.y * -0.5 + 0.5, 0.0, 1.0);
-    vec3 fogColor = mix(uWaterColorShallow, uWaterColorDeep, clamp(viewY * 0.75 + (1.0 - depthAtten) * 0.35, 0.0, 1.0));
+    vec3 lureCol = vec3(0.45, 1.25, 1.15);
+    for (int i = 0; i < uLureCount; ++i) {
+        vec3 toL = uLurePos[i] - vWorldPos;
+        float d2 = dot(toL, toL);
+        if (d2 < 900.0) {
+            float d = sqrt(max(d2, 0.01));
+            vec3 lDir = toL / d;
+            float pulse = 0.84 + 0.16 * sin(uTime * 3.1 + float(i) * 1.9);
+            float atten = pulse / (1.0 + 0.032 * d2);
+            float ndl = clamp((dot(N, lDir) + 0.35) / 1.35, 0.0, 1.0);
+            vec3 hL = normalize(lDir + V + vec3(0.0001));
+            float spL = pow(max(clamp(dot(N, hL), 0.0, 1.0), 0.0001), 24.0) * 0.55;
+            lit += (baseCol * ndl + vec3(spL)) * lureCol * (atten * 3.2);
+        }
+    }
 
-    vec3 outCol = mix(lit, fogColor, clamp(fogFactor, 0.0, 1.0));
-    FragColor = vec4(clamp(outCol, 0.0, 10.0), 1.0);
+    float pulse = 0.82 + 0.18 * sin(uTime * 3.4 + vWorldPos.x * 0.2);
+    vec3 emissiveTerm = vColor * vEmissive * pulse * 1.65;
+    lit += emissiveTerm;
+
+    float fogDensity = mix(0.0112 * uFogScale, 0.0180, abyssDark);
+    float emScale = mix(1.0, 0.38, vEmissive);
+    vec3 transmittance = exp(-dist * emScale * fogDensity * vec3(2.15, 1.12, 0.84));
+
+    vec3 rayDir = -V;
+    float viewUp = clamp(rayDir.y * 0.55 + 0.45, 0.0, 1.0);
+    vec3 fogColor = mix(uWaterColorDeep * 0.58, uWaterColorShallow * 0.82, viewUp * sqrt(viewUp));
+    fogColor = mix(fogColor, vec3(0.004, 0.014, 0.028), abyssDark * 0.92);
+
+    vec3 outCol = lit * transmittance + fogColor * (1.0 - transmittance);
+    FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
 }
 )";
 
 // ============================================================================
-// SKYBOX, ЛУЧИ, ЧАСТИЦЫ И ПОСТПРОДАКШЕН
+// 3D-ПОВЕРХНОСТЬ МОРЯ ИЗНУТРИ (Закон Снеллиуса + Полное внутреннее отражение + Реальные волны)
+// ============================================================================
+
+inline const char* WaterSurfaceVert = R"(#version 330 core
+layout(location = 0) in vec2 aLocalXZ;
+
+uniform mat4 uViewProj;
+uniform vec2 uWaterCenter;
+uniform float uWaterY;
+uniform float uTime;
+
+out vec3 vWorldPos;
+out vec2 vWaveGrad;
+out float vWaveH;
+
+void main() {
+    vec2 wxz = uWaterCenter + aLocalXZ;
+    float r = length(aLocalXZ);
+    // У самого горизонта (400..455 м) сглаживаем вертикальную волну для бесшовного стыка с фоном
+    float edgeDamp = 1.0 - smoothstep(340.0, 445.0, r);
+
+    float h = 0.0;
+    vec2 grad = vec2(0.0);
+
+    // 4 разнонаправленных океанских зыби (суммарная амплитуда ~0.38 м)
+    {
+        vec2 d = vec2(0.82, 0.57);
+        float k = 0.17, a = 0.17 * edgeDamp;
+        float ph = dot(wxz, d) * k + uTime * 1.15;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+    {
+        vec2 d = vec2(-0.64, 0.77);
+        float k = 0.27, a = 0.11 * edgeDamp;
+        float ph = dot(wxz, d) * k + uTime * 1.48;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+    {
+        vec2 d = vec2(0.31, -0.95);
+        float k = 0.44, a = 0.06 * edgeDamp;
+        float ph = dot(wxz, d) * k - uTime * 1.90;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+    {
+        vec2 d = vec2(-0.92, -0.39);
+        float k = 0.72, a = 0.035 * edgeDamp;
+        float ph = dot(wxz, d) * k + uTime * 2.35;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+
+    vec3 worldPos = vec3(wxz.x, uWaterY + h, wxz.y);
+    vWorldPos = worldPos;
+    vWaveGrad = grad;
+    vWaveH = h;
+    gl_Position = uViewProj * vec4(worldPos, 1.0);
+}
+)";
+
+inline const char* WaterSurfaceFrag = R"(#version 330 core
+in vec3 vWorldPos;
+in vec2 vWaveGrad;
+in float vWaveH;
+
+uniform sampler2D uRockTex;
+uniform vec3 uCamPos;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uWaterColorDeep;
+uniform vec3 uWaterColorShallow;
+uniform float uFogScale;
+uniform float uTime;
+
+out vec4 FragColor;
+
+void main() {
+    vec3 toCam = uCamPos - vWorldPos;
+    float dist = length(toCam);
+    vec3 V = dist > 0.0001 ? (toCam / dist) : vec3(0.0, -1.0, 0.0); // смотрит ВНИЗ к камере
+    vec3 rayDir = -V;                                              // луч от камеры ВВЕРХ к волне
+    vec3 L = normalize(uSunDir);
+
+    // Многомасштабная водная рябь (средние волны + тонкая капиллярная рябь вблизи)
+    vec2 p = vWorldPos.xz;
+    mat2 rot1 = mat2(0.80, -0.60, 0.60, 0.80);
+    mat2 rot2 = mat2(-0.60, -0.80, 0.80, -0.60);
+
+    vec4 s1 = texture(uRockTex, p * 0.055 + vec2(uTime * 0.026, -uTime * 0.019));
+    vec4 s2 = texture(uRockTex, (rot1 * p) * 0.135 + vec2(-uTime * 0.034, uTime * 0.028));
+    vec4 s3 = texture(uRockTex, (rot2 * p) * 0.310 + vec2(uTime * 0.052, uTime * 0.044));
+
+    float fineWeight = exp(-dist * 0.032);
+    vec4 s4 = (fineWeight > 0.02)
+                  ? texture(uRockTex, (rot1 * p) * 0.72 + vec2(-uTime * 0.085, uTime * 0.072))
+                  : s3;
+
+    vec2 texSlope = (s1.rg * 2.0 - 1.0) * 0.30
+                  + (s2.rg * 2.0 - 1.0) * 0.24
+                  + (s3.rg * 2.0 - 1.0) * (0.16 * (0.35 + 0.65 * fineWeight))
+                  + (s4.rg * 2.0 - 1.0) * (0.14 * fineWeight);
+
+    // Истинная нормаль нижней стороны волны (смотрит ВНИЗ в воду: N.y < 0)
+    vec2 totalSlope = vWaveGrad * 1.75 + texSlope * 0.78;
+    vec3 N = normalize(vec3(totalSlope.x, -1.0, totalSlope.y));
+
+    float waveCrest = clamp(0.5 + vWaveH * 1.1 + (s1.a - 0.5) * 0.45 + (s2.a - 0.5) * 0.35, 0.0, 1.0);
+    float causticNet = clamp(1.0 - abs(s1.a - s2.a) * 2.4, 0.0, 1.0);
+    causticNet = causticNet * causticNet * causticNet * causticNet;
+
+    // ------------------------------------------------------------------------
+    // ФИЗИКА ГРАНИЦЫ СРЕД: Закон Снеллиуса (вода n=1.333 -> воздух n=1.0)
+    // Критический угол полного внутреннего отражения = 48.6° (cosI = 0.6614)
+    // ------------------------------------------------------------------------
+    const float eta = 1.3333;
+    float cosI = clamp(dot(N, V), 0.0, 1.0);
+    float sin2I = max(0.0, 1.0 - cosI * cosI);
+    float sin2T = eta * eta * sin2I;
+
+    // 1. Отражённый свет глубины моря (Полное внутреннее отражение / TIR снаружи окна Снеллиуса)
+    vec3 R = reflect(rayDir, N); // уходит ВНИЗ в толщу моря
+    float downF = clamp(-R.y, 0.0, 1.0);
+    vec3 deepMirror = mix(uWaterColorShallow * 0.46, uWaterColorDeep * 0.34, pow(downF, 0.68));
+
+    // Живой глянцевый рельеф изнанки волн ("жидкая ртуть"): тёмные впадины + бирюзовые грани
+    float slopeLight = clamp(dot(vec3(totalSlope.x, 0.35, totalSlope.y), L) * 0.9 + 0.45, 0.0, 1.0);
+    vec3 tirCol = mix(deepMirror * 0.52, deepMirror * 1.38 + uWaterColorShallow * 0.14, smoothstep(0.20, 0.82, slopeLight * 0.65 + waveCrest * 0.35));
+
+    // Острые блики отражённого солнечного света на крутых изломах волн
+    vec3 H = normalize(L - rayDir + vec3(0.0001));
+    float specTIR = pow(clamp(dot(-N, H), 0.0, 1.0), 42.0);
+    tirCol += uSunColor * (specTIR * 0.38 + causticNet * 0.14);
+
+    // 2. Преломлённый свет внутри окна Снеллиуса (sin2T < 1.0)
+    float fresnel = 1.0;
+    vec3 refractedCol = tirCol;
+
+    if (sin2T < 0.999) {
+        float cosT = sqrt(max(1.0 - sin2T, 0.0));
+        float rs = (eta * cosI - cosT) / max(eta * cosI + cosT, 0.0001);
+        float rp = (cosI - eta * cosT) / max(cosI + eta * cosT, 0.0001);
+        fresnel = clamp(0.5 * (rs * rs + rp * rp), 0.02, 1.0);
+
+        // Истинный преломлённый луч T (резко гнётся на каждой грани волны!)
+        vec3 T = normalize(eta * rayDir + (eta * cosI - cosT) * N);
+        float skyElev = clamp(T.y, 0.0, 1.0);
+
+        // Насыщенное преломлённое небо сквозь воду — без выжженного белого засвета
+        vec3 zenithCol  = mix(uWaterColorShallow * 0.92, vec3(0.20, 0.66, 0.88), 0.65);
+        vec3 rimSkyCol  = mix(uWaterColorShallow * 1.10, uSunColor * 0.88, 0.45);
+        refractedCol = mix(rimSkyCol, zenithCol, pow(skyElev, 0.62));
+
+        // Преломлённый солнечный диск, разорванный рябью волн на сияющие фрагменты
+        float sunDot = clamp(dot(T, L), 0.0, 1.0);
+        float s2 = sunDot * sunDot;
+        float s4 = s2 * s2;
+        float s16 = s4 * s4 * s4 * s4;
+        float s64 = s16 * s16 * s16 * s16;
+        refractedCol += uSunColor * (s4 * 0.18 + s16 * 0.48 + s64 * 0.95);
+
+        // Рельефный контраст водной линзы на каждой волне
+        refractedCol *= (0.76 + 0.38 * waveCrest);
+        refractedCol += uSunColor * causticNet * 0.24 * (0.4 + 0.6 * fineWeight);
+    }
+
+    // Смешиваем преломлённое окно и тёмное зеркало полного внутреннего отражения по Френелю
+    vec3 surfaceCol = mix(refractedCol, tirCol, fresnel);
+
+    // Тонкая переливающаяся кайма на самой границе критического угла (sin2T ~ 1.0)
+    float criticalBand = exp(-pow((sin2T - 0.98) / 0.11, 2.0));
+    surfaceCol += mix(uWaterColorShallow, uSunColor, 0.45) * criticalBand * (0.14 + 0.18 * causticNet);
+
+    // 3. Поглощение толщей воды между камерой и поверхностью (точно согласовано со SkyboxFrag)
+    float camAbyss = smoothstep(-20.0, -54.0, uCamPos.y);
+    float fogDensity = mix(0.0112 * uFogScale, 0.0180, camAbyss);
+    vec3 transmittance = exp(-dist * fogDensity * vec3(2.15, 1.12, 0.84));
+
+    float sunForward = clamp(dot(rayDir, L), 0.0, 1.0);
+    float sf2 = sunForward * sunForward;
+    float viewUp = clamp(rayDir.y * 0.55 + 0.45, 0.0, 1.0);
+    vec3 fogColor = mix(uWaterColorDeep * 0.58, uWaterColorShallow * 0.82, viewUp * sqrt(viewUp));
+    fogColor += uSunColor * (sf2 * sf2 * 0.16) * (1.0 - camAbyss);
+    fogColor = mix(fogColor, vec3(0.004, 0.014, 0.028), camAbyss * 0.92);
+
+    vec3 outCol = surfaceCol * transmittance + fogColor * (1.0 - transmittance);
+    FragColor = vec4(clamp(outCol, 0.0, 6.0), 1.0);
+}
+)";
+
+// ============================================================================
+// SKYBOX (Плотная толща океана на горизонте и в глубине, согласована с WaterSurfaceFrag)
 // ============================================================================
 
 inline const char* SkyboxVert = R"(#version 330 core
@@ -514,69 +837,36 @@ void main() {
 
 inline const char* SkyboxFrag = R"(#version 330 core
 in vec2 vNDC;
-uniform sampler2D uRockTex;
 uniform mat4 uInvViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
+uniform vec3 uSunColor;
 uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
-uniform float uTime;
 
 out vec4 FragColor;
-
-vec3 sampleWaveNormalAndFoam(vec2 uv, float t) {
-    mat2 rot1 = mat2(0.80, -0.60, 0.60, 0.80);
-    mat2 rot2 = mat2(-0.60, -0.80, 0.80, -0.60);
-
-    vec2 p1 = uv * 0.042 + vec2(t * 0.025, -t * 0.018);
-    vec2 p2 = (rot1 * uv) * 0.090 + vec2(-t * 0.032, t * 0.028);
-    vec2 p3 = (rot2 * uv) * 0.195 + vec2(t * 0.045, t * 0.041);
-
-    vec4 s1 = texture(uRockTex, p1);
-    vec4 s2 = texture(uRockTex, p2);
-    vec4 s3 = texture(uRockTex, p3);
-
-    vec3 n = (s1.rgb * 2.0 - 1.0) * 0.55
-           + (s2.rgb * 2.0 - 1.0) * 0.30
-           + (s3.rgb * 2.0 - 1.0) * 0.15;
-    float c = clamp(1.0 - abs(s1.a - s2.a) * 2.2, 0.0, 1.0);
-    float c2 = c * c;
-    return vec3(n.xy, c2 * c2);
-}
 
 void main() {
     vec4 worldTarget = uInvViewProj * vec4(vNDC, 1.0, 1.0);
     vec3 dir = normalize(worldTarget.xyz / max(abs(worldTarget.w), 0.0001) - uCamPos);
+    vec3 L = normalize(uSunDir);
 
+    float camAbyss = smoothstep(-20.0, -54.0, uCamPos.y);
     float upFactor = clamp(dir.y * 0.55 + 0.45, 0.0, 1.0);
-    vec3 col = mix(uWaterColorDeep * 0.45, uWaterColorShallow, upFactor * sqrt(upFactor));
+    vec3 col = mix(uWaterColorDeep * 0.58, uWaterColorShallow * 0.82, upFactor * sqrt(upFactor));
 
-    if (dir.y > 0.02) {
-        float planeDist = 30.0 / max(dir.y, 0.02);
-        vec2 surfPos = uCamPos.xz + dir.xz * planeDist;
+    float sunDot = clamp(dot(dir, L), 0.0, 1.0);
+    float s2 = sunDot * sunDot;
+    col += uSunColor * (s2 * s2 * 0.16) * (1.0 - camAbyss);
+    col = mix(col, vec3(0.004, 0.014, 0.028), camAbyss * 0.92);
 
-        vec3 wave = sampleWaveNormalAndFoam(surfPos, uTime);
-        float horizonFade = exp(-planeDist * 0.0085);
-
-        float cosTheta = clamp(dir.y + wave.x * 0.12 * horizonFade, 0.0, 1.0);
-        float snellWindow = smoothstep(0.50, 0.78, cosTheta);
-
-        vec3 refractedDir = normalize(dir + vec3(wave.x, 0.0, wave.y) * 0.22);
-        float sunDot = clamp(dot(refractedDir, normalize(uSunDir)), 0.0, 1.0);
-        float s2 = sunDot * sunDot;
-        float s4 = s2 * s2;
-        float sunDisk = s4 * s4;
-
-        vec3 skyBright = vec3(0.68, 1.08, 1.15);
-        vec3 surfaceCol = mix(uWaterColorShallow * 0.85, skyBright, snellWindow * 0.70);
-        surfaceCol += skyBright * (sunDisk * 0.90 + wave.z * 0.40 * snellWindow);
-
-        col = mix(col, surfaceCol, horizonFade * smoothstep(0.02, 0.22, dir.y));
-    }
-
-    FragColor = vec4(clamp(col, 0.0, 10.0), 1.0);
+    FragColor = vec4(clamp(col, 0.0, 4.0), 1.0);
 }
 )";
+
+// ============================================================================
+// ЛУЧИ, ЧАСТИЦЫ И ПОСТПРОДАКШЕН
+// ============================================================================
 
 inline const char* TranslucentVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
@@ -608,7 +898,8 @@ out vec4 FragColor;
 
 void main() {
     float dist = length(uCamPos - vWorldPos);
-    float fogAtten = exp(-dist * 0.012);
+    float fogAtten = exp(-dist * 0.0115);
+    float abyssFade = 1.0 - smoothstep(-22.0, -44.0, vWorldPos.y);
 
     float uClamped = clamp(vUV.x, 0.0, 1.0);
     float vClamped = clamp(vUV.y, 0.0, 1.0);
@@ -618,8 +909,8 @@ void main() {
     float verticalFade = smoothstep(0.0, 0.25, vClamped) * (1.0 - smoothstep(0.65, 1.0, vClamped));
     float shimmer = 0.75 + 0.25 * sin(uTime * 1.4 + vWorldPos.x * 0.25 + vWorldPos.z * 0.25);
 
-    float alpha = clamp(vColor.a * edgeFade * verticalFade * shimmer * fogAtten, 0.0, 1.0);
-    FragColor = vec4(clamp(vColor.rgb, 0.0, 4.0), alpha);
+    float alpha = clamp(vColor.a * edgeFade * verticalFade * shimmer * fogAtten * abyssFade, 0.0, 1.0);
+    FragColor = vec4(clamp(vColor.rgb, 0.0, 3.0), alpha);
 }
 )";
 
@@ -659,11 +950,11 @@ void main() {
         float hBase = max(0.0, 1.0 - length(uv - vec2(-0.35, -0.35)) * 1.8);
         float highlight = hBase * hBase * hBase;
         float alpha = clamp(rim * 0.75 + highlight * 0.9, 0.05, 0.95);
-        FragColor = vec4(clamp(vColor + vec3(highlight * 0.65), 0.0, 4.0), alpha);
+        FragColor = vec4(clamp(vColor + vec3(highlight * 0.55), 0.0, 3.0), alpha);
     } else {
         float oneMinusR2 = clamp(1.0 - r2, 0.0, 1.0);
         float glow = oneMinusR2 * oneMinusR2;
-        FragColor = vec4(clamp(vColor * 1.35, 0.0, 4.0), glow * 0.90);
+        FragColor = vec4(clamp(vColor * 1.25, 0.0, 3.0), glow * 0.85);
     }
 }
 )";
@@ -687,14 +978,15 @@ out vec4 FragColor;
 
 vec3 sanitizeHDR(vec3 c) {
     if (any(isnan(c)) || any(isinf(c))) return vec3(0.0);
-    return clamp(c, vec3(0.0), vec3(12.0));
+    return clamp(c, vec3(0.0), vec3(10.0));
 }
 
+// Выделяем только действительно яркие блики и биолюминесценцию, не засвечивая воду
 vec3 extractScatteredLight(vec3 c) {
     vec3 safeC = sanitizeHDR(c);
     float lum = dot(safeC, vec3(0.2126, 0.7152, 0.0722));
-    float softKnee = smoothstep(0.28, 1.10, lum);
-    return safeC * (0.22 + softKnee * 0.95);
+    float softKnee = smoothstep(0.68, 1.65, lum);
+    return safeC * (0.04 + softKnee * 0.75);
 }
 
 void main() {
@@ -729,6 +1021,7 @@ uniform sampler2D uBloomTex;
 uniform vec2 uInvResolution;
 uniform vec3 uSunScreenPos;
 uniform vec3 uWaterTint;
+uniform float uSurfaceProximity;
 uniform float uTime;
 uniform int uEnablePost;
 
@@ -736,12 +1029,12 @@ out vec4 FragColor;
 
 vec3 sanitizeHDR(vec3 c) {
     if (any(isnan(c)) || any(isinf(c))) return vec3(0.0);
-    return clamp(c, vec3(0.0), vec3(12.0));
+    return clamp(c, vec3(0.0), vec3(10.0));
 }
 
 float linearizeDepth(float d) {
-    float zNear = 0.2;
-    float zFar  = 220.0;
+    float zNear = 0.25;
+    float zFar  = 460.0;
     float z_n = 2.0 * clamp(d, 0.0, 1.0) - 1.0;
     return (2.0 * zNear * zFar) / max(zFar + zNear - z_n * (zFar - zNear), 0.0001);
 }
@@ -765,23 +1058,24 @@ void main() {
     vec2 waveOffset = vec2(
         sin(vUV.y * 14.0 + uTime * 1.3) * cos(vUV.x * 11.0 + uTime * 0.9),
         cos(vUV.x * 13.0 - uTime * 1.1) * sin(vUV.y * 12.0 + uTime * 0.8)
-    ) * 0.0008;
+    ) * 0.0006;
     vec2 uv = clamp(vUV + waveOffset, 0.001, 0.999);
 
+    // Благодаря реальному 3D-мешу воды linDepth для близких волн мал (2..15 м), и они остаются чёткими!
     float rawDepth = texture(uSceneDepthTex, uv).r;
     float linDepth = linearizeDepth(rawDepth);
-    float turbidityBlur = clamp((linDepth - 10.0) / 55.0, 0.15, 1.0);
+    float turbidityBlur = clamp((linDepth - 16.0) / 110.0, 0.04, 1.0);
 
     vec2 edgeVec = uv - 0.5;
     float radialDist = length(edgeVec);
 
-    vec2 caShift = edgeVec * (0.0018 * radialDist);
+    vec2 caShift = edgeVec * (0.0014 * radialDist);
     vec3 centerCol;
     centerCol.r = sanitizeHDR(texture(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999)).rgb).r;
     centerCol.g = sanitizeHDR(texture(uSceneColorTex, uv).rgb).g;
     centerCol.b = sanitizeHDR(texture(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999)).rgb).b;
 
-    vec2 blurStep = uInvResolution * (1.2 + turbidityBlur * 2.2);
+    vec2 blurStep = uInvResolution * (1.0 + turbidityBlur * 1.8);
     vec3 ringCol = (
         sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2( blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
         sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
@@ -789,10 +1083,10 @@ void main() {
         sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x, -blurStep.y), 0.001, 0.999)).rgb)
     ) * 0.25;
 
-    vec3 sceneCol = mix(centerCol, ringCol, turbidityBlur * 0.42);
+    vec3 sceneCol = mix(centerCol, ringCol, turbidityBlur * 0.34);
 
     vec3 scatteredBloom = sanitizeHDR(texture(uBloomTex, uv).rgb);
-    sceneCol = mix(sceneCol, scatteredBloom, 0.24) + scatteredBloom * 0.34;
+    sceneCol = mix(sceneCol, scatteredBloom, 0.08) + scatteredBloom * 0.20;
 
     if (uSunScreenPos.z > 0.0) {
         vec2 sunUV = uSunScreenPos.xy;
@@ -807,24 +1101,19 @@ void main() {
         for (int i = 0; i < 24; ++i) {
             sampleUV -= stepUV;
             vec2 clampedUV = clamp(sampleUV, 0.002, 0.998);
-            float sDepth = texture(uSceneDepthTex, clampedUV).r;
-            float skyMask = smoothstep(0.965, 0.9999, sDepth) * 0.75 + 0.25;
             vec3 sColor = sanitizeHDR(texture(uBloomTex, clampedUV).rgb);
-            godRayAcc += sColor * skyMask * illuminationDecay;
+            godRayAcc += sColor * illuminationDecay;
             illuminationDecay *= 0.935;
         }
 
-        float rayFade = clamp(uSunScreenPos.z, 0.0, 1.0) * exp(-sunDist * 1.15);
-        sceneCol += godRayAcc * (0.026 * rayFade);
+        float rayFade = clamp(uSunScreenPos.z, 0.0, 1.0) * exp(-sunDist * 1.25);
+        sceneCol += godRayAcc * (0.020 * rayFade);
     }
 
-    float topGrad = clamp(vUV.y, 0.0, 1.0);
-    sceneCol += uWaterTint * (topGrad * topGrad) * 0.10;
+    vec3 mapped = acesToneMapping(sceneCol * 0.96);
+    mapped = pow(max(mapped, vec3(0.0001)), vec3(0.98));
 
-    vec3 mapped = acesToneMapping(sceneCol * 1.12);
-    mapped = pow(max(mapped, vec3(0.0001)), vec3(0.95));
-
-    float vignette = smoothstep(1.08, 0.32, radialDist);
+    float vignette = smoothstep(1.10, 0.32, radialDist);
     mapped *= mix(0.68, 1.0, vignette);
 
     FragColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
