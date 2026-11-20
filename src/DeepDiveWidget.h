@@ -9,6 +9,7 @@
 #include <array>
 #include <vector>
 #include "GpuCapabilities.h"
+#include "GamepadInput.h"
 #include "WorldGenerator.h"
 #include "UnderwaterAudio.h"
 
@@ -48,6 +49,8 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void focusInEvent(QFocusEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
 
 private:
     struct FaunaLodBuffers {
@@ -79,6 +82,7 @@ private:
                               size_t maxInstCount);
     void deleteFaunaLodBuffers(FaunaLodBuffers& buf);
 
+    void setMouseCapture(bool enable);
     void rebuildWorld(uint32_t seed);
     void spawnWhalePass(bool nearPlayer);
     float sampleWhaleClearance(float x, float z) const;
@@ -114,13 +118,17 @@ private:
     uint8_t m_whaleLodState = 0;
 
     UnderwaterAudioEngine* m_audioEngine = nullptr;
+    GamepadInput m_gamepad;
+    bool m_gamepadConnected = false;
+    bool m_gamepadIsXInput = false;
+    bool m_wasPlayerColliding = false;
 
     QOpenGLShaderProgram m_shadowEnvShader;
     QOpenGLShaderProgram m_shadowFaunaShader;
     QOpenGLShaderProgram m_envShader;
     QOpenGLShaderProgram m_faunaShader;
-    QOpenGLShaderProgram m_skyShader;
     QOpenGLShaderProgram m_waterShader;
+    QOpenGLShaderProgram m_skyShader;
     QOpenGLShaderProgram m_rayShader;
     QOpenGLShaderProgram m_particleShader;
     QOpenGLShaderProgram m_scatterBlurShader;
@@ -145,9 +153,10 @@ private:
     std::array<QVector3D, MAX_LURE_LIGHTS> m_lurePositions{};
     int m_lureCount = 0;
 
-    GLuint m_skyVAO = 0, m_skyVBO = 0;
     GLuint m_waterVAO = 0, m_waterVBO = 0, m_waterEBO = 0;
     GLsizei m_waterIndexCount = 0;
+
+    GLuint m_skyVAO = 0, m_skyVBO = 0;
     GLuint m_rayVAO = 0, m_rayVBO = 0;
     GLuint m_particleVAO = 0, m_particleVBO = 0;
 
@@ -168,7 +177,7 @@ private:
     GLuint m_bloomFBO[2] = {0, 0};
     GLuint m_bloomTex[2] = {0, 0};
 
-    // Автономный горбатый кит (высокое крейсирование в открытой воде с обходом кекуров)
+    // Автономный горбатый кит
     FaunaAgent m_whale;
     QVector3D m_whaleWaypoint{0.0f, 20.5f, 0.0f};
     float m_whaleWaypointTimer = 0.0f;
@@ -179,8 +188,11 @@ private:
     QVector3D m_camVel{0.0f, 0.0f, 0.0f};
     float m_yaw = 0.0f;
     float m_pitch = 0.06f;
-    bool m_mouseLooking = false;
-    QPoint m_lastMousePos;
+
+    // Свободный обзор мышью без зажатой ЛКМ
+    bool m_mouseCaptured = false;
+    bool m_userReleasedMouse = false;
+    bool m_skipNextMouseDelta = false;
     QSet<int> m_pressedKeys;
 
     QTimer m_timer;

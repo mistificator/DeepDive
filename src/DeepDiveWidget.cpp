@@ -1,6 +1,8 @@
 #include "DeepDiveWidget.h"
 #include "Shaders.h"
 #include "Noise.h"
+#include <QCursor>
+#include <QFocusEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -38,7 +40,6 @@ inline FaunaGpuInstance packFaunaInstance(const FaunaAgent& a) {
     return gpu;
 }
 
-// Переключение уровня LOD с гистерезисом (±band) — убирает мерцание/перещёлкивание на границе
 inline int updateLodWithHysteresis(int currentLod, float dist,
                                    const float* thresholds, int maxLod, float band) {
     while (currentLod < maxLod && dist > thresholds[currentLod] + band) {
@@ -99,6 +100,7 @@ bool FrustumPlanes::intersectsSphere(const QVector3D& center, float radius) cons
 DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget* parent)
     : QOpenGLWidget(parent), m_adapters(std::move(adapters)) {
     setFocusPolicy(Qt::StrongFocus);
+    setMouseTracking(true);
     setMinimumSize(1280, 720);
 
     m_audioEngine = new UnderwaterAudioEngine(this);
@@ -109,6 +111,7 @@ DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget*
 }
 
 DeepDiveWidget::~DeepDiveWidget() {
+    setMouseCapture(false);
     makeCurrent();
     destroyPostProcessBuffers();
     if (m_shadowFBO) glDeleteFramebuffers(1, &m_shadowFBO);
@@ -132,16 +135,31 @@ DeepDiveWidget::~DeepDiveWidget() {
     deleteFaunaLodBuffers(m_anglerLod0);
     deleteFaunaLodBuffers(m_anglerLod1);
 
-    if (m_skyVAO) glDeleteVertexArrays(1, &m_skyVAO);
-    if (m_skyVBO) glDeleteBuffers(1, &m_skyVBO);
     if (m_waterVAO) glDeleteVertexArrays(1, &m_waterVAO);
     if (m_waterVBO) glDeleteBuffers(1, &m_waterVBO);
     if (m_waterEBO) glDeleteBuffers(1, &m_waterEBO);
+
+    if (m_skyVAO) glDeleteVertexArrays(1, &m_skyVAO);
+    if (m_skyVBO) glDeleteBuffers(1, &m_skyVBO);
     if (m_rayVAO) glDeleteVertexArrays(1, &m_rayVAO);
     if (m_rayVBO) glDeleteBuffers(1, &m_rayVBO);
     if (m_particleVAO) glDeleteVertexArrays(1, &m_particleVAO);
     if (m_particleVBO) glDeleteBuffers(1, &m_particleVBO);
     doneCurrent();
+}
+
+void DeepDiveWidget::setMouseCapture(bool enable) {
+    if (enable) {
+        if (!isVisible() || width() < 4 || height() < 4) return;
+        m_mouseCaptured = true;
+        m_skipNextMouseDelta = true;
+        setCursor(Qt::BlankCursor);
+        QCursor::setPos(mapToGlobal(QPoint(width() / 2, height() / 2)));
+    } else {
+        m_mouseCaptured = false;
+        m_skipNextMouseDelta = false;
+        unsetCursor();
+    }
 }
 
 void DeepDiveWidget::queryOpenGLCapabilities() {
@@ -202,7 +220,6 @@ void DeepDiveWidget::createWaterSurfaceMesh() {
 
     for (int r = 1; r <= RINGS; ++r) {
         float t = static_cast<float>(r) / static_cast<float>(RINGS);
-        // Квадратичное сгущение колец прямо над камерой для детальных волн вблизи
         float rad = RADIUS * std::pow(t, 2.2f);
         for (int s = 0; s < SECTORS; ++s) {
             float ang = (TWO_PI * static_cast<float>(s)) / static_cast<float>(SECTORS);
@@ -213,14 +230,12 @@ void DeepDiveWidget::createWaterSurfaceMesh() {
     std::vector<uint32_t> inds;
     inds.reserve(SECTORS * 3 + (RINGS - 1) * SECTORS * 6);
 
-    // Внутренний веер вокруг центра
     for (int s = 0; s < SECTORS; ++s) {
         uint32_t i1 = 1 + static_cast<uint32_t>(s);
         uint32_t i2 = 1 + static_cast<uint32_t>((s + 1) % SECTORS);
         inds.insert(inds.end(), {0u, i1, i2});
     }
 
-    // Концентрические кольца до горизонта
     for (int r = 1; r < RINGS; ++r) {
         uint32_t ringA = 1 + static_cast<uint32_t>((r - 1) * SECTORS);
         uint32_t ringB = 1 + static_cast<uint32_t>(r * SECTORS);
@@ -501,13 +516,13 @@ void DeepDiveWidget::initializeGL() {
     m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::FaunaFrag);
     m_faunaShader.link();
 
-    m_skyShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::SkyboxVert);
-    m_skyShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::SkyboxFrag);
-    m_skyShader.link();
-
     m_waterShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::WaterSurfaceVert);
     m_waterShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::WaterSurfaceFrag);
     m_waterShader.link();
+
+    m_skyShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::SkyboxVert);
+    m_skyShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::SkyboxFrag);
+    m_skyShader.link();
 
     m_rayShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::TranslucentVert);
     m_rayShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::TranslucentFrag);
@@ -642,20 +657,18 @@ void DeepDiveWidget::rebuildWorld(uint32_t seed) {
 }
 
 // ============================================================================
-// НАВИГАЦИЯ КИТА В ВЫСОКОЙ ОТКРЫТОЙ ВОДЕ (без застреваний и дёрганий)
+// НАВИГАЦИЯ КИТА В ВЫСОКОЙ ОТКРЫТОЙ ВОДЕ
 // ============================================================================
 
 float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
-    constexpr float CRUISE_CEILING = ProcMath::WATER_SURFACE_Y - 5.2f; // ~22.8 м
+    constexpr float CRUISE_CEILING = ProcMath::WATER_SURFACE_Y - 5.2f;
 
-    // 1. Внешнее скальное кольцо кальдеры — не приближаемся к отвесным стенам
     float r = std::sqrt(x * x + z * z);
     float wallF = ProcMath::sampleBasinWallFactor(x, z, m_seed);
     if (wallF > 0.04f || r > ProcMath::BASIN_INNER_RADIUS - 75.0f) {
         return -60.0f - (r - (ProcMath::BASIN_INNER_RADIUS - 75.0f)) * 0.8f - wallF * 80.0f;
     }
 
-    // 2. Максимальная высота рельефа в пятне 18 м вокруг позиции кита
     float maxTerrain = ProcMath::sampleTerrainHeight(x, z, m_seed);
     constexpr float offsets[4][2] = {{18.0f, 0.0f}, {-18.0f, 0.0f}, {0.0f, 18.0f}, {0.0f, -18.0f}};
     for (const auto& o : offsets) {
@@ -664,7 +677,6 @@ float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
 
     float clearance = CRUISE_CEILING - maxTerrain;
 
-    // 3. Явный обход 22 центральных скальных пиков и кекуров с запасом под 28-метровый корпус
     const auto& spires = ProcMath::getCentralSpires(m_seed);
     for (const auto& sp : spires) {
         float dx = x - sp.x;
@@ -673,7 +685,6 @@ float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
         float d2 = dx * dx + dz * dz;
         if (d2 < keepOut * keepOut) {
             float d = std::sqrt(d2);
-            // Чем выше пик, тем шире и строже коридор обхода
             float peakPenalty = (keepOut - d) * (0.65f + ProcMath::smoothstep(24.0f, 52.0f, sp.height) * 0.95f);
             clearance -= peakPenalty;
         }
@@ -683,7 +694,7 @@ float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
 }
 
 QVector3D DeepDiveWidget::pickWhaleOpenWaypoint(const QVector3D& nearAnchor, float minDist, float maxDist) const {
-    constexpr float CRUISE_Y = ProcMath::WATER_SURFACE_Y - 7.5f; // ~20.5 м
+    constexpr float CRUISE_Y = ProcMath::WATER_SURFACE_Y - 7.5f;
     QVector3D bestPos(0.0f, CRUISE_Y, 0.0f);
     float bestScore = -1e9f;
 
@@ -697,7 +708,6 @@ QVector3D DeepDiveWidget::pickWhaleOpenWaypoint(const QVector3D& nearAnchor, flo
         float cx = nearAnchor.x() + std::cos(ang) * dist;
         float cz = nearAnchor.z() + std::sin(ang) * dist;
 
-        // Держим цели в просторной центральной зоне кальдеры
         float rad = std::sqrt(cx * cx + cz * cz);
         float maxPlayR = ProcMath::BASIN_INNER_RADIUS - 105.0f;
         if (rad > maxPlayR) {
@@ -707,7 +717,6 @@ QVector3D DeepDiveWidget::pickWhaleOpenWaypoint(const QVector3D& nearAnchor, flo
         }
 
         float clear = sampleWhaleClearance(cx, cz);
-        // Проверяем также середину отрезка от текущего положения кита, чтобы не гнать его сквозь кекур
         float midClear = sampleWhaleClearance(0.5f * (m_whale.pos.x() + cx), 0.5f * (m_whale.pos.z() + cz));
         float score = std::min(clear, midClear * 1.1f) + clear * 0.35f;
 
@@ -727,7 +736,7 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
     m_whale.scale = 2.65f;
     m_whale.boundingRadius = 5.0f;
     m_whale.cruiseSpeed = 5.2f;
-    m_whale.preferredDepth = ProcMath::WATER_SURFACE_Y - 7.5f; // ~20.5 м
+    m_whale.preferredDepth = ProcMath::WATER_SURFACE_Y - 7.5f;
     m_whale.homeCenter = QVector3D(0.0f, m_whale.preferredDepth, 0.0f);
     m_whale.homeRadius = ProcMath::BASIN_INNER_RADIUS - 115.0f;
     m_whale.tint = QVector3D(1.0f, 1.0f, 1.0f);
@@ -777,7 +786,6 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
     m_whale.vel = bestDir * m_whale.cruiseSpeed;
     m_whaleWanderAngle = m_whale.yaw;
 
-    // Первая цель — далеко впереди по свободному коридору
     QVector3D forwardHint = bestPos + bestDir * 150.0f;
     if (sampleWhaleClearance(forwardHint.x(), forwardHint.z()) > 12.0f) {
         m_whaleWaypoint = QVector3D(forwardHint.x(), 20.0f, forwardHint.z());
@@ -789,7 +797,6 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
 }
 
 void DeepDiveWidget::updateWhaleNavigation(float dt) {
-    // 1. Обновляем путевую точку в открытой воде при приближении или по таймеру
     QVector3D toWp(m_whaleWaypoint.x() - m_whale.pos.x(), 0.0f, m_whaleWaypoint.z() - m_whale.pos.z());
     float distToWp = toWp.length();
     m_whaleWaypointTimer -= dt;
@@ -800,14 +807,12 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         distToWp = toWp.length();
     }
 
-    // Желаемый курс к открытой точке с лёгким естественным рысканием
     QVector3D desiredHoriz = (distToWp > 1.0f)
                                  ? (toWp / distToWp)
                                  : QVector3D(std::sin(m_whale.yaw), 0.0f, std::cos(m_whale.yaw));
     float baseTargetYaw = std::atan2(desiredHoriz.x(), desiredHoriz.z())
                           + std::sin(m_time * 0.16f) * 0.14f;
 
-    // 2. Веерный упреждающий выбор самого свободного курса (5 лучей на 24, 48 и 76 м)
     constexpr float PROBE_ANGLES[5] = {0.0f, 0.42f, -0.42f, 0.90f, -0.90f};
     constexpr float PROBE_DISTS[3]  = {24.0f, 48.0f, 76.0f};
 
@@ -830,7 +835,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         avgClear /= 3.0f;
         if (b == 0) straightMinClear = minClear;
 
-        // Оцениваем: сначала чистота воды, затем совпадение с целевым направлением
         float align = std::cos(wrapAngle(candYaw - baseTargetYaw));
         float turnPenalty = std::abs(PROBE_ANGLES[b]) * 4.5f;
         float score = std::min(minClear, 24.0f) * 2.4f + std::min(avgClear, 28.0f) * 0.6f
@@ -842,10 +846,8 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         }
     }
 
-    // Если впереди чисто — идём на путевую точку, иначе заранее плавно обходим скалу по лучшему лучу
     float chosenYaw = (straightMinClear > 14.0f) ? baseTargetYaw : bestBeamYaw;
 
-    // Мягкий приоритет возврата к центру, если кит подошёл к внешнему краю бассейна
     float distFromCenter = std::sqrt(m_whale.pos.x() * m_whale.pos.x() + m_whale.pos.z() * m_whale.pos.z());
     if (distFromCenter > ProcMath::BASIN_INNER_RADIUS - 105.0f) {
         float inwardYaw = std::atan2(-m_whale.pos.x(), -m_whale.pos.z());
@@ -855,20 +857,18 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         chosenYaw = wrapAngle(chosenYaw + wrapAngle(inwardYaw - chosenYaw) * edgeBlend);
     }
 
-    // 3. Строго ограниченная угловая скорость поворота — величавое движение без малейших рывков
-    constexpr float MAX_YAW_RATE = 0.42f; // рад/с (~24°/сек)
+    constexpr float MAX_YAW_RATE = 0.42f;
     float yawErr = wrapAngle(chosenYaw - m_whale.yaw);
     float yawStep = ProcMath::clamp(yawErr * 1.4f, -MAX_YAW_RATE, MAX_YAW_RATE) * dt;
     m_whale.yaw = wrapAngle(m_whale.yaw + yawStep);
 
-    // 4. Высокий безопасный эшелон плавания (над дном и под гладью воды)
     float fx = std::sin(m_whale.yaw);
     float fz = std::cos(m_whale.yaw);
     float floorHere  = ProcMath::sampleTerrainHeight(m_whale.pos.x(), m_whale.pos.z(), m_seed);
     float floorAhead = ProcMath::sampleTerrainHeight(m_whale.pos.x() + fx * 26.0f, m_whale.pos.z() + fz * 26.0f, m_seed);
     float maxLocalFloor = std::max(floorHere, floorAhead);
 
-    constexpr float SURFACE_LIMIT_Y = ProcMath::WATER_SURFACE_Y - 5.4f; // ~22.6 м
+    constexpr float SURFACE_LIMIT_Y = ProcMath::WATER_SURFACE_Y - 5.4f;
     float desiredAlt = 19.5f + std::sin(m_time * 0.24f) * 2.2f;
     float targetY = ProcMath::clamp(std::max(desiredAlt, maxLocalFloor + 10.5f),
                                     13.5f, SURFACE_LIMIT_Y);
@@ -876,12 +876,10 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     float targetPitch = ProcMath::clamp((targetY - m_whale.pos.y()) * 0.065f, -0.22f, 0.22f);
     m_whale.pitch = ProcMath::mix(m_whale.pitch, targetPitch, ProcMath::clamp(dt * 1.8f, 0.0f, 1.0f));
 
-    // Плавный крен в сторону поворота
     float yawRate = (dt > 1e-4f) ? (yawStep / dt) : 0.0f;
     float targetBank = ProcMath::clamp(-yawRate * 0.42f, -0.18f, 0.18f);
     m_whale.bank = ProcMath::mix(m_whale.bank, targetBank, ProcMath::clamp(dt * 2.0f, 0.0f, 1.0f));
 
-    // 5. Интегрируем позицию строго вдоль ориентации корпуса (кит всегда плывёт носом вперёд)
     QVector3D forward(std::sin(m_whale.yaw) * std::cos(m_whale.pitch),
                       std::sin(m_whale.pitch),
                       std::cos(m_whale.yaw) * std::cos(m_whale.pitch));
@@ -889,10 +887,9 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     m_whale.vel = forward * m_whale.cruiseSpeed;
     m_whale.pos += m_whale.vel * dt;
 
-    // 6. Мягкое выталкивание без резких разворотов, если кекур всё же оказался слишком близко
     const auto& spires = ProcMath::getCentralSpires(m_seed);
     for (const auto& sp : spires) {
-        if (sp.height < 22.0f) continue; // низкие подводные скалы далеко внизу
+        if (sp.height < 22.0f) continue;
         float dx = m_whale.pos.x() - sp.x;
         float dz = m_whale.pos.z() - sp.z;
         float safeR = sp.radius + 18.0f;
@@ -905,7 +902,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         }
     }
 
-    // Страховка вертикального коридора (выше рельефа, ниже поверхности воды)
     float curFloor = ProcMath::sampleTerrainHeight(m_whale.pos.x(), m_whale.pos.z(), m_seed);
     if (m_whale.pos.y() < curFloor + 6.5f) {
         m_whale.pos.setY(std::min(curFloor + 6.5f, SURFACE_LIMIT_Y));
@@ -914,7 +910,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         m_whale.pos.setY(SURFACE_LIMIT_Y);
     }
 
-    // Страховка радиуса кальдеры
     float curR = std::sqrt(m_whale.pos.x() * m_whale.pos.x() + m_whale.pos.z() * m_whale.pos.z());
     float hardWhaleR = ProcMath::BASIN_INNER_RADIUS - 55.0f;
     if (curR > hardWhaleR) {
@@ -923,7 +918,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         m_whale.pos.setZ(m_whale.pos.z() * k);
     }
 
-    // Периодическая песня кита
     m_whaleSongTimer -= dt;
     if (m_whaleSongTimer <= 0.0f) {
         m_whaleSongTimer = 24.0f + std::fmod(m_time * 3.7f, 14.0f);
@@ -1288,6 +1282,35 @@ QVector3D DeepDiveWidget::cameraRight() const {
 }
 
 void DeepDiveWidget::updateSimulation(float dt) {
+    // 1. Опрос геймпада (XInput / USB HID)
+    const GamepadState gp = m_gamepad.poll(dt);
+    m_gamepadConnected = gp.connected;
+    m_gamepadIsXInput  = gp.isXInput;
+
+    if (gp.connected) {
+        m_yaw   += gp.lookX * 2.15f * dt;
+        m_pitch += gp.lookY * 1.65f * dt;
+        m_pitch  = ProcMath::clamp(m_pitch, -1.48f, 1.48f);
+
+        if (gp.toggleBiome)   m_paletteIndex = (m_paletteIndex + 1) % 4;
+        if (gp.togglePostFx)  m_postProcessEnabled = !m_postProcessEnabled;
+        if (gp.toggleShadows) m_shadowsEnabled = !m_shadowsEnabled;
+        if (gp.toggleHud)     m_hudVisible = !m_hudVisible;
+        if (gp.toggleMute && m_audioEngine) m_audioEngine->toggleMute();
+        if (gp.volumeUp   && m_audioEngine) m_audioEngine->adjustVolume(0.05f);
+        if (gp.volumeDown && m_audioEngine) m_audioEngine->adjustVolume(-0.05f);
+        if (gp.summonWhale) {
+            spawnWhalePass(true);
+            if (m_audioEngine) m_audioEngine->triggerWhaleCall();
+            m_gamepad.triggerRumble(0.42f, 0.14f, 0.35f);
+        }
+        if (gp.regenWorld) {
+            m_seed += 17u;
+            rebuildWorld(m_seed); // OpenGL-контекст уже активен внутри paintGL()
+        }
+    }
+
+    // 2. Клавиатура + аналоговый левый стик и триггеры геймпада
     QVector3D wishDir(0.0f, 0.0f, 0.0f);
     QVector3D fwd = cameraForward();
     QVector3D rgt = cameraRight();
@@ -1299,9 +1322,20 @@ void DeepDiveWidget::updateSimulation(float dt) {
     if (m_pressedKeys.contains(Qt::Key_Space)) wishDir += QVector3D(0.0f, 1.0f, 0.0f);
     if (m_pressedKeys.contains(Qt::Key_Control)) wishDir -= QVector3D(0.0f, 1.0f, 0.0f);
 
-    if (wishDir.lengthSquared() > 0.001f) wishDir.normalize();
-    float accel = m_pressedKeys.contains(Qt::Key_Shift) ? 58.0f : 18.0f;
+    if (gp.connected) {
+        wishDir += fwd * gp.moveY + rgt * gp.moveX + QVector3D(0.0f, gp.vertical, 0.0f);
+    }
 
+    // Сохраняем плавную аналоговую скорость стика, ограничивая максимум длиной 1.0
+    float wishLenSq = wishDir.lengthSquared();
+    if (wishLenSq > 1.0f) {
+        wishDir /= std::sqrt(wishLenSq);
+    }
+
+    bool sprinting = m_pressedKeys.contains(Qt::Key_Shift) || gp.sprint;
+    float accel = sprinting ? 58.0f : 18.0f;
+
+    float preCollisionSpeed = m_camVel.length();
     m_camVel += wishDir * (accel * dt);
     m_camVel *= std::exp(-3.0f * dt);
     m_camPos += m_camVel * dt;
@@ -1309,6 +1343,12 @@ void DeepDiveWidget::updateSimulation(float dt) {
 
     m_stats.playerColliding = m_world.collision.resolveSphereCollision(
         m_camPos, &m_camVel, 1.45f, 0.45f, 1.6f);
+
+    if (m_stats.playerColliding && !m_wasPlayerColliding && gp.connected && preCollisionSpeed > 1.8f) {
+        float intensity = ProcMath::clamp(preCollisionSpeed / 16.0f, 0.15f, 0.60f);
+        m_gamepad.triggerRumble(intensity, intensity * 0.45f, 0.14f);
+    }
+    m_wasPlayerColliding = m_stats.playerColliding;
 
     if (m_audioEngine) {
         int audioBiome = (m_paletteIndex == 0) ? 0 : (m_paletteIndex - 1);
@@ -1364,38 +1404,37 @@ void DeepDiveWidget::paintGL() {
     int physH = std::max(64, int(height() * dpr));
     resizePostProcessBuffers(physW, physH);
 
-    // 4 биома: 0 = яркий сочный тропический риф (по умолчанию)
     QVector3D waterShallow, waterDeep, sunColor;
     float vibrance = 1.0f;
     float fogScale = 1.0f;
 
     if (m_paletteIndex == 0) {
-        // Tropical Reef (Vibrant): сочный риф в плотной прозрачной бирюзе без воздушного пересвета
-        waterShallow = QVector3D(0.06f, 0.54f, 0.64f);
-        waterDeep    = QVector3D(0.01f, 0.16f, 0.30f);
-        sunColor     = QVector3D(0.68f, 0.94f, 0.90f);
-        vibrance     = 1.32f;
-        fogScale     = 1.00f;
+        // Tropical Reef (Vibrant): солнечная бирюзовая толща, выраженный туман, сочные краски
+        waterShallow = QVector3D(0.11f, 0.68f, 0.78f);
+        waterDeep    = QVector3D(0.02f, 0.24f, 0.38f);
+        sunColor     = QVector3D(0.94f, 1.06f, 0.96f);
+        vibrance     = 1.38f;
+        fogScale     = 1.05f;
     } else if (m_paletteIndex == 1) {
         // Kelp Reef (Emerald)
-        waterShallow = QVector3D(0.08f, 0.48f, 0.52f);
-        waterDeep    = QVector3D(0.015f, 0.14f, 0.21f);
-        sunColor     = QVector3D(0.50f, 0.88f, 0.90f);
-        vibrance     = 1.10f;
-        fogScale     = 1.10f;
+        waterShallow = QVector3D(0.12f, 0.62f, 0.66f);
+        waterDeep    = QVector3D(0.025f, 0.22f, 0.30f);
+        sunColor     = QVector3D(0.68f, 0.98f, 0.96f);
+        vibrance     = 1.15f;
+        fogScale     = 1.12f;
     } else if (m_paletteIndex == 2) {
         // Purple Grotto
-        waterShallow = QVector3D(0.28f, 0.30f, 0.56f);
-        waterDeep    = QVector3D(0.08f, 0.05f, 0.19f);
-        sunColor     = QVector3D(0.62f, 0.72f, 0.96f);
-        vibrance     = 1.18f;
+        waterShallow = QVector3D(0.38f, 0.42f, 0.72f);
+        waterDeep    = QVector3D(0.11f, 0.08f, 0.26f);
+        sunColor     = QVector3D(0.80f, 0.86f, 1.12f);
+        vibrance     = 1.24f;
         fogScale     = 1.12f;
     } else {
         // Abyssal Trench
-        waterShallow = QVector3D(0.05f, 0.28f, 0.40f);
-        waterDeep    = QVector3D(0.008f, 0.05f, 0.11f);
-        sunColor     = QVector3D(0.38f, 0.74f, 0.88f);
-        vibrance     = 1.04f;
+        waterShallow = QVector3D(0.07f, 0.38f, 0.54f);
+        waterDeep    = QVector3D(0.01f, 0.08f, 0.16f);
+        sunColor     = QVector3D(0.52f, 0.88f, 1.02f);
+        vibrance     = 1.08f;
         fogScale     = 1.25f;
     }
 
@@ -1538,14 +1577,12 @@ void DeepDiveWidget::paintGL() {
 
     glDepthFunc(GL_LEQUAL);
     m_skyShader.bind();
-    m_skyShader.setUniformValue("uRockTex", 0);
     m_skyShader.setUniformValue("uInvViewProj", invViewProj);
     m_skyShader.setUniformValue("uCamPos", m_camPos);
     m_skyShader.setUniformValue("uSunDir", sunDir);
     m_skyShader.setUniformValue("uSunColor", sunColor);
     m_skyShader.setUniformValue("uWaterColorDeep", waterDeep);
     m_skyShader.setUniformValue("uWaterColorShallow", waterShallow);
-    m_skyShader.setUniformValue("uTime", m_time);
     glBindVertexArray(m_skyVAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -1658,11 +1695,24 @@ void DeepDiveWidget::paintGL() {
     drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), true);
     drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), true);
 
-    // Реальная 3D-поверхность воды на уровне y = 28 м (отсекает скалы выше глади и рисует границу сред)
+    // Сбрасываем буфер глубины геометрии до рисования воды, чтобы WaterSurfaceFrag
+    // точно видел линию контакта со скалами (пена, разводы, пузырьки и отражённая рябь)
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_msaaFBO);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_resolveFBO);
+    glBlitFramebuffer(0, 0, physW, physH, 0, 0, physW, physH, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_msaaFBO);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_rockTex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
+
     QVector2D waterCenter(std::floor(m_camPos.x() * 2.0f) * 0.5f,
                           std::floor(m_camPos.z() * 2.0f) * 0.5f);
     m_waterShader.bind();
     m_waterShader.setUniformValue("uRockTex", 0);
+    m_waterShader.setUniformValue("uSceneDepthTex", 1);
+    m_waterShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
     m_waterShader.setUniformValue("uViewProj", viewProj);
     m_waterShader.setUniformValue("uWaterCenter", waterCenter);
     m_waterShader.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
@@ -1704,7 +1754,7 @@ void DeepDiveWidget::paintGL() {
     glDisable(GL_BLEND);
 
     // ========================================================================
-    // ЭТАП 2: Resolve MSAA + Двухпроходный Bloom + Композитинг PostFX
+    // ЭТАП 2: Resolve MSAA + (при PostFX ON) Bloom + Финальный композитинг
     // ========================================================================
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_msaaFBO);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_resolveFBO);
@@ -1712,27 +1762,30 @@ void DeepDiveWidget::paintGL() {
     glBlitFramebuffer(0, 0, physW, physH, 0, 0, physW, physH, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
     glDisable(GL_DEPTH_TEST);
-    int halfW = std::max(32, physW / 2);
-    int halfH = std::max(32, physH / 2);
-    glViewport(0, 0, halfW, halfH);
-
-    m_scatterBlurShader.bind();
-    m_scatterBlurShader.setUniformValue("uSourceTex", 0);
     glBindVertexArray(m_skyVAO);
 
-    for (int iter = 0; iter < 2; ++iter) {
-        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, (iter == 0) ? m_sceneColorTex : m_bloomTex[1]);
-        m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(1.0f / halfW, 0.0f));
-        m_scatterBlurShader.setUniformValue("uExtractBright", (iter == 0) ? 1 : 0);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+    if (m_postProcessEnabled) {
+        int halfW = std::max(32, physW / 2);
+        int halfH = std::max(32, physH / 2);
+        glViewport(0, 0, halfW, halfH);
 
-        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[1]);
-        glBindTexture(GL_TEXTURE_2D, m_bloomTex[0]);
-        m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(0.0f, 1.0f / halfH));
-        m_scatterBlurShader.setUniformValue("uExtractBright", 0);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        m_scatterBlurShader.bind();
+        m_scatterBlurShader.setUniformValue("uSourceTex", 0);
+
+        for (int iter = 0; iter < 2; ++iter) {
+            glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, (iter == 0) ? m_sceneColorTex : m_bloomTex[1]);
+            m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(1.0f / halfW, 0.0f));
+            m_scatterBlurShader.setUniformValue("uExtractBright", (iter == 0) ? 1 : 0);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+
+            glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[1]);
+            glBindTexture(GL_TEXTURE_2D, m_bloomTex[0]);
+            m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(0.0f, 1.0f / halfH));
+            m_scatterBlurShader.setUniformValue("uExtractBright", 0);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
@@ -1748,6 +1801,9 @@ void DeepDiveWidget::paintGL() {
         sunScreen.setZ(ProcMath::smoothstep(-0.15f, 0.65f, facing));
     }
 
+    float distToSurface = std::max(0.4f, ProcMath::WATER_SURFACE_Y - m_camPos.y());
+    float surfaceProximity = 1.0f - ProcMath::smoothstep(1.8f, 16.0f, distToSurface);
+
     m_postProcessShader.bind();
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_sceneColorTex);
@@ -1755,9 +1811,6 @@ void DeepDiveWidget::paintGL() {
     glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, m_bloomTex[1]);
-
-    float distToSurface = std::max(0.4f, ProcMath::WATER_SURFACE_Y - m_camPos.y());
-    float surfaceProximity = 1.0f - ProcMath::smoothstep(1.8f, 16.0f, distToSurface);
 
     m_postProcessShader.setUniformValue("uSceneColorTex", 0);
     m_postProcessShader.setUniformValue("uSceneDepthTex", 1);
@@ -1775,7 +1828,7 @@ void DeepDiveWidget::paintGL() {
     glBindVertexArray(0);
 
     // ========================================================================
-    // HUD (скрывается / показывается по клавише ` или ё)
+    // HUD (скрывается / показывается по клавише ` / ё или Back на геймпаде)
     // ========================================================================
     if (m_hudVisible) {
         QPainter painter(this);
@@ -1792,19 +1845,23 @@ void DeepDiveWidget::paintGL() {
         QString audioStatus = (m_audioEngine && !m_audioEngine->isMuted())
                                   ? QString("ON (%1%)").arg(qRound(m_audioEngine->volume() * 100.0f))
                                   : QString("MUTED");
+        QString padStatus = m_gamepadConnected
+                                ? (m_gamepadIsXInput ? "XInput" : "HID")
+                                : "OFF";
 
         float radialDist = std::sqrt(m_camPos.x() * m_camPos.x() + m_camPos.z() * m_camPos.z());
         float diveDepth  = std::max(0.0f, ProcMath::WATER_SURFACE_Y - m_camPos.y());
 
         QString hud = QString(
-                          "GPU: %1 | %2x MSAA | Shadows: %3 | PostFX: %4 | Audio: %5 | FPS: %6\n"
-                          "Chunks: %7/%8 (LOD0:%9 LOD1:%10 LOD2:%11 LOD3:%12) | Tris: %13k | Fish: %14+%15 | Mantas: %16+%17 | Anglers: %18\n"
-                          "Depth: %19m | R: %20m %21 | Seed: %22 | Biome: %23 | [`] HUD [B] Biome [R] Regen [L] Shad [P] Post [F] Wire [K] Whale [M] Mute"
+                          "GPU: %1 | %2x MSAA | Shadows: %3 | PostFX: %4 | Audio: %5 | Pad: %6 | FPS: %7\n"
+                          "Chunks: %8/%9 (LOD0:%10 LOD1:%11 LOD2:%12 LOD3:%13) | Tris: %14k | Fish: %15+%16 | Mantas: %17+%18 | Anglers: %19\n"
+                          "Depth: %20m | R: %21m %22 | Seed: %23 | Biome: %24 | [Mouse/Pad] Look [Esc] Cursor/Exit [`] HUD [B] Biome [P] PostFX [K] Whale"
                           ).arg(m_glRendererInfo)
                           .arg(m_activeSamples)
                           .arg(m_shadowsEnabled ? "ON" : "OFF")
                           .arg(m_postProcessEnabled ? "ON" : "OFF")
                           .arg(audioStatus)
+                          .arg(padStatus)
                           .arg(qRound(m_fps))
                           .arg(m_stats.visibleChunks)
                           .arg(m_stats.totalChunks)
@@ -1824,13 +1881,12 @@ void DeepDiveWidget::paintGL() {
                           .arg(m_seed)
                           .arg(biomeNames[m_paletteIndex]);
 
-        painter.fillRect(QRect(14, 14, 1220, 68), QColor(5, 22, 32, 165));
-        painter.drawText(QRect(24, 18, 1200, 60), Qt::AlignLeft | Qt::AlignVCenter, hud);
+        painter.fillRect(QRect(14, 14, 1245, 68), QColor(5, 22, 32, 165));
+        painter.drawText(QRect(24, 18, 1225, 60), Qt::AlignLeft | Qt::AlignVCenter, hud);
     }
 }
 
 void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
-    // Переключение HUD по клавише ` / ~ (и русской ё / Ё)
     const QString txt = event->text();
     const bool isHudToggle = (event->key() == Qt::Key_QuoteLeft ||
                               event->key() == Qt::Key_AsciiTilde ||
@@ -1839,6 +1895,16 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
                               (!txt.isEmpty() && (txt[0] == QChar(0x0451) || txt[0] == QChar(0x0401))));
     if (isHudToggle) {
         m_hudVisible = !m_hudVisible;
+        return;
+    }
+
+    if (event->key() == Qt::Key_Escape) {
+        if (m_mouseCaptured) {
+            m_userReleasedMouse = true;
+            setMouseCapture(false);
+        } else {
+            close();
+        }
         return;
     }
 
@@ -1868,8 +1934,6 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
         if (m_audioEngine) m_audioEngine->adjustVolume(0.05f);
     } else if (event->key() == Qt::Key_Minus) {
         if (m_audioEngine) m_audioEngine->adjustVolume(-0.05f);
-    } else if (event->key() == Qt::Key_Escape) {
-        close();
     }
 }
 
@@ -1878,26 +1942,54 @@ void DeepDiveWidget::keyReleaseEvent(QKeyEvent* event) {
 }
 
 void DeepDiveWidget::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
-        m_mouseLooking = true;
-        m_lastMousePos = event->pos();
-        setCursor(Qt::BlankCursor);
+    if (event->button() == Qt::LeftButton && !m_mouseCaptured) {
+        m_userReleasedMouse = false;
+        setMouseCapture(true);
     }
 }
 
 void DeepDiveWidget::mouseMoveEvent(QMouseEvent* event) {
-    if (!m_mouseLooking) return;
-    QPoint delta = event->pos() - m_lastMousePos;
-    m_lastMousePos = event->pos();
+    if (!m_mouseCaptured) {
+        // Автоматически включаем свободный обзор при первом движении мыши в активном окне
+        if (!m_userReleasedMouse && isActiveWindow()) {
+            setMouseCapture(true);
+        }
+        return;
+    }
 
-    m_yaw   += delta.x() * 0.0035f;
-    m_pitch -= delta.y() * 0.0035f;
+    const QPoint center(width() / 2, height() / 2);
+    const QPoint delta = event->pos() - center;
+
+    if (m_skipNextMouseDelta) {
+        m_skipNextMouseDelta = false;
+        if (!delta.isNull()) {
+            QCursor::setPos(mapToGlobal(center));
+        }
+        return;
+    }
+
+    if (delta.isNull()) return;
+
+    m_yaw   += delta.x() * 0.0028f;
+    m_pitch -= delta.y() * 0.0028f;
     m_pitch  = ProcMath::clamp(m_pitch, -1.48f, 1.48f);
+
+    QCursor::setPos(mapToGlobal(center));
 }
 
 void DeepDiveWidget::mouseReleaseEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
-        m_mouseLooking = false;
-        unsetCursor();
+    QOpenGLWidget::mouseReleaseEvent(event);
+}
+
+void DeepDiveWidget::focusInEvent(QFocusEvent* event) {
+    QOpenGLWidget::focusInEvent(event);
+    if (!m_userReleasedMouse) {
+        setMouseCapture(true);
     }
+}
+
+void DeepDiveWidget::focusOutEvent(QFocusEvent* event) {
+    QOpenGLWidget::focusOutEvent(event);
+    m_pressedKeys.clear();
+    setMouseCapture(false);
 }

@@ -18,6 +18,7 @@ add_executable(DeepDive
     src/UnderwaterAudio.cpp
     src/DeepDiveWidget.h
     src/DeepDiveWidget.cpp
+    src/GamepadInput.h
 )
 
 target_include_directories(DeepDive PRIVATE src)
