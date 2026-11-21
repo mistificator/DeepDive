@@ -10,7 +10,7 @@ struct EnvVertex {
     QVector3D pos;
     QVector3D normal;
     QVector3D color;
-    QVector2D param; // x: 0=rock/sand, 1=shipwood, 2=coral/grass/sponge, 3=kelp, 4=abyssalGlow; y: sway/heightFactor
+    QVector2D param; // x: 0=rock/sand, 1=shipwood, 2=coral/grass/sponge, 3=kelp, 4=abyssalGlow, 5=kelpVesicle; y: sway/heightFactor
 };
 
 struct FaunaVertex {
@@ -19,11 +19,40 @@ struct FaunaVertex {
     QVector3D color; // > 1.3 по компоненте используется как биолюминесценция (фонарик удильщика)
 };
 
-// Компактная структура инстанса для GPU (передаются только видимые объекты)
+// Компактная структура инстанса фауны для GPU
 struct FaunaGpuInstance {
     QVector4D posScale;  // xyz: worldPos, w: scale
     QVector4D rotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler), w: bank
     QVector4D pitchTint; // x: pitch, yzw: color tint
+};
+
+// Архетипы высокодетализированных GPU-инстансируемых пропов окружения
+enum PropArchetype : int {
+    PROP_BOULDER_CHUNK = 0, // Угловатый слоистый валун (дно, рифы, россыпи камней)
+    PROP_CLIFF_CRAG    = 1, // Выступающий скальный блок (встраивается прямо в крутые стены каньона и утёсов)
+    PROP_KELP_COLUMN   = 2, // Пышная колонна ламинарии (спираль широких изогнутых листьев + светящиеся пузырьки)
+    PROP_BARREL_SPONGE = 3, // Толстостенная полая бочкообразная / трубчатая губка с тёмным нутром
+    PROP_GROUND_CARPET = 4, // Плотный ковёр-куст придонной травы и водорослей (24 лезвия в кластере)
+    PROP_CORAL_BUSH    = 5, // Пышный многоярусный ветвистый коралл (Staghorn / Acropora)
+    PROP_TABLE_FAN     = 6, // Многоярусный пластинчатый коралл с волнистой кромкой / горгонария
+    PROP_ANEMONE_PEN   = 7, // Кустистые водоросли / солнечная розетка плато / морской анемон
+    PROP_ARCHETYPE_COUNT = 8
+};
+
+// Компактный инстанс пропа окружения для GPU (48 байт)
+struct PropGpuInstance {
+    QVector4D posScaleXZ; // xyz: worldPos, w: scaleXZ
+    QVector4D rotScaleY;  // x: yaw, y: pitch, z: roll, w: scaleY
+    QVector4D tintFlags;  // rgb: индивидуальный тинт, w: 0=обычный, 1=биомный ковёр, 2=биомная ламинария
+};
+
+// Прототипная 3D-модель пропа с двумя уровнями детализации (LOD0 + LOD1)
+struct PropPrototypeMesh {
+    std::vector<EnvVertex> lod0Verts;
+    std::vector<uint32_t>  lod0Inds;
+    std::vector<EnvVertex> lod1Verts;
+    std::vector<uint32_t>  lod1Inds;
+    float baseRadius = 2.0f;
 };
 
 // Физический агент фауны на CPU (руление и обход препятствий)
@@ -44,10 +73,10 @@ struct FaunaAgent {
     float type = 0.0f; // 0 = fish, 1 = manta, 2 = whale, 3 = anglerfish
 };
 
-struct RayVertex {
-    QVector3D pos;
-    QVector4D color;
-    QVector2D uv;
+struct GodRayInstance {
+    QVector4D topCenterRTop; // xyz: верхний центр на поверхности воды, w: верхний радиус
+    QVector4D botCenterRBot; // xyz: нижний центр, w: нижний радиус (конус слегка расширяется)
+    QVector4D rayParams;     // x: интенсивность, y: случайная фаза, z: масштаб волокон, w: резерв
 };
 
 struct Particle {
@@ -86,14 +115,12 @@ struct WorldChunk {
 
     uint32_t terrainBaseVertex = 0;
 
-    MeshRange boulderLod0;
-    MeshRange boulderLod1;
-    MeshRange kelpLod0;
-    MeshRange kelpLod1;
-    MeshRange floraLod0;      // морская трава, ветвистые/пластинчатые кораллы, веерные горгонарии, кустистые водоросли
-    MeshRange floraLod1;      // облегченные силуэты флоры на средней/дальней дистанции
-    MeshRange detailRange;    // губки, актинии/анемоны и глубоководные светящиеся перья
+    // Статическая уникальная геометрия чанка (абиссальные светящиеся перья и затонувшие корабли)
+    MeshRange detailRange;
     MeshRange shipwreckRange;
+
+    // Плотные GPU-инстансируемые объекты чанка по архетипам
+    std::array<std::vector<PropGpuInstance>, PROP_ARCHETYPE_COUNT> propInstances;
 
     std::vector<uint32_t> sphereColliderIds;
     std::vector<uint32_t> obbColliderIds;
@@ -128,8 +155,12 @@ struct WorldData {
     std::vector<uint32_t> terrainIndices;
     std::array<MeshRange, TERRAIN_LOD_COUNT> terrainLodRanges{};
 
+    // Статические уникальные пропы (корабли, абиссальные перья)
     std::vector<EnvVertex> propVertices;
     std::vector<uint32_t> propIndices;
+
+    // Прототипы GPU-инстансируемых объектов (LOD0 + LOD1)
+    std::array<PropPrototypeMesh, PROP_ARCHETYPE_COUNT> propPrototypes;
 
     std::vector<WorldChunk> chunks;
     CollisionWorld collision;
@@ -157,7 +188,9 @@ struct WorldData {
     std::vector<uint32_t>    anglerLod1Inds;
     std::vector<FaunaAgent>  anglerAgents;
 
-    std::vector<RayVertex> godRayVertices;
+    std::vector<QVector3D>      godRayMeshVerts;
+    std::vector<uint32_t>       godRayMeshInds;
+    std::vector<GodRayInstance> godRayInstances;
     std::vector<Particle>  particles;
 };
 
@@ -168,6 +201,7 @@ public:
 private:
     static void buildTerrainLodIndices(WorldData& data);
     static void generateTerrainChunks(WorldData& data, uint32_t seed);
+    static void generatePropPrototypes(WorldData& data);
     static void generateChunkProps(WorldData& data, uint32_t seed);
     static void generateShipwrecks(WorldData& data, uint32_t seed);
     static void generateFaunaMeshes(WorldData& data);
@@ -180,11 +214,4 @@ private:
                           const QVector3D& center, const QVector3D& size,
                           const QVector3D& right, const QVector3D& up, const QVector3D& forward,
                           const QVector3D& color, float matType);
-
-    static void appendRockBoulder(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                                  const QVector3D& center, float rx, float ry, float rz,
-                                  int stacks, int slices, uint32_t rockSeed, const QVector3D& baseColor);
-
-    static void appendKelpStalk(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                                const QVector3D& rootPos, float height, uint32_t stalkSeed, bool highLod);
 };

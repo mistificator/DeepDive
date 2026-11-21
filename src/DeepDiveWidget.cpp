@@ -17,7 +17,7 @@
 #include <utility>
 
 namespace {
-constexpr float PI = 3.14159265358979323846f;
+constexpr float PI     = 3.14159265358979323846f;
 constexpr float TWO_PI = 6.28318530717958647692f;
 
 inline float wrapAngle(float a) {
@@ -57,6 +57,35 @@ inline uint8_t updateBinaryLod(uint8_t currentLod, float dist, float threshold, 
     if (currentLod != 0 && dist < threshold - band) return 0;
     return currentLod;
 }
+
+// Пороги переключения LOD для каждого из 8 инстансируемых архетипов (LOD0 -> LOD1 -> Cull)
+struct PropLodConfig {
+    float lod0Dist;
+    float maxDist;
+    float hysteresis;
+    bool  castShadow;
+    float shadowLod0Dist;
+    float shadowMaxDist;
+};
+
+constexpr std::array<PropLodConfig, PROP_ARCHETYPE_COUNT> PROP_LOD_CFG = {{
+    // PROP_BOULDER_CHUNK
+    {225.0f, 420.0f, 10.0f, true,  105.0f, 155.0f},
+    // PROP_CLIFF_CRAG
+    {235.0f, 430.0f, 10.0f, true,  105.0f, 155.0f},
+    // PROP_KELP_COLUMN (пышные колонны ламинарии — чёткие тени на валунах)
+    {135.0f, 330.0f,  8.0f, true,   85.0f, 150.0f},
+    // PROP_BARREL_SPONGE
+    {115.0f, 225.0f,  8.0f, true,   60.0f,  95.0f},
+    // PROP_GROUND_CARPET (придонный ковёр — тени не требуются)
+    {100.0f, 195.0f,  8.0f, false,   0.0f,   0.0f},
+    // PROP_CORAL_BUSH
+    {125.0f, 240.0f,  8.0f, true,   65.0f, 105.0f},
+    // PROP_TABLE_FAN
+    {140.0f, 265.0f,  8.0f, true,   75.0f, 115.0f},
+    // PROP_ANEMONE_PEN
+    {120.0f, 230.0f,  8.0f, false,   0.0f,   0.0f}
+}};
 } // namespace
 
 // ============================================================================
@@ -132,6 +161,11 @@ DeepDiveWidget::~DeepDiveWidget() {
     if (m_propVBO) glDeleteBuffers(1, &m_propVBO);
     if (m_propEBO) glDeleteBuffers(1, &m_propEBO);
 
+    for (int i = 0; i < PROP_ARCHETYPE_COUNT; ++i) {
+        deletePropLodBuffers(m_propLod0[i]);
+        deletePropLodBuffers(m_propLod1[i]);
+    }
+
     deleteFaunaLodBuffers(m_fishLod0);
     deleteFaunaLodBuffers(m_fishLod1);
     deleteFaunaLodBuffers(m_mantaLod0);
@@ -149,6 +183,8 @@ DeepDiveWidget::~DeepDiveWidget() {
     if (m_skyVBO) glDeleteBuffers(1, &m_skyVBO);
     if (m_rayVAO) glDeleteVertexArrays(1, &m_rayVAO);
     if (m_rayVBO) glDeleteBuffers(1, &m_rayVBO);
+    if (m_rayEBO) glDeleteBuffers(1, &m_rayEBO);
+    if (m_rayInstVBO) glDeleteBuffers(1, &m_rayInstVBO);
     if (m_particleVAO) glDeleteVertexArrays(1, &m_particleVAO);
     if (m_particleVBO) glDeleteBuffers(1, &m_particleVBO);
     doneCurrent();
@@ -312,7 +348,7 @@ void DeepDiveWidget::createProceduralRockTexture() {
 
     std::vector<uint8_t> rgba(N * N * 4);
     const int mask = N - 1;
-    const float normalStrength = 7.0f;
+    const float normalStrength = 7.4f;
 
     for (int y = 0; y < N; ++y) {
         int yU = (y - 1) & mask;
@@ -497,6 +533,148 @@ void DeepDiveWidget::deleteFaunaLodBuffers(FaunaLodBuffers& buf) {
     buf = {};
 }
 
+void DeepDiveWidget::setupPropLodBuffers(PropLodBuffers& buf,
+                                         const std::vector<EnvVertex>& verts,
+                                         const std::vector<uint32_t>& inds,
+                                         size_t initialMaxInst) {
+    if (buf.vao == 0) {
+        glGenVertexArrays(1, &buf.vao);
+        glGenBuffers(1, &buf.vbo);
+        glGenBuffers(1, &buf.ebo);
+        glGenBuffers(1, &buf.instVbo);
+    }
+
+    buf.indexCount   = static_cast<GLsizei>(inds.size());
+    buf.maxInstances = static_cast<GLsizei>(std::max<size_t>(64, initialMaxInst));
+
+    glBindVertexArray(buf.vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, buf.vbo);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(EnvVertex),
+                 verts.empty() ? nullptr : verts.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, inds.size() * sizeof(uint32_t),
+                 inds.empty() ? nullptr : inds.data(), GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(EnvVertex),
+                          reinterpret_cast<void*>(offsetof(EnvVertex, pos)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(EnvVertex),
+                          reinterpret_cast<void*>(offsetof(EnvVertex, normal)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(EnvVertex),
+                          reinterpret_cast<void*>(offsetof(EnvVertex, color)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(EnvVertex),
+                          reinterpret_cast<void*>(offsetof(EnvVertex, param)));
+
+    glBindBuffer(GL_ARRAY_BUFFER, buf.instVbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<size_t>(buf.maxInstances) * sizeof(PropGpuInstance),
+                 nullptr, GL_DYNAMIC_DRAW);
+
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(PropGpuInstance),
+                          reinterpret_cast<void*>(offsetof(PropGpuInstance, posScaleXZ)));
+    glVertexAttribDivisor(4, 1);
+
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(PropGpuInstance),
+                          reinterpret_cast<void*>(offsetof(PropGpuInstance, rotScaleY)));
+    glVertexAttribDivisor(5, 1);
+
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, sizeof(PropGpuInstance),
+                          reinterpret_cast<void*>(offsetof(PropGpuInstance, tintFlags)));
+    glVertexAttribDivisor(6, 1);
+
+    glBindVertexArray(0);
+}
+
+void DeepDiveWidget::ensurePropInstCapacity(PropLodBuffers& buf, size_t needed) {
+    if (needed <= static_cast<size_t>(buf.maxInstances)) return;
+    size_t newCap = std::max(needed + needed / 2, static_cast<size_t>(512));
+    buf.maxInstances = static_cast<GLsizei>(newCap);
+    glBindBuffer(GL_ARRAY_BUFFER, buf.instVbo);
+    glBufferData(GL_ARRAY_BUFFER, newCap * sizeof(PropGpuInstance), nullptr, GL_DYNAMIC_DRAW);
+}
+
+void DeepDiveWidget::deletePropLodBuffers(PropLodBuffers& buf) {
+    if (buf.vao) glDeleteVertexArrays(1, &buf.vao);
+    if (buf.vbo) glDeleteBuffers(1, &buf.vbo);
+    if (buf.ebo) glDeleteBuffers(1, &buf.ebo);
+    if (buf.instVbo) glDeleteBuffers(1, &buf.instVbo);
+    buf = {};
+}
+
+void DeepDiveWidget::gatherAndUploadInstProps(const std::vector<std::pair<int, float>>& chunks, bool forShadow) {
+    for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
+        m_visPropsLod0[a].clear();
+        m_visPropsLod1[a].clear();
+    }
+
+    for (const auto& [idx, d] : chunks) {
+        const auto& chunk = m_world.chunks[idx];
+        ChunkLodState& st = m_chunkLodStates[idx];
+
+        for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
+            const auto& src = chunk.propInstances[a];
+            if (src.empty()) continue;
+
+            const auto& cfg = PROP_LOD_CFG[a];
+            int lod = 2;
+
+            if (forShadow) {
+                if (!cfg.castShadow || d > cfg.shadowMaxDist) continue;
+                lod = (d < cfg.shadowLod0Dist) ? 0 : 1;
+            } else {
+                const float thresh[2] = {cfg.lod0Dist, cfg.maxDist};
+                st.propLod[a] = updateLodWithHysteresis(st.propLod[a], d, thresh, 2, cfg.hysteresis);
+                lod = st.propLod[a];
+            }
+
+            if (lod == 0) {
+                m_visPropsLod0[a].insert(m_visPropsLod0[a].end(), src.begin(), src.end());
+            } else if (lod == 1) {
+                m_visPropsLod1[a].insert(m_visPropsLod1[a].end(), src.begin(), src.end());
+            }
+        }
+    }
+
+    auto uploadBatch = [&](PropLodBuffers& buf, const std::vector<PropGpuInstance>& list) {
+        if (list.empty() || buf.instVbo == 0) return;
+        ensurePropInstCapacity(buf, list.size());
+        glBindBuffer(GL_ARRAY_BUFFER, buf.instVbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, list.size() * sizeof(PropGpuInstance), list.data());
+    };
+
+    for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
+        uploadBatch(m_propLod0[a], m_visPropsLod0[a]);
+        uploadBatch(m_propLod1[a], m_visPropsLod1[a]);
+    }
+}
+
+void DeepDiveWidget::drawInstPropBatches(bool forShadow, bool countTris) {
+    auto drawOne = [&](const PropLodBuffers& buf, size_t count) {
+        if (count == 0 || buf.indexCount == 0) return;
+        GLsizei clamped = static_cast<GLsizei>(std::min(count, static_cast<size_t>(buf.maxInstances)));
+        glBindVertexArray(buf.vao);
+        glDrawElementsInstanced(GL_TRIANGLES, buf.indexCount, GL_UNSIGNED_INT, nullptr, clamped);
+        if (countTris) {
+            m_stats.drawnTriangles += (buf.indexCount / 3) * clamped;
+            m_stats.visibleInstProps += clamped;
+        }
+    };
+
+    for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
+        if (forShadow && !PROP_LOD_CFG[a].castShadow) continue;
+        drawOne(m_propLod0[a], m_visPropsLod0[a].size());
+        drawOne(m_propLod1[a], m_visPropsLod1[a].size());
+    }
+}
+
 void DeepDiveWidget::initializeGL() {
     initializeOpenGLFunctions();
     glEnable(GL_MULTISAMPLE);
@@ -510,6 +688,10 @@ void DeepDiveWidget::initializeGL() {
     m_shadowEnvShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
     m_shadowEnvShader.link();
 
+    m_shadowInstPropShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowInstPropVert);
+    m_shadowInstPropShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
+    m_shadowInstPropShader.link();
+
     m_shadowFaunaShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowFaunaVert);
     m_shadowFaunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
     m_shadowFaunaShader.link();
@@ -517,6 +699,10 @@ void DeepDiveWidget::initializeGL() {
     m_envShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::EnvironmentVert);
     m_envShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::EnvironmentFrag);
     m_envShader.link();
+
+    m_instPropShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::InstPropVert);
+    m_instPropShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::EnvironmentFrag);
+    m_instPropShader.link();
 
     m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::FaunaVert);
     m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::FaunaFrag);
@@ -568,6 +754,8 @@ void DeepDiveWidget::initializeGL() {
 
     glGenVertexArrays(1, &m_rayVAO);
     glGenBuffers(1, &m_rayVBO);
+    glGenBuffers(1, &m_rayEBO);
+    glGenBuffers(1, &m_rayInstVBO);
 
     glGenVertexArrays(1, &m_particleVAO);
     glGenBuffers(1, &m_particleVBO);
@@ -591,9 +779,11 @@ void DeepDiveWidget::rebuildWorld(uint32_t seed) {
                            const std::vector<uint32_t>& inds) {
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(EnvVertex), verts.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(EnvVertex),
+                     verts.empty() ? nullptr : verts.data(), GL_STATIC_DRAW);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, inds.size() * sizeof(uint32_t), inds.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, inds.size() * sizeof(uint32_t),
+                     inds.empty() ? nullptr : inds.data(), GL_STATIC_DRAW);
 
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(EnvVertex),
@@ -614,6 +804,14 @@ void DeepDiveWidget::rebuildWorld(uint32_t seed) {
     setupEnvVAO(m_propVAO, m_propVBO, m_propEBO,
                 m_world.propVertices, m_world.propIndices);
 
+    for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
+        const auto& proto = m_world.propPrototypes[a];
+        setupPropLodBuffers(m_propLod0[a], proto.lod0Verts, proto.lod0Inds, 2048);
+        setupPropLodBuffers(m_propLod1[a], proto.lod1Verts, proto.lod1Inds, 4096);
+        m_visPropsLod0[a].reserve(2048);
+        m_visPropsLod1[a].reserve(4096);
+    }
+
     setupFaunaLodBuffers(m_fishLod0,   m_world.fishLod0Verts,   m_world.fishLod0Inds,   m_world.fishAgents.size());
     setupFaunaLodBuffers(m_fishLod1,   m_world.fishLod1Verts,   m_world.fishLod1Inds,   m_world.fishAgents.size());
     setupFaunaLodBuffers(m_mantaLod0,  m_world.mantaLod0Verts,  m_world.mantaLod0Inds,  m_world.mantaAgents.size());
@@ -632,19 +830,45 @@ void DeepDiveWidget::rebuildWorld(uint32_t seed) {
     m_visAnglerLod0.reserve(m_world.anglerAgents.size());
     m_visAnglerLod1.reserve(m_world.anglerAgents.size());
 
+    m_rayIndexCount    = static_cast<GLsizei>(m_world.godRayMeshInds.size());
+    m_rayInstanceCount = static_cast<GLsizei>(m_world.godRayInstances.size());
+
     glBindVertexArray(m_rayVAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_rayVBO);
-    glBufferData(GL_ARRAY_BUFFER, m_world.godRayVertices.size() * sizeof(RayVertex),
-                 m_world.godRayVertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 m_world.godRayMeshVerts.size() * sizeof(QVector3D),
+                 m_world.godRayMeshVerts.empty() ? nullptr : m_world.godRayMeshVerts.data(),
+                 GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_rayEBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 m_world.godRayMeshInds.size() * sizeof(uint32_t),
+                 m_world.godRayMeshInds.empty() ? nullptr : m_world.godRayMeshInds.data(),
+                 GL_STATIC_DRAW);
+
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RayVertex),
-                          reinterpret_cast<void*>(offsetof(RayVertex, pos)));
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(QVector3D), nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_rayInstVBO);
+    glBufferData(GL_ARRAY_BUFFER,
+                 m_world.godRayInstances.size() * sizeof(GodRayInstance),
+                 m_world.godRayInstances.empty() ? nullptr : m_world.godRayInstances.data(),
+                 GL_STATIC_DRAW);
+
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(RayVertex),
-                          reinterpret_cast<void*>(offsetof(RayVertex, color)));
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(GodRayInstance),
+                          reinterpret_cast<void*>(offsetof(GodRayInstance, topCenterRTop)));
+    glVertexAttribDivisor(1, 1);
+
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(RayVertex),
-                          reinterpret_cast<void*>(offsetof(RayVertex, uv)));
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(GodRayInstance),
+                          reinterpret_cast<void*>(offsetof(GodRayInstance, botCenterRBot)));
+    glVertexAttribDivisor(2, 1);
+
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(GodRayInstance),
+                          reinterpret_cast<void*>(offsetof(GodRayInstance, rayParams)));
+    glVertexAttribDivisor(3, 1);
 
     glBindVertexArray(m_particleVAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_particleVBO);
@@ -669,9 +893,9 @@ void DeepDiveWidget::rebuildWorld(uint32_t seed) {
 float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
     const float sc           = std::max(m_whale.scale, 2.65f);
     const float bodyBot      = 1.12f * sc;
-    const float skimCeilingY = ProcMath::WATER_SURFACE_Y - 0.25f * sc; // допустимый подъём над мелководьем
-    const float maxPassableY = skimCeilingY - bodyBot - 0.6f;          // ~23.8 м для 1x, ~20.1 м для 2x
-    const float trunkR       = 1.25f * sc;                             // реальная полуширина корпуса
+    const float skimCeilingY = ProcMath::WATER_SURFACE_Y - 0.25f * sc;
+    const float maxPassableY = skimCeilingY - bodyBot - 0.6f;
+    const float trunkR       = 1.25f * sc;
 
     const float r = std::sqrt(x * x + z * z);
     const float wallF = ProcMath::sampleBasinWallFactor(x, z, m_seed);
@@ -680,7 +904,6 @@ float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
         return -50.0f - std::max(0.0f, r - safeOuterR) - wallF * 100.0f;
     }
 
-    // Реальная высота рельефа (кекуры уже входят в sampleTerrainHeight — без двойного штрафа)
     float maxObsY = std::max({
         ProcMath::sampleTerrainHeight(x, z, m_seed),
         ProcMath::sampleTerrainHeight(x + trunkR, z, m_seed),
@@ -689,7 +912,6 @@ float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
         ProcMath::sampleTerrainHeight(x, z - trunkR, m_seed)
     });
 
-    // Учитываем только высокие валуны в текущей ячейке spatial grid
     const auto& col = m_world.collision;
     if (!col.cellSpheres.empty()) {
         int cx = std::clamp(static_cast<int>(std::floor((x + col.worldHalfSize) / col.chunkSize)),
@@ -769,10 +991,10 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
     std::uniform_real_distribution<float> phaseDist(0.0f, TWO_PI);
     std::uniform_real_distribution<float> firstSurfCdDist(5.0f, 9.0f);
 
-    const float sizeMult = sizeDist(m_rng); // случайный размер в диапазоне [1.0 .. 2.0]
+    const float sizeMult = sizeDist(m_rng);
 
     m_whale.type           = 2.0f;
-    m_whale.scale          = BASE_WHALE_SCALE * sizeMult; // 2.65 .. 5.30
+    m_whale.scale          = BASE_WHALE_SCALE * sizeMult;
     m_whale.boundingRadius = 6.8f * m_whale.scale;
     m_whale.cruiseSpeed    = 5.0f + 0.85f * (sizeMult - 1.0f);
 
@@ -813,7 +1035,6 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
     };
 
     if (nearPlayer) {
-        // Спавним кита прямо перед взглядом игрока — проходит поперёк экрана слева/справа
         QVector3D camFwd(std::sin(m_yaw), 0.0f, -std::cos(m_yaw));
         QVector3D camRgt(std::cos(m_yaw), 0.0f,  std::sin(m_yaw));
         float sideSign = (sizeDist(m_rng) > 1.5f) ? 1.0f : -1.0f;
@@ -833,7 +1054,6 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
             }
         }
 
-        // Если игрок смотрит вплотную в отвесную стену — ищем чистый коридор в 360° рядом с игроком
         if (bestScore < 55.0f) {
             for (int i = 0; i < 24; ++i) {
                 float ang = (TWO_PI * static_cast<float>(i)) / 24.0f;
@@ -847,7 +1067,6 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
         }
     }
 
-    // При старте мира (или если игрок совсем за краем кальдеры) — чистая центральная лагуна
     if (!nearPlayer || bestScore < 30.0f) {
         bestScore = -1e9f;
         float baseAng = phaseDist(m_rng);
@@ -900,15 +1119,13 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     const float bodyBot           = 1.12f * sc;
     const float submergedCeilingY = ProcMath::WATER_SURFACE_Y - (0.85f * sc + 0.9f);
     const float skimCeilingY      = ProcMath::WATER_SURFACE_Y - 0.25f * sc;
-    const float surfacingCeilingY = ProcMath::WATER_SURFACE_Y; // ватерлиния ровно посередине корпуса
+    const float surfacingCeilingY = ProcMath::WATER_SURFACE_Y;
     const float cruiseY           = submergedCeilingY - 0.8f;
     const float safeTurnR         = ProcMath::BASIN_INNER_RADIUS - (65.0f + halfLen);
 
-    // Порог срабатывания обхода и порог «окна возможностей» (в реальных метрах)
-    const float triggerDist = halfLen * 1.35f + 16.0f; // ~35 м (1x) .. ~53 м (2x)
-    const float openDist    = halfLen * 1.80f + 22.0f; // ~47 м (1x) .. ~72 м (2x)
+    const float triggerDist = halfLen * 1.35f + 16.0f;
+    const float openDist    = halfLen * 1.80f + 22.0f;
 
-    // Плавный подъём потолка при всплытии и погружении
     const float surfBlendRate = m_whaleSurfacing ? (dt * 0.65f) : (dt * 0.20f);
     m_whaleSurfaceBlend = ProcMath::clamp(
         m_whaleSurfaceBlend + (m_whaleSurfacing ? surfBlendRate : -surfBlendRate), 0.0f, 1.0f);
@@ -922,19 +1139,17 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     const bool  atRimHeadingOut = (distFromCenter > safeTurnR)
                                  && ((fxPre * m_whale.pos.x() + fzPre * m_whale.pos.z()) > -0.10f * distFromCenter);
 
-    // Однократный уверенный выбор стороны разворота: ищем ближайшую открытую сторону
     auto pickTurnDirection = [&](const QVector3D* wallPushDir) -> float {
-        const float sideX =  std::cos(m_whale.yaw); // направление при +yaw
+        const float sideX =  std::cos(m_whale.yaw);
         const float sideZ = -std::sin(m_whale.yaw);
 
-        // Ищем минимальный угол до настоящего окна (>= openDist) влево и вправо
         float posWindowAng = 99.0f;
         float negWindowAng = 99.0f;
         float posSum = 0.0f;
         float negSum = 0.0f;
 
         for (int step = 1; step <= 11; ++step) {
-            float a = static_cast<float>(step) * (PI / 12.0f); // 15° .. 165°
+            float a = static_cast<float>(step) * (PI / 12.0f);
             float dPos = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), wrapAngle(m_whale.yaw + a), 110.0f);
             float dNeg = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), wrapAngle(m_whale.yaw - a), 110.0f);
             posSum += dPos;
@@ -943,7 +1158,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
             if (negWindowAng > 10.0f && dNeg >= openDist) negWindowAng = a;
         }
 
-        // У края кальдеры отдаём предпочтение стороне, уводящей внутрь лагуны
         if (distFromCenter > ProcMath::BASIN_INNER_RADIUS * 0.62f) {
             float inwardDot = (-m_whale.pos.x() * sideX - m_whale.pos.z() * sideZ) / std::max(distFromCenter, 1.0f);
             if (inwardDot > 0.25f)  return  1.0f;
@@ -961,16 +1175,13 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     };
 
     auto startAvoidingTurn = [&](const QVector3D* wallPushDir) {
-        if (m_whaleState == WhaleState::AvoidingTurn) return; // сторону не меняем до открытия окна!
+        if (m_whaleState == WhaleState::AvoidingTurn) return;
         m_whaleState         = WhaleState::AvoidingTurn;
         m_whaleTurnDir       = pickTurnDirection(wallPushDir);
         m_whaleAvoidTimer    = 0.0f;
         m_whaleAvoidAccumYaw = 0.0f;
     };
 
-    // ------------------------------------------------------------------------
-    // 1. Периодическое всплытие (нижняя половина в воде, верхняя — над гладью)
-    // ------------------------------------------------------------------------
     if (m_whaleSurfacing) {
         m_whaleSurfaceTimer -= dt;
         if (m_whaleSurfaceTimer <= 0.0f || m_whaleState == WhaleState::AvoidingTurn) {
@@ -990,9 +1201,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // 2. Конечный автомат: уверенное плавание или зафиксированный разворот
-    // ------------------------------------------------------------------------
     float targetYawRate = 0.0f;
     float speedScale    = 1.0f;
 
@@ -1020,7 +1228,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         targetYawRate = ProcMath::clamp(yawErr * 0.85f, -0.40f, 0.40f);
         speedScale    = 1.0f;
     } else {
-        // AvoidingTurn: уверенный поворот строго в m_whaleTurnDir до открытия окна
         m_whaleAvoidTimer += dt;
 
         float prox = ProcMath::clamp(freeForward / openDist, 0.0f, 1.0f);
@@ -1038,7 +1245,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
                             && (freeRight >= openDist * 0.60f)
                             && inwardOk;
 
-        // Страховка: если прошли дугу > 215° и идеального окна нет (узкая бухта), выходим в лучший коридор
         if (!windowOpened && m_whaleAvoidAccumYaw > 3.75f) {
             float bestYaw = m_whale.yaw;
             float bestD   = -1.0f;
@@ -1049,7 +1255,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
             }
             if (std::abs(wrapAngle(bestYaw - m_whale.yaw)) < 0.35f || m_whaleAvoidAccumYaw > 5.8f) {
                 if (bestD < 14.0f) {
-                    // Крайний случай — мягко выводим из тупика к центру лагуны
                     QVector3D toCenter(-m_whale.pos.x(), 0.0f, -m_whale.pos.z());
                     if (toCenter.lengthSquared() > 1.0f) {
                         toCenter.normalize();
@@ -1081,7 +1286,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
         }
     }
 
-    // Плавная инерция угловой скорости
     m_whaleCurrentYawRate = ProcMath::mix(m_whaleCurrentYawRate, targetYawRate,
                                           ProcMath::clamp(dt * 3.5f, 0.0f, 1.0f));
     float yawStep = m_whaleCurrentYawRate * dt;
@@ -1095,7 +1299,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     const float rx =  fz;
     const float rz = -fx;
 
-    // Замер высоты дна под телом и немного впереди — чтобы плавно подниматься над рифами
     float maxLocalFloor = std::max({
         ProcMath::sampleTerrainHeight(m_whale.pos.x(), m_whale.pos.z(), m_seed),
         ProcMath::sampleTerrainHeight(m_whale.pos.x() + fx * (halfLen * 0.85f), m_whale.pos.z() + fz * (halfLen * 0.85f), m_seed),
@@ -1124,9 +1327,6 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     m_whale.vel = forward * (m_whale.cruiseSpeed * speedScale);
     m_whale.pos += m_whale.vel * dt;
 
-    // ------------------------------------------------------------------------
-    // 3. Мягкое разрешение коллизий (только позиция, без вмешательства в yaw)
-    // ------------------------------------------------------------------------
     const QVector3D checkPts[3] = {
         m_whale.pos,
         m_whale.pos + QVector3D(fx, 0.0f, fz) * (halfLen * 0.72f),
@@ -1551,7 +1751,6 @@ QVector3D DeepDiveWidget::cameraRight() const {
 }
 
 void DeepDiveWidget::updateSimulation(float dt) {
-    // 1. Опрос геймпада (XInput / USB HID)
     const GamepadState gp = m_gamepad.poll(dt);
     m_gamepadConnected = gp.connected;
     m_gamepadIsXInput  = gp.isXInput;
@@ -1575,11 +1774,10 @@ void DeepDiveWidget::updateSimulation(float dt) {
         }
         if (gp.regenWorld) {
             m_seed += 17u;
-            rebuildWorld(m_seed); // OpenGL-контекст уже активен внутри paintGL()
+            rebuildWorld(m_seed);
         }
     }
 
-    // 2. Клавиатура + аналоговый левый стик и триггеры геймпада
     QVector3D wishDir(0.0f, 0.0f, 0.0f);
     QVector3D fwd = cameraForward();
     QVector3D rgt = cameraRight();
@@ -1595,7 +1793,6 @@ void DeepDiveWidget::updateSimulation(float dt) {
         wishDir += fwd * gp.moveY + rgt * gp.moveX + QVector3D(0.0f, gp.vertical, 0.0f);
     }
 
-    // Сохраняем плавную аналоговую скорость стика, ограничивая максимум длиной 1.0
     float wishLenSq = wishDir.lengthSquared();
     if (wishLenSq > 1.0f) {
         wishDir /= std::sqrt(wishLenSq);
@@ -1673,15 +1870,17 @@ void DeepDiveWidget::paintGL() {
     int physH = std::max(64, int(height() * dpr));
     resizePostProcessBuffers(physW, physH);
 
-    QVector3D waterShallow, waterDeep, sunColor;
+    QVector3D waterShallow, waterDeep, sunColor, carpetTint, kelpTint;
     float vibrance = 1.0f;
     float fogScale = 1.0f;
 
     if (m_paletteIndex == 0) {
-        // Tropical Reef (Vibrant): солнечная бирюзовая толща, выраженный туман, сочные краски
+        // Tropical Reef (Vibrant): солнечная бирюзовая толща, изумрудный ковёр и золотистая ламинария
         waterShallow = QVector3D(0.11f, 0.68f, 0.78f);
         waterDeep    = QVector3D(0.02f, 0.24f, 0.38f);
         sunColor     = QVector3D(0.94f, 1.06f, 0.96f);
+        carpetTint   = QVector3D(0.28f, 0.90f, 0.44f);
+        kelpTint     = QVector3D(0.88f, 1.06f, 0.60f);
         vibrance     = 1.38f;
         fogScale     = 1.05f;
     } else if (m_paletteIndex == 1) {
@@ -1689,13 +1888,17 @@ void DeepDiveWidget::paintGL() {
         waterShallow = QVector3D(0.12f, 0.62f, 0.66f);
         waterDeep    = QVector3D(0.025f, 0.22f, 0.30f);
         sunColor     = QVector3D(0.68f, 0.98f, 0.96f);
+        carpetTint   = QVector3D(0.20f, 0.78f, 0.46f);
+        kelpTint     = QVector3D(0.74f, 0.98f, 0.54f);
         vibrance     = 1.15f;
         fogScale     = 1.12f;
     } else if (m_paletteIndex == 2) {
-        // Purple Grotto
+        // Purple Grotto: пурпурно-розовый ковёр дна и фиолетовые оттенки колонн ламинарии
         waterShallow = QVector3D(0.38f, 0.42f, 0.72f);
         waterDeep    = QVector3D(0.11f, 0.08f, 0.26f);
         sunColor     = QVector3D(0.80f, 0.86f, 1.12f);
+        carpetTint   = QVector3D(0.98f, 0.28f, 0.72f);
+        kelpTint     = QVector3D(0.90f, 0.46f, 0.98f);
         vibrance     = 1.24f;
         fogScale     = 1.12f;
     } else {
@@ -1703,6 +1906,8 @@ void DeepDiveWidget::paintGL() {
         waterShallow = QVector3D(0.07f, 0.38f, 0.54f);
         waterDeep    = QVector3D(0.01f, 0.08f, 0.16f);
         sunColor     = QVector3D(0.52f, 0.88f, 1.02f);
+        carpetTint   = QVector3D(0.18f, 0.60f, 0.66f);
+        kelpTint     = QVector3D(0.46f, 0.80f, 0.72f);
         vibrance     = 1.08f;
         fogScale     = 1.25f;
     }
@@ -1795,18 +2000,21 @@ void DeepDiveWidget::paintGL() {
                                      static_cast<GLint>(chunk.terrainBaseVertex));
         }
 
+        // Статические тени (затонувшие корабли)
         glBindVertexArray(m_propVAO);
         for (const auto& [idx, d] : shadowChunks) {
-            const auto& chunk = m_world.chunks[idx];
-            drawPropRange((d < 140.0f) ? chunk.boulderLod0 : chunk.boulderLod1, false);
-            drawPropRange((d < 120.0f) ? chunk.kelpLod0    : chunk.kelpLod1,    false);
-            if (d < 95.0f)       drawPropRange(chunk.floraLod0, false);
-            else if (d < 155.0f) drawPropRange(chunk.floraLod1, false);
-            drawPropRange(chunk.shipwreckRange, false);
+            drawPropRange(m_world.chunks[idx].shipwreckRange, false);
         }
 
-        cullAndUploadFauna(lightFrustum);
+        // Инстансированные тени (колонны ламинарии, скальные выступы, валуны, губки, кораллы)
+        gatherAndUploadInstProps(shadowChunks, true);
+        m_shadowInstPropShader.bind();
+        m_shadowInstPropShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
+        m_shadowInstPropShader.setUniformValue("uTime", m_time);
+        drawInstPropBatches(true, false);
 
+        // Тени фауны
+        cullAndUploadFauna(lightFrustum);
         m_shadowFaunaShader.bind();
         m_shadowFaunaShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
         m_shadowFaunaShader.setUniformValue("uTime", m_time);
@@ -1828,6 +2036,7 @@ void DeepDiveWidget::paintGL() {
     m_stats.totalChunks = static_cast<int>(m_world.chunks.size());
     m_stats.lodCounts[0] = m_stats.lodCounts[1] = m_stats.lodCounts[2] = m_stats.lodCounts[3] = 0;
     m_stats.drawnTriangles = 0;
+    m_stats.visibleInstProps = 0;
 
     cullAndUploadFauna(camFrustum);
 
@@ -1859,34 +2068,36 @@ void DeepDiveWidget::paintGL() {
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     }
 
+    auto bindCommonEnvUniforms = [&](QOpenGLShaderProgram& prog) {
+        prog.bind();
+        prog.setUniformValue("uRockTex", 0);
+        prog.setUniformValue("uShadowMap", 3);
+        prog.setUniformValue("uViewProj", viewProj);
+        prog.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
+        prog.setUniformValue("uCamPos", m_camPos);
+        prog.setUniformValue("uSunDir", sunDir);
+        prog.setUniformValue("uSunColor", sunColor);
+        prog.setUniformValue("uWaterColorDeep", waterDeep);
+        prog.setUniformValue("uWaterColorShallow", waterShallow);
+        prog.setUniformValue("uVibrance", vibrance);
+        prog.setUniformValue("uFogScale", fogScale);
+        prog.setUniformValue("uTime", m_time);
+        prog.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
+        prog.setUniformValue("uLureCount", m_lureCount);
+        if (m_lureCount > 0) {
+            prog.setUniformValueArray("uLurePos", m_lurePositions.data(), m_lureCount);
+        }
+    };
+
     glDepthFunc(GL_LESS);
-    m_envShader.bind();
-    m_envShader.setUniformValue("uRockTex", 0);
-    m_envShader.setUniformValue("uShadowMap", 3);
-    m_envShader.setUniformValue("uViewProj", viewProj);
-    m_envShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
-    m_envShader.setUniformValue("uCamPos", m_camPos);
-    m_envShader.setUniformValue("uSunDir", sunDir);
-    m_envShader.setUniformValue("uSunColor", sunColor);
-    m_envShader.setUniformValue("uWaterColorDeep", waterDeep);
-    m_envShader.setUniformValue("uWaterColorShallow", waterShallow);
-    m_envShader.setUniformValue("uVibrance", vibrance);
-    m_envShader.setUniformValue("uFogScale", fogScale);
-    m_envShader.setUniformValue("uTime", m_time);
-    m_envShader.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
-    m_envShader.setUniformValue("uLureCount", m_lureCount);
-    if (m_lureCount > 0) {
-        m_envShader.setUniformValueArray("uLurePos", m_lurePositions.data(), m_lureCount);
-    }
+    bindCommonEnvUniforms(m_envShader);
 
     static constexpr float TERRAIN_LOD_THRESH[3] = {210.0f, 310.0f, 395.0f};
-    static constexpr float BOULDER_LOD_THRESH[2] = {265.0f, 420.0f};
-    static constexpr float KELP_LOD_THRESH[2]    = {190.0f, 320.0f};
-    static constexpr float FLORA_LOD_THRESH[2]   = {185.0f, 315.0f};
 
     std::vector<std::pair<int, float>> visibleChunks;
     visibleChunks.reserve(128);
 
+    // 1.1. Рельеф дна и скальных стен (4-уровневый LOD)
     glBindVertexArray(m_terrainVAO);
     for (int i = 0; i < static_cast<int>(m_world.chunks.size()); ++i) {
         const auto& chunk = m_world.chunks[i];
@@ -1912,22 +2123,11 @@ void DeepDiveWidget::paintGL() {
         m_stats.drawnTriangles += static_cast<int>(range.indexCount / 3);
     }
 
+    // 1.2. Статические уникальные пропы (затонувшие корабли и абиссальные светящиеся перья)
     glBindVertexArray(m_propVAO);
     for (const auto& [idx, d] : visibleChunks) {
         const auto& chunk = m_world.chunks[idx];
         ChunkLodState& st = m_chunkLodStates[idx];
-
-        st.boulderLod = updateLodWithHysteresis(st.boulderLod, d, BOULDER_LOD_THRESH, 2, 10.0f);
-        if (st.boulderLod == 0)      drawPropRange(chunk.boulderLod0, true);
-        else if (st.boulderLod == 1) drawPropRange(chunk.boulderLod1, true);
-
-        st.kelpLod = updateLodWithHysteresis(st.kelpLod, d, KELP_LOD_THRESH, 2, 8.0f);
-        if (st.kelpLod == 0)         drawPropRange(chunk.kelpLod0, true);
-        else if (st.kelpLod == 1)    drawPropRange(chunk.kelpLod1, true);
-
-        st.floraLod = updateLodWithHysteresis(st.floraLod, d, FLORA_LOD_THRESH, 2, 8.0f);
-        if (st.floraLod == 0)        drawPropRange(chunk.floraLod0, true);
-        else if (st.floraLod == 1)   drawPropRange(chunk.floraLod1, true);
 
         if (st.detailVisible && d > 192.0f)       st.detailVisible = false;
         else if (!st.detailVisible && d < 176.0f) st.detailVisible = true;
@@ -1936,25 +2136,15 @@ void DeepDiveWidget::paintGL() {
         if (d < 430.0f) drawPropRange(chunk.shipwreckRange, true);
     }
 
-    m_faunaShader.bind();
-    m_faunaShader.setUniformValue("uRockTex", 0);
-    m_faunaShader.setUniformValue("uShadowMap", 3);
-    m_faunaShader.setUniformValue("uViewProj", viewProj);
-    m_faunaShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
-    m_faunaShader.setUniformValue("uCamPos", m_camPos);
-    m_faunaShader.setUniformValue("uSunDir", sunDir);
-    m_faunaShader.setUniformValue("uSunColor", sunColor);
-    m_faunaShader.setUniformValue("uWaterColorDeep", waterDeep);
-    m_faunaShader.setUniformValue("uWaterColorShallow", waterShallow);
-    m_faunaShader.setUniformValue("uVibrance", vibrance);
-    m_faunaShader.setUniformValue("uFogScale", fogScale);
-    m_faunaShader.setUniformValue("uTime", m_time);
-    m_faunaShader.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
-    m_faunaShader.setUniformValue("uLureCount", m_lureCount);
-    if (m_lureCount > 0) {
-        m_faunaShader.setUniformValueArray("uLurePos", m_lurePositions.data(), m_lureCount);
-    }
+    // 1.3. Плотные GPU-инстансируемые пропы (валуны, 3D-уступы скал, колонны ламинарии, губки, ковёр, кораллы)
+    gatherAndUploadInstProps(visibleChunks, false);
+    bindCommonEnvUniforms(m_instPropShader);
+    m_instPropShader.setUniformValue("uCarpetTint", carpetTint);
+    m_instPropShader.setUniformValue("uKelpTint", kelpTint);
+    drawInstPropBatches(false, true);
 
+    // 1.4. Фауна (рыбы, скаты-манты, кит, удильщики)
+    bindCommonEnvUniforms(m_faunaShader);
     drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   true);
     drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   true);
     drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  true);
@@ -1964,8 +2154,7 @@ void DeepDiveWidget::paintGL() {
     drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), true);
     drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), true);
 
-    // Сбрасываем буфер глубины геометрии до рисования воды, чтобы WaterSurfaceFrag
-    // точно видел линию контакта со скалами (пена, разводы, пузырьки и отражённая рябь)
+    // Сброс буфера глубины геометрии для контактной пены и ряби на воде
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_msaaFBO);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_resolveFBO);
     glBlitFramebuffer(0, 0, physW, physH, 0, 0, physW, physH, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
@@ -2009,12 +2198,39 @@ void DeepDiveWidget::paintGL() {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glDepthMask(GL_FALSE);
 
-    m_rayShader.bind();
-    m_rayShader.setUniformValue("uViewProj", viewProj);
-    m_rayShader.setUniformValue("uCamPos", m_camPos);
-    m_rayShader.setUniformValue("uTime", m_time);
-    glBindVertexArray(m_rayVAO);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(m_world.godRayVertices.size()));
+    if (m_rayIndexCount > 0 && m_rayInstanceCount > 0) {
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT); // рендерим только задние грани: работает и снаружи, и внутри столба
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_rockTex);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, m_shadowDepthTex);
+
+        m_rayShader.bind();
+        m_rayShader.setUniformValue("uRockTex", 0);
+        m_rayShader.setUniformValue("uSceneDepthTex", 1);
+        m_rayShader.setUniformValue("uShadowMap", 3);
+        m_rayShader.setUniformValue("uViewProj", viewProj);
+        m_rayShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
+        m_rayShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
+        m_rayShader.setUniformValue("uCamPos", m_camPos);
+        m_rayShader.setUniformValue("uSunDir", sunDir);
+        m_rayShader.setUniformValue("uSunColor", sunColor);
+        m_rayShader.setUniformValue("uWaterColorShallow", waterShallow);
+        m_rayShader.setUniformValue("uFogScale", fogScale);
+        m_rayShader.setUniformValue("uTime", m_time);
+        m_rayShader.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
+
+        glBindVertexArray(m_rayVAO);
+        glDrawElementsInstanced(GL_TRIANGLES, m_rayIndexCount, GL_UNSIGNED_INT, nullptr, m_rayInstanceCount);
+
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+    }
 
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     m_particleShader.bind();
@@ -2128,8 +2344,8 @@ void DeepDiveWidget::paintGL() {
 
         QString hud = QString(
                           "GPU: %1 | %2x MSAA | Shadows: %3 | PostFX: %4 | Audio: %5 | Pad: %6 | FPS: %7\n"
-                          "Chunks: %8/%9 (LOD0:%10 LOD1:%11 LOD2:%12 LOD3:%13) | Tris: %14k | Fish: %15+%16 | Mantas: %17+%18 | Anglers: %19\n"
-                          "Depth: %20m | R: %21m %22 | Seed: %23 | Biome: %24 | [Mouse/Pad] Look [Esc] Cursor/Exit [`] HUD [B] Biome [P] PostFX [K] Whale"
+                          "Chunks: %8/%9 (LOD0:%10 LOD1:%11 LOD2:%12 LOD3:%13) | Props: %14 | Tris: %15k | Fish: %16+%17 | Mantas: %18+%19 | Anglers: %20\n"
+                          "Depth: %21m | R: %22m %23 | Seed: %24 | Biome: %25 | [Mouse/Pad] Look [Esc] Cursor/Exit [`] HUD [B] Biome [P] PostFX [K] Whale"
                           ).arg(m_glRendererInfo)
                           .arg(m_activeSamples)
                           .arg(m_shadowsEnabled ? "ON" : "OFF")
@@ -2143,6 +2359,7 @@ void DeepDiveWidget::paintGL() {
                           .arg(m_stats.lodCounts[1])
                           .arg(m_stats.lodCounts[2])
                           .arg(m_stats.lodCounts[3])
+                          .arg(m_stats.visibleInstProps)
                           .arg(m_stats.drawnTriangles / 1000.0, 0, 'f', 1)
                           .arg(m_stats.visibleFishLod0)
                           .arg(m_stats.visibleFishLod1)
@@ -2155,8 +2372,8 @@ void DeepDiveWidget::paintGL() {
                           .arg(m_seed)
                           .arg(biomeNames[m_paletteIndex]);
 
-        painter.fillRect(QRect(14, 14, 1245, 68), QColor(5, 22, 32, 165));
-        painter.drawText(QRect(24, 18, 1225, 60), Qt::AlignLeft | Qt::AlignVCenter, hud);
+        painter.fillRect(QRect(14, 14, 1255, 68), QColor(5, 22, 32, 165));
+        painter.drawText(QRect(24, 18, 1235, 60), Qt::AlignLeft | Qt::AlignVCenter, hud);
     }
 }
 
@@ -2224,7 +2441,6 @@ void DeepDiveWidget::mousePressEvent(QMouseEvent* event) {
 
 void DeepDiveWidget::mouseMoveEvent(QMouseEvent* event) {
     if (!m_mouseCaptured) {
-        // Автоматически включаем свободный обзор при первом движении мыши в активном окне
         if (!m_userReleasedMouse && isActiveWindow()) {
             setMouseCapture(true);
         }

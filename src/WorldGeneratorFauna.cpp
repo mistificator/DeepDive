@@ -1,22 +1,16 @@
 #include "WorldGenerator.h"
 #include "Noise.h"
-#include <cmath>
 #include <algorithm>
-#include <thread>
+#include <cmath>
+#include <vector>
 
 namespace {
-constexpr float PI = 3.14159265358979323846f;
+constexpr float PI     = 3.14159265358979323846f;
+constexpr float TWO_PI = 6.28318530717958647692f;
 
 inline int worldToChunkCoord(float v, float halfSize, float chunkSize, int chunksPerSide) {
     int c = static_cast<int>(std::floor((v + halfSize) / chunkSize));
     return std::clamp(c, 0, chunksPerSide - 1);
-}
-
-// Маска органических «островков» сочной зелени на неглубоких плато у поверхности
-inline float samplePlateauIslandMask(float wx, float wz, uint32_t seed) {
-    float n1 = ProcMath::fbm(wx * 0.030f + 3.1f, 0.4f, wz * 0.030f - 1.7f, 3, seed + 1607u);
-    float n2 = ProcMath::fbm(wx * 0.072f - 2.3f, 1.1f, wz * 0.072f + 4.9f, 2, seed + 1621u);
-    return ProcMath::smoothstep(0.02f, 0.30f, n1 * 0.78f + n2 * 0.22f);
 }
 
 void computeClosestPointOnOBB(const QVector3D& p, const OBBCollider& obb,
@@ -60,7 +54,7 @@ void computeClosestPointOnOBB(const QVector3D& p, const OBBCollider& obb,
     }
 }
 
-// Деревянная балка между двумя точками p0 -> p1 (для кораблей)
+// Деревянная балка между двумя точками p0 -> p1 (для затонувших кораблей)
 void appendTimberSegment(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
                          const QVector3D& p0, const QVector3D& p1,
                          float widthA, float widthB,
@@ -110,7 +104,7 @@ void appendTimberSegment(std::vector<EnvVertex>& verts, std::vector<uint32_t>& i
     addQuad(c4, c5, c6, c7,  dir);
 }
 
-// Обшивочная доска (4 вершины с толщиной)
+// Обшивочная доска корпуса (4 вершины с толщиной)
 void appendPlankStrip(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
                       const QVector3D& a0, const QVector3D& a1,
                       const QVector3D& b0, const QVector3D& b1,
@@ -119,7 +113,8 @@ void appendPlankStrip(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds
     QVector3D n = outNormal.normalized();
     QVector3D off = n * thickness;
 
-    auto addQuad = [&](const QVector3D& p0, const QVector3D& p1, const QVector3D& p2, const QVector3D& p3, const QVector3D& qn, const QVector3D& col) {
+    auto addQuad = [&](const QVector3D& p0, const QVector3D& p1, const QVector3D& p2, const QVector3D& p3,
+                       const QVector3D& qn, const QVector3D& col) {
         uint32_t base = static_cast<uint32_t>(verts.size());
         verts.push_back({p0, qn, col, QVector2D(matType, 0.0f)});
         verts.push_back({p1, qn, col, QVector2D(matType, 0.0f)});
@@ -132,424 +127,8 @@ void appendPlankStrip(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds
     addQuad(b0, a0, a1, b1, -n, color * 0.78f);
 
     QVector3D upEdge = QVector3D::crossProduct(b1 - a1, n).normalized();
-    addQuad(a1, b1, b1 + off, a1 + off, upEdge, color * 0.85f);
+    addQuad(a1, b1, b1 + off, a1 + off,  upEdge, color * 0.85f);
     addQuad(b0, a0, a0 + off, b0 + off, -upEdge, color * 0.85f);
-}
-
-// ============================================================================
-// ПРОЦЕДУРНЫЕ ГЕНЕРАТОРЫ РАЗНООБРАЗНОЙ ПОДВОДНОЙ ФЛОРЫ
-// ============================================================================
-
-// 0. Островковая солнечная зелень неглубоких плато (широкие веерные листья и сочные ленты у поверхности)
-void appendPlateauGreeneryTuft(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                               const QVector3D& center, float scale, float maxHeight,
-                               uint32_t tuftSeed, bool highLod) {
-    float cHash = ProcMath::hash3(static_cast<int>(tuftSeed), 3, 5, 1709u);
-    QVector3D baseCol, tipCol;
-    if (cHash < 0.45f) {
-        baseCol = QVector3D(0.11f, 0.46f, 0.20f);
-        tipCol  = QVector3D(0.46f, 0.88f, 0.28f); // сочный салатово-изумрудный
-    } else if (cHash < 0.78f) {
-        baseCol = QVector3D(0.08f, 0.44f, 0.30f);
-        tipCol  = QVector3D(0.28f, 0.86f, 0.52f); // тропический изумруд
-    } else {
-        baseCol = QVector3D(0.22f, 0.48f, 0.14f);
-        tipCol  = QVector3D(0.68f, 0.88f, 0.22f); // солнечная золотисто-зелёная розетка
-    }
-
-    int leaves = highLod ? 8 : 4;
-    int segs   = highLod ? 3 : 2;
-    QVector3D rootBase = center - QVector3D(0.0f, 0.12f, 0.0f);
-
-    for (int i = 0; i < leaves; ++i) {
-        float h1 = ProcMath::hash3(static_cast<int>(tuftSeed), i, 1, 1721u);
-        float h2 = ProcMath::hash3(static_cast<int>(tuftSeed), i, 2, 1721u);
-        float h3 = ProcMath::hash3(static_cast<int>(tuftSeed), i, 3, 1721u);
-
-        float ang    = (2.0f * PI * i) / leaves + h1 * 0.55f;
-        bool broad   = (i % 2 == 0);
-        float rawH   = (broad ? (0.95f + h2 * 0.95f) : (1.25f + h2 * 1.15f)) * scale;
-        float height = std::min(rawH, maxHeight);
-        if (height < 0.35f) continue;
-
-        float spread = (broad ? (0.85f + h3 * 0.65f) : (0.45f + h3 * 0.45f)) * scale;
-        float maxW   = (broad ? (highLod ? 0.36f : 0.48f) : (highLod ? 0.18f : 0.26f)) * scale;
-
-        QVector3D dir(std::cos(ang), 0.0f, std::sin(ang));
-        QVector3D side(-dir.z(), 0.0f, dir.x());
-        QVector3D norm = (QVector3D(0.0f, 0.82f, 0.0f) + dir * 0.55f).normalized();
-        QVector3D root = rootBase + dir * (0.14f + h1 * 0.36f * scale);
-
-        uint32_t vb = static_cast<uint32_t>(verts.size());
-        for (int s = 0; s <= segs; ++s) {
-            float t = static_cast<float>(s) / static_cast<float>(segs);
-            float archY = height * (broad ? (t * (1.22f - 0.35f * t)) : t);
-            float archR = spread * std::pow(t, broad ? 1.25f : 1.55f);
-            float w = maxW * (broad ? std::sin(std::max(0.14f, t * 0.92f) * PI) : (1.0f - t * 0.78f));
-            QVector3D p = root + dir * archR + QVector3D(0.0f, archY, 0.0f);
-            QVector3D col = ProcMath::mix(baseCol, tipCol, t);
-            verts.push_back({p - side * w, norm, col, QVector2D(2.0f, t * 0.88f)});
-            verts.push_back({p + side * w, norm, col, QVector2D(2.0f, t * 0.88f)});
-        }
-        for (int s = 0; s < segs; ++s) {
-            uint32_t i0 = vb + s * 2;
-            inds.insert(inds.end(), {i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2});
-        }
-    }
-}
-
-// 1. Пучок морской травы (Posidonia / Eelgrass)
-void appendSeagrassPatch(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                         const QVector3D& center, float scale, uint32_t patchSeed, bool highLod) {
-    int blades = highLod ? 7 : 3;
-    int segs   = highLod ? 3 : 2;
-    QVector3D baseCol(0.10f, 0.38f, 0.20f);
-    QVector3D tipCol(0.36f, 0.82f, 0.36f);
-
-    for (int b = 0; b < blades; ++b) {
-        float h1 = ProcMath::hash3(static_cast<int>(patchSeed), b, 1, 401u);
-        float h2 = ProcMath::hash3(static_cast<int>(patchSeed), b, 2, 401u);
-        float h3 = ProcMath::hash3(static_cast<int>(patchSeed), b, 3, 401u);
-
-        float ang = (2.0f * PI * b) / blades + h1 * 0.85f;
-        float offR = (highLod ? 0.15f : 0.20f) + h2 * 0.75f * scale;
-        float height = (1.35f + h3 * 1.45f) * scale;
-        float width  = (highLod ? 0.13f : 0.22f) * scale;
-        float lean   = (0.28f + h1 * 0.36f) * scale;
-
-        QVector3D dir(std::cos(ang), 0.0f, std::sin(ang));
-        QVector3D side(-dir.z(), 0.0f, dir.x());
-        QVector3D norm = (dir + QVector3D(0.0f, 0.35f, 0.0f)).normalized();
-        QVector3D root = center + dir * offR - QVector3D(0.0f, 0.08f, 0.0f);
-
-        uint32_t vb = static_cast<uint32_t>(verts.size());
-        for (int s = 0; s <= segs; ++s) {
-            float t = static_cast<float>(s) / static_cast<float>(segs);
-            float w = width * (1.0f - t * 0.82f);
-            QVector3D p = root + dir * (lean * t * t) + QVector3D(0.0f, height * t, 0.0f);
-            QVector3D col = ProcMath::mix(baseCol, tipCol, t);
-            verts.push_back({p - side * w, norm, col, QVector2D(2.0f, t * 0.92f)});
-            verts.push_back({p + side * w, norm, col, QVector2D(2.0f, t * 0.92f)});
-        }
-        for (int s = 0; s < segs; ++s) {
-            uint32_t i0 = vb + s * 2;
-            inds.insert(inds.end(), {i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2});
-        }
-    }
-}
-
-// 2. Кустистые листовые водоросли (Sargassum / Bushy Algae — средний ярус 1.6..3.8 м)
-void appendBushyAlgae(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                      const QVector3D& center, float scale, uint32_t bushSeed, bool highLod) {
-    float cHash = ProcMath::hash3(static_cast<int>(bushSeed), 9, 3, 521u);
-    QVector3D baseCol, tipCol;
-    if (cHash < 0.42f) {
-        baseCol = QVector3D(0.13f, 0.40f, 0.22f);
-        tipCol  = QVector3D(0.40f, 0.82f, 0.36f);
-    } else if (cHash < 0.75f) {
-        baseCol = QVector3D(0.34f, 0.30f, 0.10f);
-        tipCol  = QVector3D(0.78f, 0.64f, 0.18f);
-    } else {
-        baseCol = QVector3D(0.44f, 0.12f, 0.24f);
-        tipCol  = QVector3D(0.88f, 0.32f, 0.44f);
-    }
-
-    int fronds = highLod ? 6 : 3;
-    int segs   = highLod ? 3 : 2;
-    for (int f = 0; f < fronds; ++f) {
-        float h1 = ProcMath::hash3(static_cast<int>(bushSeed), f, 1, 523u);
-        float h2 = ProcMath::hash3(static_cast<int>(bushSeed), f, 2, 523u);
-
-        float ang = (2.0f * PI * f) / fronds + h1 * 0.55f;
-        float len = (1.85f + h2 * 1.45f) * scale;
-        float spread = (0.75f + h1 * 0.65f) * scale;
-        float maxW = (highLod ? 0.44f : 0.62f) * scale;
-
-        QVector3D dir(std::cos(ang), 0.0f, std::sin(ang));
-        QVector3D side(-dir.z(), 0.0f, dir.x());
-        QVector3D norm = (QVector3D(0.0f, 0.75f, 0.0f) + dir * 0.65f).normalized();
-        QVector3D root = center - QVector3D(0.0f, 0.12f, 0.0f);
-
-        uint32_t vb = static_cast<uint32_t>(verts.size());
-        for (int s = 0; s <= segs; ++s) {
-            float t = static_cast<float>(s) / static_cast<float>(segs);
-            float archY = len * (t * (1.28f - 0.38f * t));
-            float archR = spread * std::pow(t, 1.35f);
-            float w = maxW * std::sin(std::max(0.12f, t * 0.92f) * PI);
-            QVector3D p = root + dir * archR + QVector3D(0.0f, archY, 0.0f);
-            QVector3D col = ProcMath::mix(baseCol, tipCol, t);
-            verts.push_back({p - side * w, norm, col, QVector2D(2.0f, t * 0.85f)});
-            verts.push_back({p + side * w, norm, col, QVector2D(2.0f, t * 0.85f)});
-        }
-        for (int s = 0; s < segs; ++s) {
-            uint32_t i0 = vb + s * 2;
-            inds.insert(inds.end(), {i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2});
-        }
-    }
-}
-
-void appendCoralBranch(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                       const QVector3D& p0, const QVector3D& p1,
-                       float r0, float r1, int sides,
-                       const QVector3D& col0, const QVector3D& col1, float sway0 = 0.0f, float sway1 = 0.0f) {
-    QVector3D axis = p1 - p0;
-    float len = axis.length();
-    if (len < 1e-4f) return;
-    QVector3D dir = axis / len;
-
-    QVector3D u = QVector3D::crossProduct(dir, QVector3D(0.0f, 1.0f, 0.0f));
-    if (u.lengthSquared() < 1e-4f) u = QVector3D::crossProduct(dir, QVector3D(1.0f, 0.0f, 0.0f));
-    u.normalize();
-    QVector3D v = QVector3D::crossProduct(dir, u).normalized();
-
-    uint32_t b0 = static_cast<uint32_t>(verts.size());
-    for (int s = 0; s <= sides; ++s) {
-        float a = (2.0f * PI * s) / sides;
-        QVector3D rad = u * std::cos(a) + v * std::sin(a);
-        verts.push_back({p0 + rad * r0, rad, col0, QVector2D(2.0f, sway0)});
-    }
-    uint32_t b1 = static_cast<uint32_t>(verts.size());
-    for (int s = 0; s <= sides; ++s) {
-        float a = (2.0f * PI * s) / sides;
-        QVector3D rad = u * std::cos(a) + v * std::sin(a);
-        verts.push_back({p1 + rad * r1, (rad + dir * 0.35f).normalized(), col1, QVector2D(2.0f, sway1)});
-    }
-    for (int s = 0; s < sides; ++s) {
-        inds.insert(inds.end(), {b0 + s, b0 + s + 1, b1 + s, b0 + s + 1, b1 + s + 1, b1 + s});
-    }
-}
-
-// 3. Ветвистый «олений» коралл (Staghorn Coral)
-void appendStaghornCoral(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                         const QVector3D& center, float scale, uint32_t coralSeed, bool highLod) {
-    float cHash = ProcMath::hash3(static_cast<int>(coralSeed), 1, 7, 613u);
-    QVector3D baseCol, tipCol;
-    if (cHash < 0.34f) {
-        baseCol = QVector3D(0.84f, 0.22f, 0.38f);
-        tipCol  = QVector3D(1.00f, 0.64f, 0.72f);
-    } else if (cHash < 0.68f) {
-        baseCol = QVector3D(0.86f, 0.46f, 0.12f);
-        tipCol  = QVector3D(1.00f, 0.84f, 0.36f);
-    } else {
-        baseCol = QVector3D(0.50f, 0.24f, 0.78f);
-        tipCol  = QVector3D(0.46f, 0.92f, 0.98f);
-    }
-
-    int trunks = highLod ? 4 : 3;
-    int sides  = highLod ? 5 : 3;
-    QVector3D root = center - QVector3D(0.0f, 0.15f, 0.0f);
-
-    for (int t = 0; t < trunks; ++t) {
-        float h1 = ProcMath::hash3(static_cast<int>(coralSeed), t, 1, 617u);
-        float h2 = ProcMath::hash3(static_cast<int>(coralSeed), t, 2, 617u);
-        float ang = (2.0f * PI * t) / trunks + h1 * 0.7f;
-        QVector3D d1(std::cos(ang) * (0.48f + h2 * 0.30f), 0.85f, std::sin(ang) * (0.48f + h2 * 0.30f));
-        d1.normalize();
-        float len1 = (1.15f + h1 * 0.55f) * scale;
-        QVector3D mid = root + d1 * len1;
-        appendCoralBranch(verts, inds, root, mid, 0.18f * scale, 0.11f * scale, sides, baseCol, ProcMath::mix(baseCol, tipCol, 0.45f));
-
-        if (highLod) {
-            for (int f = 0; f < 2; ++f) {
-                float fAng = ang + (f == 0 ? 0.65f : -0.65f) + (h2 - 0.5f) * 0.3f;
-                QVector3D d2(std::cos(fAng) * 0.58f, 0.80f, std::sin(fAng) * 0.58f);
-                d2.normalize();
-                QVector3D tip = mid + d2 * ((0.75f + 0.35f * f) * scale);
-                appendCoralBranch(verts, inds, mid, tip, 0.10f * scale, 0.035f * scale, 4,
-                                  ProcMath::mix(baseCol, tipCol, 0.45f), tipCol);
-            }
-        }
-    }
-}
-
-// 4. Пластинчатый / столовый коралл (Table Coral)
-void appendTableCoral(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                      const QVector3D& center, const QVector3D& surfNormal, float scale, uint32_t tableSeed, bool highLod) {
-    float cHash = ProcMath::hash3(static_cast<int>(tableSeed), 2, 5, 709u);
-    QVector3D innerCol, rimCol;
-    if (cHash < 0.35f) {
-        innerCol = QVector3D(0.76f, 0.32f, 0.24f);
-        rimCol   = QVector3D(0.98f, 0.72f, 0.42f);
-    } else if (cHash < 0.70f) {
-        innerCol = QVector3D(0.48f, 0.26f, 0.68f);
-        rimCol   = QVector3D(0.90f, 0.56f, 0.94f);
-    } else {
-        innerCol = QVector3D(0.20f, 0.58f, 0.44f);
-        rimCol   = QVector3D(0.58f, 0.94f, 0.62f);
-    }
-
-    int tiers = highLod ? 2 : 1;
-    int segs  = highLod ? 10 : 6;
-    QVector3D outDir(surfNormal.x(), 0.0f, surfNormal.z());
-    if (outDir.lengthSquared() < 0.01f) outDir = QVector3D(1.0f, 0.0f, 0.0f);
-    outDir.normalize();
-
-    for (int tier = 0; tier < tiers; ++tier) {
-        float radius = (1.35f - tier * 0.42f) * scale;
-        float yOff   = (0.55f + tier * 0.52f) * scale;
-        QVector3D discCenter = center + outDir * (0.35f * scale * (1.0f - tier * 0.4f)) + QVector3D(0.0f, yOff, 0.0f);
-
-        if (tier == 0) {
-            appendCoralBranch(verts, inds, center - QVector3D(0.0f, 0.15f, 0.0f), discCenter,
-                              0.26f * scale, 0.22f * scale, highLod ? 5 : 4, innerCol * 0.75f, innerCol);
-        }
-
-        uint32_t cIdx = static_cast<uint32_t>(verts.size());
-        verts.push_back({discCenter + QVector3D(0.0f, 0.12f * scale, 0.0f), QVector3D(0.0f, 1.0f, 0.0f), innerCol, QVector2D(2.0f, 0.0f)});
-        uint32_t rimStart = static_cast<uint32_t>(verts.size());
-
-        for (int s = 0; s <= segs; ++s) {
-            float a = (2.0f * PI * s) / segs;
-            float wave = 1.0f + 0.18f * std::sin(a * 5.0f + static_cast<float>(tableSeed));
-            float curl = 0.08f * scale * std::cos(a * 4.0f + tier);
-            QVector3D p = discCenter + QVector3D(std::cos(a) * radius * wave, curl, std::sin(a) * radius * wave);
-            QVector3D n(std::cos(a) * 0.25f, 0.96f, std::sin(a) * 0.25f);
-            n.normalize();
-            verts.push_back({p, n, rimCol, QVector2D(2.0f, 0.0f)});
-        }
-
-        for (int s = 0; s < segs; ++s) {
-            inds.insert(inds.end(), {cIdx, rimStart + s, rimStart + s + 1});
-        }
-    }
-}
-
-// 5. Веерная горгонария (Gorgonian Sea Fan)
-void appendSeaFan(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                  const QVector3D& center, float scale, uint32_t fanSeed, bool highLod) {
-    float cHash = ProcMath::hash3(static_cast<int>(fanSeed), 3, 8, 761u);
-    QVector3D baseCol, tipCol;
-    if (cHash < 0.36f) {
-        baseCol = QVector3D(0.80f, 0.14f, 0.28f);
-        tipCol  = QVector3D(1.00f, 0.40f, 0.48f);
-    } else if (cHash < 0.70f) {
-        baseCol = QVector3D(0.88f, 0.38f, 0.10f);
-        tipCol  = QVector3D(1.00f, 0.74f, 0.22f);
-    } else {
-        baseCol = QVector3D(0.62f, 0.16f, 0.74f);
-        tipCol  = QVector3D(0.95f, 0.48f, 0.98f);
-    }
-
-    float yaw = ProcMath::hash3(static_cast<int>(fanSeed), 4, 2, 769u) * 2.0f * PI;
-    QVector3D planeX(std::cos(yaw), 0.0f, std::sin(yaw));
-    QVector3D planeN(-planeX.z(), 0.0f, planeX.x());
-    QVector3D root = center - QVector3D(0.0f, 0.12f, 0.0f);
-
-    int ribs = highLod ? 7 : 3;
-    int segs = highLod ? 3 : 2;
-    float fanH = 2.4f * scale;
-    float fanW = 1.95f * scale;
-
-    for (int r = 0; r < ribs; ++r) {
-        float u = (ribs > 1) ? ((static_cast<float>(r) / (ribs - 1)) * 2.0f - 1.0f) : 0.0f;
-        float spreadAng = u * 0.92f;
-        float ribLen = fanH * (0.72f + 0.28f * std::cos(u * PI * 0.5f));
-        float ribW   = (highLod ? 0.22f : 0.42f) * scale;
-
-        QVector3D dir = (planeX * std::sin(spreadAng) + QVector3D(0.0f, std::cos(spreadAng), 0.0f)).normalized();
-        QVector3D perp = QVector3D::crossProduct(dir, planeN).normalized();
-
-        uint32_t vb = static_cast<uint32_t>(verts.size());
-        for (int s = 0; s <= segs; ++s) {
-            float t = static_cast<float>(s) / static_cast<float>(segs);
-            float w = ribW * (0.35f + 0.95f * std::sin(t * PI * 0.85f));
-            float curl = std::sin(t * PI) * 0.18f * scale * (r % 2 == 0 ? 1.0f : -1.0f);
-            QVector3D p = root + dir * (ribLen * t) + planeX * (u * fanW * 0.12f * t * t) + planeN * curl;
-            QVector3D col = ProcMath::mix(baseCol, tipCol, t);
-            verts.push_back({p - perp * w, planeN, col, QVector2D(2.0f, t * 0.48f)});
-            verts.push_back({p + perp * w, planeN, col, QVector2D(2.0f, t * 0.48f)});
-        }
-        for (int s = 0; s < segs; ++s) {
-            uint32_t i0 = vb + s * 2;
-            inds.insert(inds.end(), {i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2});
-        }
-    }
-}
-
-// 6. Морская актиния / анемон
-void appendSeaAnemone(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                      const QVector3D& center, float scale, uint32_t anemSeed) {
-    float cHash = ProcMath::hash3(static_cast<int>(anemSeed), 5, 1, 829u);
-    QVector3D stalkCol, tipCol;
-    if (cHash < 0.35f) {
-        stalkCol = QVector3D(0.64f, 0.18f, 0.52f);
-        tipCol   = QVector3D(1.00f, 0.48f, 0.92f);
-    } else if (cHash < 0.70f) {
-        stalkCol = QVector3D(0.16f, 0.54f, 0.56f);
-        tipCol   = QVector3D(0.42f, 0.98f, 0.90f);
-    } else {
-        stalkCol = QVector3D(0.84f, 0.34f, 0.16f);
-        tipCol   = QVector3D(1.00f, 0.80f, 0.30f);
-    }
-
-    QVector3D baseP = center - QVector3D(0.0f, 0.08f, 0.0f);
-    QVector3D crown = center + QVector3D(0.0f, 0.42f * scale, 0.0f);
-    appendCoralBranch(verts, inds, baseP, crown, 0.42f * scale, 0.36f * scale, 6, stalkCol * 0.8f, stalkCol, 0.0f, 0.1f);
-
-    constexpr int TENTACLES = 10;
-    for (int t = 0; t < TENTACLES; ++t) {
-        float h1 = ProcMath::hash3(static_cast<int>(anemSeed), t, 2, 839u);
-        float ang = (2.0f * PI * t) / TENTACLES + h1 * 0.25f;
-        float ringR = ((t % 2 == 0) ? 0.28f : 0.15f) * scale;
-        QVector3D dir(std::cos(ang), 0.0f, std::sin(ang));
-        QVector3D side(-dir.z(), 0.0f, dir.x());
-        QVector3D tRoot = crown + dir * ringR;
-        float tLen = (0.78f + h1 * 0.42f) * scale;
-        float spread = ((t % 2 == 0) ? 0.62f : 0.28f) * scale;
-
-        QVector3D pMid = tRoot + dir * (spread * 0.45f) + QVector3D(0.0f, tLen * 0.58f, 0.0f);
-        QVector3D pTip = tRoot + dir * spread + QVector3D(0.0f, tLen, 0.0f);
-        QVector3D norm = (dir + QVector3D(0.0f, 0.5f, 0.0f)).normalized();
-        float w0 = 0.095f * scale;
-        float w1 = 0.055f * scale;
-
-        uint32_t vb = static_cast<uint32_t>(verts.size());
-        verts.push_back({tRoot - side * w0, norm, stalkCol, QVector2D(2.0f, 0.15f)});
-        verts.push_back({tRoot + side * w0, norm, stalkCol, QVector2D(2.0f, 0.15f)});
-        verts.push_back({pMid  - side * w1, norm, ProcMath::mix(stalkCol, tipCol, 0.55f), QVector2D(2.0f, 0.55f)});
-        verts.push_back({pMid  + side * w1, norm, ProcMath::mix(stalkCol, tipCol, 0.55f), QVector2D(2.0f, 0.55f)});
-        verts.push_back({pTip,              norm, tipCol,   QVector2D(2.0f, 0.95f)});
-        inds.insert(inds.end(), {vb, vb + 1, vb + 2, vb + 1, vb + 3, vb + 2, vb + 2, vb + 3, vb + 4});
-    }
-}
-
-// 7. Глубоководные биолюминесцентные морские перья (растут в абиссальных ямах, param.x = 4.0)
-void appendAbyssalSeaPen(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                         const QVector3D& center, float scale, uint32_t penSeed) {
-    float cHash = ProcMath::hash3(static_cast<int>(penSeed), 7, 3, 941u);
-    QVector3D baseCol(0.08f, 0.18f, 0.28f);
-    QVector3D glowCol = (cHash < 0.45f) ? QVector3D(0.28f, 0.95f, 0.98f)
-                        : (cHash < 0.78f) ? QVector3D(0.45f, 0.58f, 1.00f)
-                                          : QVector3D(0.78f, 0.35f, 0.98f);
-
-    int stalks = 2 + (penSeed % 2);
-    for (int k = 0; k < stalks; ++k) {
-        float h1 = ProcMath::hash3(static_cast<int>(penSeed), k, 1, 947u);
-        float ang = h1 * 2.0f * PI;
-        QVector3D dir(std::cos(ang), 0.0f, std::sin(ang));
-        QVector3D side(-dir.z(), 0.0f, dir.x());
-        QVector3D norm = (dir + QVector3D(0.0f, 0.3f, 0.0f)).normalized();
-
-        float height = (1.8f + h1 * 1.6f) * scale;
-        float maxW   = 0.32f * scale;
-        QVector3D root = center + dir * (0.25f * k) - QVector3D(0.0f, 0.1f, 0.0f);
-
-        constexpr int SEGS = 4;
-        uint32_t vb = static_cast<uint32_t>(verts.size());
-        for (int s = 0; s <= SEGS; ++s) {
-            float t = static_cast<float>(s) / SEGS;
-            float plume = std::sin(std::pow(t, 0.75f) * PI);
-            float w = maxW * (0.14f + 0.86f * plume);
-            QVector3D p = root + dir * (0.35f * scale * t * t) + QVector3D(0.0f, height * t, 0.0f);
-            QVector3D col = ProcMath::mix(baseCol, glowCol, t);
-            verts.push_back({p - side * w, norm, col, QVector2D(4.0f, t)});
-            verts.push_back({p + side * w, norm, col, QVector2D(4.0f, t)});
-        }
-        for (int s = 0; s < SEGS; ++s) {
-            uint32_t i0 = vb + s * 2;
-            inds.insert(inds.end(), {i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2});
-        }
-    }
 }
 
 void appendFaunaCone(std::vector<FaunaVertex>& verts, std::vector<uint32_t>& inds,
@@ -568,7 +147,7 @@ void appendFaunaCone(std::vector<FaunaVertex>& verts, std::vector<uint32_t>& ind
 
     uint32_t ringStart = static_cast<uint32_t>(verts.size());
     for (int s = 0; s <= sides; ++s) {
-        float ang = (2.0f * PI * s) / sides;
+        float ang = (TWO_PI * s) / sides;
         QVector3D rad = u * std::cos(ang) + v * std::sin(ang);
         QVector3D n = (rad + dir * 0.25f).normalized();
         verts.push_back({baseCenter + rad * baseRadius, n, baseCol});
@@ -589,7 +168,7 @@ void appendFaunaSphere(std::vector<FaunaVertex>& verts, std::vector<uint32_t>& i
         float phi = PI * static_cast<float>(st) / static_cast<float>(stacks);
         float sp = std::sin(phi), cp = std::cos(phi);
         for (int sl = 0; sl <= slices; ++sl) {
-            float theta = 2.0f * PI * static_cast<float>(sl) / static_cast<float>(slices);
+            float theta = TWO_PI * static_cast<float>(sl) / static_cast<float>(slices);
             QVector3D n(sp * std::cos(theta), cp, sp * std::sin(theta));
             QVector3D p = center + QVector3D(n.x() * radii.x(), n.y() * radii.y(), n.z() * radii.z());
             verts.push_back({p, n, color});
@@ -628,7 +207,7 @@ void appendFaunaTube(std::vector<FaunaVertex>& verts, std::vector<uint32_t>& ind
         QVector3D col = ProcMath::mix(colStart, colEnd, t);
         float r = radii[i];
         for (int j = 0; j <= radialSegs; ++j) {
-            float a = (2.0f * PI * j) / radialSegs;
+            float a = (TWO_PI * j) / radialSegs;
             QVector3D n = (u * std::cos(a) + v * std::sin(a)).normalized();
             verts.push_back({spine[i] + n * r, n, col});
         }
@@ -856,7 +435,8 @@ bool CollisionWorld::resolveSphereCollision(QVector3D& pos, QVector3D* vel, floa
 }
 
 bool CollisionWorld::isPointClear(const QVector3D& pos, float radius) const {
-    if (pos.x() * pos.x() + pos.z() * pos.z() > (ProcMath::PLAYABLE_HARD_RADIUS - radius) * (ProcMath::PLAYABLE_HARD_RADIUS - radius)) {
+    if (pos.x() * pos.x() + pos.z() * pos.z() >
+        (ProcMath::PLAYABLE_HARD_RADIUS - radius) * (ProcMath::PLAYABLE_HARD_RADIUS - radius)) {
         return false;
     }
     if (pos.y() > ProcMath::WATER_SURFACE_Y - radius) return false;
@@ -888,765 +468,8 @@ bool CollisionWorld::isPointClear(const QVector3D& pos, float radius) const {
 }
 
 // ============================================================================
-// ГЕНЕРАЦИЯ МИРА (1600x1600 м, Рельеф 48x48, Островки зелени, Удильщики, Корабли)
+// ЗАТОНУВШИЕ КОРАБЛИ (5 типов, 14 судов с OBB-коллайдерами)
 // ============================================================================
-
-WorldData WorldGenerator::generate(uint32_t seed) {
-    WorldData data;
-    data.collision.seed = seed;
-    data.collision.chunksPerSide = WorldData::CHUNKS_PER_SIDE;
-    data.collision.chunkSize = WorldData::CHUNK_SIZE;
-    data.collision.worldHalfSize = ProcMath::WORLD_HALF_SIZE;
-
-    buildTerrainLodIndices(data);
-    generateTerrainChunks(data, seed);
-    generateChunkProps(data, seed);
-    generateShipwrecks(data, seed);
-
-    data.collision.buildGrid();
-
-    generateFaunaMeshes(data);
-    generateWhaleMeshes(data);
-    generateAnglerMeshes(data);
-    generateFaunaAgents(data, seed);
-    generateGodRaysAndParticles(data, seed);
-    return data;
-}
-
-void WorldGenerator::buildTerrainLodIndices(WorldData& data) {
-    constexpr int N = WorldData::CHUNK_GRID_N;     // 48
-    constexpr int G = N + 1;                       // 49
-    constexpr uint32_t SURF_COUNT   = G * G;
-    constexpr uint32_t SKIRT_TOP    = SURF_COUNT;
-    constexpr uint32_t SKIRT_BOT    = SKIRT_TOP + G;
-    constexpr uint32_t SKIRT_LEFT   = SKIRT_BOT + G;
-    constexpr uint32_t SKIRT_RIGHT  = SKIRT_LEFT + G;
-
-    auto surfIdx = [&](int ix, int iz) -> uint32_t {
-        return static_cast<uint32_t>(iz * G + ix);
-    };
-
-    const int steps[WorldData::TERRAIN_LOD_COUNT] = {1, 2, 4, 8};
-    data.terrainIndices.clear();
-
-    for (int lod = 0; lod < WorldData::TERRAIN_LOD_COUNT; ++lod) {
-        int step = steps[lod];
-        uint32_t startOffset = static_cast<uint32_t>(data.terrainIndices.size());
-
-        for (int iz = 0; iz < N; iz += step) {
-            for (int ix = 0; ix < N; ix += step) {
-                uint32_t i00 = surfIdx(ix, iz);
-                uint32_t i10 = surfIdx(ix + step, iz);
-                uint32_t i01 = surfIdx(ix, iz + step);
-                uint32_t i11 = surfIdx(ix + step, iz + step);
-
-                data.terrainIndices.push_back(i00);
-                data.terrainIndices.push_back(i01);
-                data.terrainIndices.push_back(i10);
-
-                data.terrainIndices.push_back(i10);
-                data.terrainIndices.push_back(i01);
-                data.terrainIndices.push_back(i11);
-            }
-        }
-
-        for (int i = 0; i < N; i += step) {
-            uint32_t t0 = surfIdx(i, 0), t1 = surfIdx(i + step, 0);
-            uint32_t tk0 = SKIRT_TOP + i, tk1 = SKIRT_TOP + i + step;
-            data.terrainIndices.insert(data.terrainIndices.end(), {t0, t1, tk0, t1, tk1, tk0});
-
-            uint32_t b0 = surfIdx(i, N), b1 = surfIdx(i + step, N);
-            uint32_t bk0 = SKIRT_BOT + i, bk1 = SKIRT_BOT + i + step;
-            data.terrainIndices.insert(data.terrainIndices.end(), {b0, bk0, b1, b1, bk0, bk1});
-
-            uint32_t l0 = surfIdx(0, i), l1 = surfIdx(0, i + step);
-            uint32_t lk0 = SKIRT_LEFT + i, lk1 = SKIRT_LEFT + i + step;
-            data.terrainIndices.insert(data.terrainIndices.end(), {l0, lk0, l1, l1, lk0, lk1});
-
-            uint32_t r0 = surfIdx(N, i), r1 = surfIdx(N, i + step);
-            uint32_t rk0 = SKIRT_RIGHT + i, rk1 = SKIRT_RIGHT + i + step;
-            data.terrainIndices.insert(data.terrainIndices.end(), {r0, r1, rk0, r1, rk1, rk0});
-        }
-
-        uint32_t count = static_cast<uint32_t>(data.terrainIndices.size()) - startOffset;
-        data.terrainLodRanges[lod] = {startOffset, count};
-    }
-}
-
-void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
-    constexpr int C = WorldData::CHUNKS_PER_SIDE;
-    constexpr int N = WorldData::CHUNK_GRID_N;     // 48
-    constexpr int G = N + 1;                       // 49
-    constexpr int P = G + 2;                       // 51
-    constexpr int TOTAL_CHUNKS = C * C;
-    constexpr float CHUNK_SZ = WorldData::CHUNK_SIZE;
-    constexpr float CELL_SZ  = CHUNK_SZ / static_cast<float>(N);
-    constexpr float HALF_W   = ProcMath::WORLD_HALF_SIZE;
-    constexpr float SKIRT_DROP = 14.0f;
-
-    data.chunks.resize(TOTAL_CHUNKS);
-    data.terrainVertices.resize(static_cast<size_t>(TOTAL_CHUNKS) * WorldData::CHUNK_VERTS_PER_CHUNK);
-
-    unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
-    std::vector<std::thread> workers;
-    workers.reserve(numThreads);
-
-    for (unsigned int t = 0; t < numThreads; ++t) {
-        int startChunk = (t * TOTAL_CHUNKS) / numThreads;
-        int endChunk   = ((t + 1) * TOTAL_CHUNKS) / numThreads;
-
-        workers.emplace_back([&, startChunk, endChunk]() {
-            std::vector<float> hCache(P * P);
-            for (int ci = startChunk; ci < endChunk; ++ci) {
-                int cx = ci % C;
-                int cz = ci / C;
-
-                WorldChunk& chunk = data.chunks[ci];
-                chunk.cx = cx;
-                chunk.cz = cz;
-                chunk.terrainBaseVertex = static_cast<uint32_t>(ci * WorldData::CHUNK_VERTS_PER_CHUNK);
-
-                float originX = -HALF_W + cx * CHUNK_SZ;
-                float originZ = -HALF_W + cz * CHUNK_SZ;
-
-                for (int gz = 0; gz < P; ++gz) {
-                    float wz = originZ + (gz - 1) * CELL_SZ;
-                    for (int gx = 0; gx < P; ++gx) {
-                        float wx = originX + (gx - 1) * CELL_SZ;
-                        hCache[gz * P + gx] = ProcMath::sampleTerrainHeight(wx, wz, seed);
-                    }
-                }
-
-                float minY =  1e6f;
-                float maxY = -1e6f;
-                EnvVertex* dst = &data.terrainVertices[chunk.terrainBaseVertex];
-
-                for (int iz = 0; iz <= N; ++iz) {
-                    float wz = originZ + iz * CELL_SZ;
-                    int pz = iz + 1;
-                    for (int ix = 0; ix <= N; ++ix) {
-                        float wx = originX + ix * CELL_SZ;
-                        int px = ix + 1;
-
-                        float wy = hCache[pz * P + px];
-                        float hL = hCache[pz * P + (px - 1)];
-                        float hR = hCache[pz * P + (px + 1)];
-                        float hD = hCache[(pz - 1) * P + px];
-                        float hU = hCache[(pz + 1) * P + px];
-                        QVector3D norm(hL - hR, 2.0f * CELL_SZ, hD - hU);
-                        norm.normalize();
-
-                        minY = std::min(minY, wy);
-                        maxY = std::max(maxY, wy);
-
-                        float slope     = 1.0f - ProcMath::clamp(norm.y(), 0.0f, 1.0f);
-                        float wallF     = ProcMath::sampleBasinWallFactor(wx, wz, seed);
-                        float heightMix = ProcMath::smoothstep(-22.0f, 10.0f, wy);
-                        float abyssMix  = ProcMath::smoothstep(-26.0f, -50.0f, wy);
-                        float spireMix  = ProcMath::smoothstep(6.0f, 28.0f, wy) * (1.0f - wallF);
-
-                        QVector3D sandCol(0.62f, 0.58f, 0.44f);
-                        QVector3D mossRock(0.20f, 0.36f, 0.28f);
-                        QVector3D sharpCrag(0.22f, 0.25f, 0.29f);
-                        QVector3D cliffBasalt(0.16f, 0.19f, 0.24f);
-                        QVector3D abyssSlate(0.08f, 0.11f, 0.16f);
-                        QVector3D grottoTint(0.32f, 0.21f, 0.42f);
-
-                        float grottoMask = ProcMath::smoothstep(0.18f, 0.68f,
-                                                                ProcMath::fbm(wx * 0.006f, 0.0f, wz * 0.006f, 2, seed + 444u) * 0.5f + 0.5f);
-
-                        QVector3D col = ProcMath::mix(sandCol, mossRock, ProcMath::clamp(slope * 2.5f + heightMix * 0.55f, 0.0f, 1.0f));
-                        col = ProcMath::mix(col, sharpCrag, ProcMath::clamp(ProcMath::smoothstep(0.24f, 0.62f, slope) * 0.85f + spireMix * 0.65f, 0.0f, 1.0f));
-                        col = ProcMath::mix(col, grottoTint, grottoMask * 0.30f * (1.0f - wallF) * (1.0f - abyssMix));
-                        col = ProcMath::mix(col, cliffBasalt, ProcMath::clamp(wallF * 0.85f + ProcMath::smoothstep(22.0f, 36.0f, wy) * 0.55f, 0.0f, 1.0f));
-
-                        // Островки сочного подводного мха на неглубоких солнечных плато (y: +1.5 .. +26 м)
-                        if (wy > 1.5f && wy < 26.5f && norm.y() > 0.54f && wallF < 0.78f) {
-                            float shallowMask = ProcMath::smoothstep(1.5f, 7.5f, wy)
-                                                * (1.0f - ProcMath::smoothstep(24.5f, 27.0f, wy));
-                            float flatMask    = ProcMath::smoothstep(0.54f, 0.78f, norm.y());
-                            float islandMask  = samplePlateauIslandMask(wx, wz, seed);
-                            float mossBlend   = shallowMask * flatMask * islandMask;
-                            if (mossBlend > 0.01f) {
-                                QVector3D lushMoss = ProcMath::mix(QVector3D(0.14f, 0.50f, 0.24f),
-                                                                   QVector3D(0.32f, 0.72f, 0.26f),
-                                                                   ProcMath::smoothstep(0.35f, 0.85f, islandMask));
-                                col = ProcMath::mix(col, lushMoss, mossBlend * 0.82f);
-                            }
-                        }
-
-                        col = ProcMath::mix(col, abyssSlate, abyssMix * 0.92f);
-
-                        float maxEdgeSlope = std::max({
-                                                 std::abs(wy - hL), std::abs(wy - hR),
-                                                 std::abs(wy - hD), std::abs(wy - hU)
-                                             }) / CELL_SZ;
-                        float localFlatness = 1.0f / std::sqrt(1.0f + maxEdgeSlope * maxEdgeSlope);
-                        float steepness = ProcMath::clamp(1.0f - localFlatness, 0.0f, 1.0f);
-
-                        EnvVertex& v = dst[iz * G + ix];
-                        v.pos    = QVector3D(wx, wy, wz);
-                        v.normal = norm;
-                        v.color  = col;
-                        v.param  = QVector2D(0.0f, steepness);
-                    }
-                }
-
-                uint32_t skirtTop   = G * G;
-                uint32_t skirtBot   = skirtTop + G;
-                uint32_t skirtLeft  = skirtBot + G;
-                uint32_t skirtRight = skirtLeft + G;
-
-                for (int i = 0; i <= N; ++i) {
-                    auto makeSkirt = [&](const EnvVertex& src) {
-                        EnvVertex s = src;
-                        s.pos.setY(s.pos.y() - SKIRT_DROP);
-                        s.color *= 0.80f;
-                        return s;
-                    };
-                    dst[skirtTop + i]   = makeSkirt(dst[0 * G + i]);
-                    dst[skirtBot + i]   = makeSkirt(dst[N * G + i]);
-                    dst[skirtLeft + i]  = makeSkirt(dst[i * G + 0]);
-                    dst[skirtRight + i] = makeSkirt(dst[i * G + N]);
-                }
-
-                chunk.minBounds = QVector3D(originX, minY - SKIRT_DROP, originZ);
-                chunk.maxBounds = QVector3D(originX + CHUNK_SZ, maxY + 30.0f, originZ + CHUNK_SZ);
-                chunk.center    = (chunk.minBounds + chunk.maxBounds) * 0.5f;
-                chunk.boundingRadius = (chunk.maxBounds - chunk.center).length();
-            }
-        });
-    }
-    for (auto& th : workers) th.join();
-}
-
-void WorldGenerator::appendRockBoulder(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                                       const QVector3D& center, float rx, float ry, float rz,
-                                       int stacks, int slices, uint32_t rockSeed, const QVector3D& baseColor) {
-    uint32_t baseIdx = static_cast<uint32_t>(verts.size());
-    std::vector<QVector3D> pts((stacks + 1) * (slices + 1));
-
-    for (int st = 0; st <= stacks; ++st) {
-        float phi = PI * static_cast<float>(st) / static_cast<float>(stacks);
-        float sp = std::sin(phi), cp = std::cos(phi);
-        for (int sl = 0; sl <= slices; ++sl) {
-            float theta = 2.0f * PI * static_cast<float>(sl) / static_cast<float>(slices);
-            QVector3D dir(sp * std::cos(theta), cp, sp * std::sin(theta));
-            float disp = 1.0f + ProcMath::fbm(dir.x() * 1.9f, dir.y() * 1.9f, dir.z() * 1.9f, 3, rockSeed) * 0.36f;
-            pts[st * (slices + 1) + sl] = center + QVector3D(dir.x() * rx * disp, dir.y() * ry * disp, dir.z() * rz * disp);
-        }
-    }
-
-    for (int st = 0; st <= stacks; ++st) {
-        for (int sl = 0; sl <= slices; ++sl) {
-            QVector3D p = pts[st * (slices + 1) + sl];
-            int stU = std::max(0, st - 1), stD = std::min(stacks, st + 1);
-            int slL = (sl - 1 + slices) % slices, slR = (sl + 1) % slices;
-            QVector3D t1 = pts[stD * (slices + 1) + sl] - pts[stU * (slices + 1) + sl];
-            QVector3D t2 = pts[st * (slices + 1) + slR] - pts[st * (slices + 1) + slL];
-            QVector3D n = QVector3D::crossProduct(t2, t1);
-            if (n.lengthSquared() < 1e-6f) n = (p - center);
-            n.normalize();
-
-            float moss = ProcMath::smoothstep(0.35f, 0.85f, n.y());
-            QVector3D col = ProcMath::mix(baseColor, QVector3D(0.18f, 0.40f, 0.26f), moss * 0.58f);
-            verts.push_back({p, n, col, QVector2D(0.0f, 0.0f)});
-        }
-    }
-
-    for (int st = 0; st < stacks; ++st) {
-        for (int sl = 0; sl < slices; ++sl) {
-            uint32_t i00 = baseIdx + st * (slices + 1) + sl;
-            uint32_t i10 = i00 + 1;
-            uint32_t i01 = i00 + (slices + 1);
-            uint32_t i11 = i01 + 1;
-            inds.insert(inds.end(), {i00, i01, i10, i10, i01, i11});
-        }
-    }
-}
-
-void WorldGenerator::appendKelpStalk(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
-                                     const QVector3D& rootPos, float height, uint32_t stalkSeed, bool highLod) {
-    int segs = highLod ? 11 : 5;
-    float baseWidth = highLod ? 0.36f : 0.68f;
-    float twist = ProcMath::hash3(static_cast<int>(stalkSeed), 3, 7, 99u) * 2.0f * PI;
-    float hueVar = ProcMath::hash3(static_cast<int>(stalkSeed), 5, 11, 99u);
-    QVector3D stalkCol = ProcMath::mix(QVector3D(0.12f, 0.45f, 0.24f), QVector3D(0.24f, 0.48f, 0.16f), hueVar);
-    QVector3D tipCol   = ProcMath::mix(QVector3D(0.26f, 0.78f, 0.34f), QVector3D(0.46f, 0.82f, 0.26f), hueVar);
-
-    uint32_t baseIdx = static_cast<uint32_t>(verts.size());
-    for (int s = 0; s <= segs; ++s) {
-        float t = static_cast<float>(s) / static_cast<float>(segs);
-        float y = rootPos.y() + t * height;
-        float angle = twist + t * 2.4f;
-        QVector3D side(std::cos(angle), 0.0f, std::sin(angle));
-        QVector3D norm(-side.z(), 0.25f, side.x());
-        norm.normalize();
-
-        float w = baseWidth * (1.0f - t * 0.42f);
-        QVector3D col = ProcMath::mix(stalkCol, tipCol, t);
-
-        verts.push_back({QVector3D(rootPos.x(), y, rootPos.z()) - side * w, norm, col, QVector2D(3.0f, t)});
-        verts.push_back({QVector3D(rootPos.x(), y, rootPos.z()) + side * w, norm, col, QVector2D(3.0f, t)});
-    }
-
-    for (int s = 0; s < segs; ++s) {
-        uint32_t i0 = baseIdx + s * 2;
-        inds.insert(inds.end(), {i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2});
-    }
-
-    if (highLod) {
-        for (int s = 2; s < segs; ++s) {
-            float t = static_cast<float>(s) / static_cast<float>(segs);
-            float y = rootPos.y() + t * height;
-            float sideSign = (s % 2 == 0) ? 1.0f : -1.0f;
-            float angle = twist + t * 2.6f + sideSign * 0.7f;
-
-            QVector3D dir(std::cos(angle), 0.22f, std::sin(angle));
-            dir.normalize();
-            QVector3D upLeaf(0.0f, 1.0f, 0.0f);
-            QVector3D norm = QVector3D::crossProduct(dir, upLeaf).normalized();
-
-            float leafLen = (1.65f + 0.90f * (1.0f - t));
-            float leafW = 0.46f;
-            QVector3D p0(rootPos.x(), y, rootPos.z());
-            QVector3D pMid = p0 + dir * (leafLen * 0.55f) + QVector3D(0.0f, 0.25f, 0.0f);
-            QVector3D pTip = p0 + dir * leafLen - QVector3D(0.0f, 0.15f, 0.0f);
-            QVector3D lCol = ProcMath::mix(stalkCol * 1.15f, tipCol * 1.10f, t);
-
-            uint32_t lb = static_cast<uint32_t>(verts.size());
-            verts.push_back({p0, norm, lCol, QVector2D(3.0f, t)});
-            verts.push_back({pMid + upLeaf * leafW, norm, lCol, QVector2D(3.0f, std::min(1.0f, t + 0.06f))});
-            verts.push_back({pMid - upLeaf * leafW, norm, lCol, QVector2D(3.0f, std::min(1.0f, t + 0.06f))});
-            verts.push_back({pTip, norm, lCol * 1.12f, QVector2D(3.0f, std::min(1.0f, t + 0.10f))});
-
-            inds.insert(inds.end(), {lb, lb + 1, lb + 2, lb + 1, lb + 3, lb + 2});
-        }
-    }
-}
-
-void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
-    constexpr int C = WorldData::CHUNKS_PER_SIDE;
-    constexpr int TOTAL_CHUNKS = C * C;
-    constexpr float CHUNK_SZ = WorldData::CHUNK_SIZE;
-    constexpr float HALF_W = ProcMath::WORLD_HALF_SIZE;
-    const auto& pits = ProcMath::getAbyssalPits(seed);
-
-    struct ChunkPropTemp {
-        std::vector<EnvVertex> verts;
-        std::vector<uint32_t> boulder0Inds;
-        std::vector<uint32_t> boulder1Inds;
-        std::vector<uint32_t> kelp0Inds;
-        std::vector<uint32_t> kelp1Inds;
-        std::vector<uint32_t> flora0Inds;
-        std::vector<uint32_t> flora1Inds;
-        std::vector<uint32_t> detailInds;
-        std::vector<SphereCollider> spheres;
-    };
-
-    std::vector<ChunkPropTemp> chunkTemps(TOTAL_CHUNKS);
-    unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
-    std::vector<std::thread> workers;
-    workers.reserve(numThreads);
-
-    for (unsigned int th = 0; th < numThreads; ++th) {
-        int startChunk = (th * TOTAL_CHUNKS) / numThreads;
-        int endChunk   = ((th + 1) * TOTAL_CHUNKS) / numThreads;
-
-        workers.emplace_back([&, startChunk, endChunk]() {
-            for (int ci = startChunk; ci < endChunk; ++ci) {
-                const WorldChunk& chunk = data.chunks[ci];
-                ChunkPropTemp& tmp = chunkTemps[ci];
-                tmp.verts.reserve(4200);
-
-                float originX = -HALF_W + chunk.cx * CHUNK_SZ;
-                float originZ = -HALF_W + chunk.cz * CHUNK_SZ;
-                float chunkCenterX = originX + CHUNK_SZ * 0.5f;
-                float chunkCenterZ = originZ + CHUNK_SZ * 0.5f;
-                float centerWallF  = ProcMath::sampleBasinWallFactor(chunkCenterX, chunkCenterZ, seed);
-
-                // ------------------------------------------------------------
-                // 1. Валуны и скальные обломки (LOD0/LOD1 + коллайдеры)
-                // ------------------------------------------------------------
-                struct BoulderSpec {
-                    QVector3D center;
-                    float rx, ry, rz;
-                    uint32_t rSeed;
-                    QVector3D color;
-                };
-                std::vector<BoulderSpec> chunkBoulders;
-
-                for (int b = 0; b < 9; ++b) {
-                    float hx = ProcMath::hash3(chunk.cx, chunk.cz, b * 3 + 1, seed + 211u);
-                    float hz = ProcMath::hash3(chunk.cx, chunk.cz, b * 3 + 2, seed + 211u);
-                    float hs = ProcMath::hash3(chunk.cx, chunk.cz, b * 3 + 3, seed + 211u);
-
-                    float wx = originX + 5.0f + hx * (CHUNK_SZ - 10.0f);
-                    float wz = originZ + 5.0f + hz * (CHUNK_SZ - 10.0f);
-                    float wallF = ProcMath::sampleBasinWallFactor(wx, wz, seed);
-                    if (wallF > 0.84f) continue;
-
-                    if ((wx * wx + (wz - 20.0f) * (wz - 20.0f)) < 260.0f) continue;
-                    if (((wx - 32.0f) * (wx - 32.0f) + (wz + 34.0f) * (wz + 34.0f)) < 680.0f) continue;
-
-                    bool inPitCore = false;
-                    for (const auto& pit : pits) {
-                        float dx = wx - pit.x, dz = wz - pit.z;
-                        if (dx * dx + dz * dz < (pit.radius * 0.55f) * (pit.radius * 0.55f)) {
-                            inPitCore = true;
-                            break;
-                        }
-                    }
-                    if (inPitCore) continue;
-
-                    float wy = ProcMath::sampleTerrainHeight(wx, wz, seed);
-                    if (wy > 18.0f) continue;
-
-                    float baseR = 2.4f + hs * 5.6f + wallF * 4.5f;
-                    float rx = baseR * (0.85f + 0.35f * ProcMath::hash3(ci, b, 11, seed));
-                    float ry = baseR * (0.65f + 0.55f * ProcMath::hash3(ci, b, 13, seed));
-                    float rz = baseR * (0.85f + 0.35f * ProcMath::hash3(ci, b, 17, seed));
-
-                    QVector3D center(wx, wy + ry * 0.32f, wz);
-                    float abyssDark = ProcMath::smoothstep(-26.0f, -48.0f, wy);
-                    QVector3D col = ProcMath::mix(QVector3D(0.24f + hs * 0.08f, 0.29f + hs * 0.07f, 0.31f + hs * 0.06f),
-                                                  QVector3D(0.10f, 0.13f, 0.17f), abyssDark);
-                    chunkBoulders.push_back({center, rx, ry, rz, seed + static_cast<uint32_t>(ci * 37 + b * 13), col});
-
-                    float colR = std::max({rx, ry, rz}) * 1.06f;
-                    tmp.spheres.push_back({center, colR});
-                }
-
-                for (const auto& bs : chunkBoulders) {
-                    appendRockBoulder(tmp.verts, tmp.boulder0Inds, bs.center, bs.rx, bs.ry, bs.rz, 8, 10, bs.rSeed, bs.color);
-                }
-                for (const auto& bs : chunkBoulders) {
-                    appendRockBoulder(tmp.verts, tmp.boulder1Inds, bs.center, bs.rx, bs.ry, bs.rz, 4, 6, bs.rSeed, bs.color);
-                }
-
-                // ------------------------------------------------------------
-                // 2. Густые леса гигантской ламинарии (LOD0/LOD1)
-                // ------------------------------------------------------------
-                struct KelpSpec {
-                    QVector3D root;
-                    float height;
-                    uint32_t kSeed;
-                };
-                std::vector<KelpSpec> chunkKelp;
-
-                float forestNoise = ProcMath::fbm(chunkCenterX * 0.0085f, 0.0f, chunkCenterZ * 0.0085f, 2, seed + 701u);
-                if (centerWallF < 0.52f && forestNoise > -0.35f) {
-                    int kelpCount = (forestNoise > 0.12f) ? 28 : 14;
-                    for (int k = 0; k < kelpCount; ++k) {
-                        float hx = ProcMath::hash3(chunk.cx, chunk.cz, k * 5 + 1, seed + 307u);
-                        float hz = ProcMath::hash3(chunk.cx, chunk.cz, k * 5 + 2, seed + 307u);
-                        float hh = ProcMath::hash3(chunk.cx, chunk.cz, k * 5 + 3, seed + 307u);
-
-                        float wx = originX + 2.5f + hx * (CHUNK_SZ - 5.0f);
-                        float wz = originZ + 2.5f + hz * (CHUNK_SZ - 5.0f);
-                        if (ProcMath::sampleBasinWallFactor(wx, wz, seed) > 0.42f) continue;
-
-                        float wy = ProcMath::sampleTerrainHeight(wx, wz, seed);
-                        if (wy > -2.5f || wy < -34.0f) continue;
-
-                        QVector3D n = ProcMath::sampleTerrainNormal(wx, wz, seed, 1.4f);
-                        if (n.y() < 0.62f) continue;
-
-                        float maxH = std::min(21.0f, (ProcMath::WATER_SURFACE_Y - 4.5f) - wy);
-                        if (maxH < 5.5f) continue;
-                        float height = 6.5f + hh * (maxH - 6.5f);
-                        chunkKelp.push_back({QVector3D(wx, wy - 0.35f, wz), height, seed + static_cast<uint32_t>(ci * 97 + k * 19)});
-                    }
-                }
-
-                for (const auto& ks : chunkKelp) {
-                    appendKelpStalk(tmp.verts, tmp.kelp0Inds, ks.root, ks.height, ks.kSeed, true);
-                }
-                for (const auto& ks : chunkKelp) {
-                    appendKelpStalk(tmp.verts, tmp.kelp1Inds, ks.root, ks.height, ks.kSeed, false);
-                }
-
-                // ------------------------------------------------------------
-                // 3. Разнообразная флора с LOD0/LOD1 + Островки зелени на плато у поверхности
-                // ------------------------------------------------------------
-                struct FloraSpec {
-                    int kind; // 0=seagrass, 1=bushyAlgae, 2=staghorn, 3=tableCoral, 4=seaFan, 5=plateauGreenery
-                    QVector3D pos;
-                    QVector3D normal;
-                    float scale;
-                    float maxH;
-                    uint32_t fSeed;
-                };
-                std::vector<FloraSpec> chunkFlora;
-
-                if (centerWallF < 0.62f) {
-                    float meadowNoise = ProcMath::fbm(chunkCenterX * 0.011f, 1.5f, chunkCenterZ * 0.011f, 2, seed + 881u);
-                    int floraAttempts = (meadowNoise > -0.15f) ? 46 : 32;
-
-                    for (int f = 0; f < floraAttempts; ++f) {
-                        float hx = ProcMath::hash3(chunk.cx, chunk.cz, f * 5 + 1, seed + 641u);
-                        float hz = ProcMath::hash3(chunk.cx, chunk.cz, f * 5 + 2, seed + 641u);
-                        float hs = ProcMath::hash3(chunk.cx, chunk.cz, f * 5 + 3, seed + 641u);
-                        float hk = ProcMath::hash3(chunk.cx, chunk.cz, f * 5 + 4, seed + 641u);
-
-                        float wx = originX + 2.5f + hx * (CHUNK_SZ - 5.0f);
-                        float wz = originZ + 2.5f + hz * (CHUNK_SZ - 5.0f);
-                        if (ProcMath::sampleBasinWallFactor(wx, wz, seed) > 0.56f) continue;
-
-                        float wy = ProcMath::sampleTerrainHeight(wx, wz, seed);
-                        if (wy < -32.0f || wy > 23.5f) continue;
-
-                        QVector3D norm = ProcMath::sampleTerrainNormal(wx, wz, seed, 1.4f);
-                        float ny = norm.y();
-                        uint32_t fSeed = seed + static_cast<uint32_t>(ci * 131 + f * 29);
-
-                        if (ny > 0.78f && wy < 8.0f) {
-                            if (hk < 0.54f) {
-                                chunkFlora.push_back({0, QVector3D(wx, wy, wz), norm, 0.85f + hs * 0.75f, 4.0f, fSeed});
-                            } else if (hk < 0.82f) {
-                                chunkFlora.push_back({1, QVector3D(wx, wy, wz), norm, 0.80f + hs * 0.70f, 4.0f, fSeed});
-                            } else {
-                                chunkFlora.push_back({2, QVector3D(wx, wy, wz), norm, 0.85f + hs * 0.65f, 4.0f, fSeed});
-                            }
-                        } else if (ny > 0.46f) {
-                            if (hk < 0.32f) {
-                                chunkFlora.push_back({2, QVector3D(wx, wy, wz), norm, 0.85f + hs * 0.75f, 4.0f, fSeed});
-                            } else if (hk < 0.58f) {
-                                chunkFlora.push_back({3, QVector3D(wx, wy, wz), norm, 0.85f + hs * 0.70f, 4.0f, fSeed});
-                            } else if (hk < 0.82f) {
-                                chunkFlora.push_back({4, QVector3D(wx, wy, wz), norm, 0.80f + hs * 0.65f, 4.0f, fSeed});
-                            } else {
-                                chunkFlora.push_back({1, QVector3D(wx, wy, wz), norm, 0.75f + hs * 0.55f, 4.0f, fSeed});
-                            }
-                        } else if (ny > 0.24f && wy < 16.0f) {
-                            if (hk < 0.58f) {
-                                chunkFlora.push_back({4, QVector3D(wx, wy, wz), norm, 0.85f + hs * 0.75f, 4.0f, fSeed});
-                            } else {
-                                chunkFlora.push_back({3, QVector3D(wx, wy, wz), norm, 0.80f + hs * 0.65f, 4.0f, fSeed});
-                            }
-                        }
-                    }
-                }
-
-                // 3б. Кластерные островки сочной подводной зелени на неглубоких плато у поверхности (y: +2 .. +26.2 м)
-                if (centerWallF < 0.76f && chunk.maxBounds.y() > 31.0f) {
-                    for (int isl = 0; isl < 12; ++isl) {
-                        float hx = ProcMath::hash3(chunk.cx, chunk.cz, isl * 5 + 1, seed + 1811u);
-                        float hz = ProcMath::hash3(chunk.cx, chunk.cz, isl * 5 + 2, seed + 1811u);
-                        float hr = ProcMath::hash3(chunk.cx, chunk.cz, isl * 5 + 3, seed + 1811u);
-
-                        float cxIsl = originX + 5.0f + hx * (CHUNK_SZ - 10.0f);
-                        float czIsl = originZ + 5.0f + hz * (CHUNK_SZ - 10.0f);
-                        if (ProcMath::sampleBasinWallFactor(cxIsl, czIsl, seed) > 0.72f) continue;
-
-                        float cyIsl = ProcMath::sampleTerrainHeight(cxIsl, czIsl, seed);
-                        if (cyIsl < 2.0f || cyIsl > 26.2f) continue;
-
-                        QVector3D cNorm = ProcMath::sampleTerrainNormal(cxIsl, czIsl, seed, 1.3f);
-                        if (cNorm.y() < 0.56f) continue;
-
-                        float islMask = samplePlateauIslandMask(cxIsl, czIsl, seed);
-                        if (islMask < 0.20f) continue;
-
-                        // Собираем плотный живой островок из 6–9 кустов в радиусе 3.5..6.8 м
-                        int tufts = 6 + static_cast<int>(hr * 3.9f);
-                        float islandR = 3.6f + hr * 3.4f;
-                        for (int t = 0; t < tufts; ++t) {
-                            float th1 = ProcMath::hash3(ci, isl * 13 + t, 1, seed + 1823u);
-                            float th2 = ProcMath::hash3(ci, isl * 13 + t, 2, seed + 1823u);
-                            float th3 = ProcMath::hash3(ci, isl * 13 + t, 3, seed + 1823u);
-
-                            float ang = th1 * 2.0f * PI;
-                            float rad = std::sqrt(th2) * islandR;
-                            float wx = cxIsl + std::cos(ang) * rad;
-                            float wz = czIsl + std::sin(ang) * rad;
-                            float wy = ProcMath::sampleTerrainHeight(wx, wz, seed);
-                            if (wy < 1.0f || wy > ProcMath::WATER_SURFACE_Y - 1.15f) continue;
-
-                            QVector3D n = ProcMath::sampleTerrainNormal(wx, wz, seed, 1.2f);
-                            if (n.y() < 0.50f) continue;
-
-                            float clearance = (ProcMath::WATER_SURFACE_Y - 0.85f) - wy;
-                            uint32_t tSeed = seed + static_cast<uint32_t>(ci * 211 + isl * 37 + t * 7);
-
-                            // В центре островка — пышные веерные кусты зелени, по краям — яркие кораллы/трава
-                            if (t < tufts - 1 || th3 < 0.65f) {
-                                float sc = (0.78f + th3 * 0.72f) * (1.12f - 0.30f * (rad / islandR));
-                                chunkFlora.push_back({5, QVector3D(wx, wy, wz), n, sc, clearance, tSeed});
-                            } else if (clearance > 1.8f) {
-                                chunkFlora.push_back({2, QVector3D(wx, wy, wz), n, 0.70f + th3 * 0.45f, clearance, tSeed});
-                            }
-                        }
-                    }
-                }
-
-                auto emitFlora = [&](std::vector<uint32_t>& outInds, bool highLod) {
-                    for (const auto& fs : chunkFlora) {
-                        switch (fs.kind) {
-                        case 0: appendSeagrassPatch(tmp.verts, outInds, fs.pos, fs.scale, fs.fSeed, highLod); break;
-                        case 1: appendBushyAlgae(tmp.verts, outInds, fs.pos, fs.scale, fs.fSeed, highLod); break;
-                        case 2: appendStaghornCoral(tmp.verts, outInds, fs.pos, fs.scale, fs.fSeed, highLod); break;
-                        case 3: appendTableCoral(tmp.verts, outInds, fs.pos, fs.normal, fs.scale, fs.fSeed, highLod); break;
-                        case 4: appendSeaFan(tmp.verts, outInds, fs.pos, fs.scale, fs.fSeed, highLod); break;
-                        case 5: appendPlateauGreeneryTuft(tmp.verts, outInds, fs.pos, fs.scale, fs.maxH, fs.fSeed, highLod); break;
-                        }
-                    }
-                };
-                emitFlora(tmp.flora0Inds, true);
-                emitFlora(tmp.flora1Inds, false);
-
-// ------------------------------------------------------------
-                // 4. Детальная ближняя флора: трубчатые губки, морские анемоны и абиссальные перья
-                // ------------------------------------------------------------
-                if (centerWallF < 0.64f) {
-                    for (int c = 0; c < 18; ++c) {
-                        float hx = ProcMath::hash3(chunk.cx, chunk.cz, c * 4 + 1, seed + 509u);
-                        float hz = ProcMath::hash3(chunk.cx, chunk.cz, c * 4 + 2, seed + 509u);
-                        float ht = ProcMath::hash3(chunk.cx, chunk.cz, c * 4 + 3, seed + 509u);
-
-                        float wx = originX + 3.0f + hx * (CHUNK_SZ - 6.0f);
-                        float wz = originZ + 3.0f + hz * (CHUNK_SZ - 6.0f);
-                        float wy = ProcMath::sampleTerrainHeight(wx, wz, seed);
-                        uint32_t dSeed = seed + static_cast<uint32_t>(ci * 173 + c * 31);
-
-                        if (wy <= -30.0f && wy >= -72.0f) {
-                            QVector3D n = ProcMath::sampleTerrainNormal(wx, wz, seed, 1.4f);
-                            if (n.y() > 0.45f) {
-                                appendAbyssalSeaPen(tmp.verts, tmp.detailInds, QVector3D(wx, wy, wz), 0.85f + ht * 0.75f, dSeed);
-                            }
-                            continue;
-                        }
-
-                        if (wy > 24.5f) continue;
-
-                        // Защита от острых пиков, краёв обрывов и слишком крутых склонов
-                        QVector3D cNorm = ProcMath::sampleTerrainNormal(wx, wz, seed, 1.2f);
-                        if (cNorm.y() < 0.75f) continue;
-
-                        constexpr float checkR = 1.15f;
-                        float hL = ProcMath::sampleTerrainHeight(wx - checkR, wz, seed);
-                        float hR = ProcMath::sampleTerrainHeight(wx + checkR, wz, seed);
-                        float hD = ProcMath::sampleTerrainHeight(wx, wz - checkR, seed);
-                        float hU = ProcMath::sampleTerrainHeight(wx, wz + checkR, seed);
-                        float avgH = 0.25f * (hL + hR + hD + hU);
-                        float hMin = std::min({wy, hL, hR, hD, hU});
-                        float hMax = std::max({wy, hL, hR, hD, hU});
-
-                        // Отсекаем острые вершины (центр заметно выше окружения) и резкие обрывы
-                        if ((wy - avgH) > 0.26f || std::max(wy - hMin, hMax - wy) > 1.25f) continue;
-
-                        if (c % 2 == 0) {
-                            QVector3D col = (ht < 0.35f) ? QVector3D(0.92f, 0.34f, 0.46f)
-                                            : (ht < 0.70f) ? QVector3D(0.78f, 0.30f, 0.86f)
-                                                           : QVector3D(0.96f, 0.66f, 0.22f);
-                            int tubes = 3 + (c % 3);
-                            for (int t = 0; t < tubes; ++t) {
-                                float ang = (2.0f * PI * t) / tubes + ht * 6.0f;
-                                float offR = 0.30f + 0.32f * (t % 2);
-                                float hTube = 1.05f + ht * 1.65f + (t % 2) * 0.45f;
-                                float rTube = 0.21f + ht * 0.13f;
-
-                                float tx = wx + std::cos(ang) * offR;
-                                float tz = wz + std::sin(ang) * offR;
-                                float ty = ProcMath::sampleTerrainHeight(tx, tz, seed);
-
-                                // Замеряем минимальную высоту грунта по периметру конкретной трубки
-                                float sampleR = rTube * 1.25f;
-                                float tMin = std::min({
-                                    ty,
-                                    ProcMath::sampleTerrainHeight(tx - sampleR, tz, seed),
-                                    ProcMath::sampleTerrainHeight(tx + sampleR, tz, seed),
-                                    ProcMath::sampleTerrainHeight(tx, tz - sampleR, seed),
-                                    ProcMath::sampleTerrainHeight(tx, tz + sampleR, seed)
-                                });
-
-                                // Погружаем основание глубоко в скалу с учётом уклона
-                                float sinkDepth = 0.45f + (1.0f - cNorm.y()) * 1.35f;
-                                float baseY  = tMin - sinkDepth;
-                                float topY   = std::min(ty + hTube, ProcMath::WATER_SURFACE_Y - 0.8f);
-                                float totalH = topY - baseY;
-                                if (totalH < 0.6f) continue;
-
-                                uint32_t vb = static_cast<uint32_t>(tmp.verts.size());
-                                constexpr int SIDES = 6;
-                                for (int ring = 0; ring <= 2; ++ring) {
-                                    float rf = ring * 0.5f;
-                                    float yPos = baseY + rf * totalH;
-                                    float rad = rTube * (0.92f + rf * 0.30f);
-                                    // Подземная часть трубки не колышется — остаётся намертво вросшей в породу
-                                    float sway = ProcMath::clamp((yPos - ty) / std::max(hTube, 0.2f), 0.0f, 1.0f) * 0.35f;
-                                    for (int s = 0; s <= SIDES; ++s) {
-                                        float sa = (2.0f * PI * s) / SIDES;
-                                        QVector3D n(std::cos(sa), 0.2f, std::sin(sa));
-                                        n.normalize();
-                                        QVector3D p(tx + n.x() * rad, yPos, tz + n.z() * rad);
-                                        tmp.verts.push_back({p, n, col * (0.85f + rf * 0.25f), QVector2D(2.0f, sway)});
-                                    }
-                                }
-                                for (int ring = 0; ring < 2; ++ring) {
-                                    for (int s = 0; s < SIDES; ++s) {
-                                        uint32_t i00 = vb + ring * (SIDES + 1) + s;
-                                        uint32_t i10 = i00 + 1;
-                                        uint32_t i01 = i00 + (SIDES + 1);
-                                        uint32_t i11 = i01 + 1;
-                                        tmp.detailInds.insert(tmp.detailInds.end(), {i00, i10, i01, i10, i11, i01});
-                                    }
-                                }
-                            }
-                        } else {
-                            // Погружаем ножку анемона чуть глубже на склонах
-                            float anemSink = 0.22f + (1.0f - cNorm.y()) * 0.75f;
-                            appendSeaAnemone(tmp.verts, tmp.detailInds, QVector3D(wx, wy - anemSink, wz), 0.75f + ht * 0.65f, dSeed);
-                        }
-                    }
-                }
-            }
-        });
-    }
-    for (auto& w : workers) w.join();
-
-    size_t totalVerts = 0;
-    size_t totalInds  = 0;
-    for (const auto& t : chunkTemps) {
-        totalVerts += t.verts.size();
-        totalInds  += t.boulder0Inds.size() + t.boulder1Inds.size()
-                    + t.kelp0Inds.size()    + t.kelp1Inds.size()
-                    + t.flora0Inds.size()   + t.flora1Inds.size()
-                    + t.detailInds.size();
-    }
-    data.propVertices.reserve(totalVerts + 80000);
-    data.propIndices.reserve(totalInds + 140000);
-
-    auto appendRange = [&](const std::vector<uint32_t>& src, uint32_t vBase, MeshRange& dstRange) {
-        dstRange.indexOffset = static_cast<uint32_t>(data.propIndices.size());
-        dstRange.indexCount  = static_cast<uint32_t>(src.size());
-        for (uint32_t idx : src) {
-            data.propIndices.push_back(vBase + idx);
-        }
-    };
-
-    for (int ci = 0; ci < TOTAL_CHUNKS; ++ci) {
-        WorldChunk& chunk = data.chunks[ci];
-        const ChunkPropTemp& tmp = chunkTemps[ci];
-
-        uint32_t vBase = static_cast<uint32_t>(data.propVertices.size());
-        data.propVertices.insert(data.propVertices.end(), tmp.verts.begin(), tmp.verts.end());
-
-        appendRange(tmp.boulder0Inds, vBase, chunk.boulderLod0);
-        appendRange(tmp.boulder1Inds, vBase, chunk.boulderLod1);
-        appendRange(tmp.kelp0Inds,    vBase, chunk.kelpLod0);
-        appendRange(tmp.kelp1Inds,    vBase, chunk.kelpLod1);
-        appendRange(tmp.flora0Inds,   vBase, chunk.floraLod0);
-        appendRange(tmp.flora1Inds,   vBase, chunk.floraLod1);
-        appendRange(tmp.detailInds,   vBase, chunk.detailRange);
-
-        for (const auto& sph : tmp.spheres) {
-            uint32_t colId = static_cast<uint32_t>(data.collision.spheres.size());
-            data.collision.spheres.push_back(sph);
-            chunk.sphereColliderIds.push_back(colId);
-        }
-    }
-}
 
 void WorldGenerator::appendBox(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
                                const QVector3D& center, const QVector3D& size,
@@ -1681,10 +504,6 @@ void WorldGenerator::appendBox(std::vector<EnvVertex>& verts, std::vector<uint32
     addQuad(p011, p111, p110, p010,  up);
     addQuad(p000, p100, p101, p001, -up);
 }
-
-// ============================================================================
-// 5 ТИПОВ ЗАТОНУВШИХ КОРАБЛЕЙ: ИЗОГНУТЫЕ ШПАНГОУТЫ, НОС, КОРМА, ЮТ И ПРОБОИНЫ
-// ============================================================================
 
 void WorldGenerator::generateShipwrecks(WorldData& data, uint32_t seed) {
     constexpr int NUM_SHIPS = 14;
@@ -2039,8 +858,8 @@ void WorldGenerator::generateShipwrecks(WorldData& data, uint32_t seed) {
                 wx = -58.0f;
                 wz = -24.0f;
             } else {
-                float ang = (2.0f * PI * s) / static_cast<float>(NUM_SHIPS)
-                            + ProcMath::hash3(s, attempt, 2, seed + 109u) * 0.65f + attempt * 0.25f;
+                float ang = (TWO_PI * s) / static_cast<float>(NUM_SHIPS)
+                + ProcMath::hash3(s, attempt, 2, seed + 109u) * 0.65f + attempt * 0.25f;
                 float dist = 115.0f + ProcMath::hash3(s, attempt, 4, seed + 109u) * 320.0f;
                 wx = std::cos(ang) * dist;
                 wz = std::sin(ang) * dist;
@@ -2098,7 +917,7 @@ void WorldGenerator::generateShipwrecks(WorldData& data, uint32_t seed) {
                   QVector3D(0.23f, 0.19f, 0.15f), QVector3D(0.31f, 0.27f, 0.21f), QVector3D(0.34f, 0.28f, 0.22f)};
         }
 
-        float yaw   = (s == 0) ? 0.65f : (ProcMath::hash3(s, 5, 6, seed) * 2.0f * PI);
+        float yaw   = (s == 0) ? 0.65f : (ProcMath::hash3(s, 5, 6, seed) * TWO_PI);
         float pitch = (ProcMath::hash3(s, 9, 10, seed) - 0.5f) * 0.20f;
         float roll  = (shipType == 3)
                          ? ((hVar1 > 0.5f ? 1.0f : -1.0f) * (0.85f + hVar2 * 0.28f))
@@ -2125,8 +944,8 @@ void WorldGenerator::generateShipwrecks(WorldData& data, uint32_t seed) {
             QVector3D sternAnchor(wx - f2.x() * 3.8f, 0.0f, wz - f2.z() * 3.8f);
             sternAnchor.setY(ProcMath::sampleTerrainHeight(sternAnchor.x(), sternAnchor.z(), seed) - 0.2f);
 
-            buildShipSection(bowAnchor,   r1, u1, f1, hp,  0.04f, 1.0f, true,  false, false, true,  seed + s * 97u);
-            buildShipSection(sternAnchor, r2, u2, f2, hp, -1.0f, -0.04f, false, true,  true,  false, seed + s * 97u + 19u);
+            buildShipSection(bowAnchor,   r1, u1, f1, hp,  0.04f,  1.0f, true,  false, false, true,  seed + s * 97u);
+            buildShipSection(sternAnchor, r2, u2, f2, hp, -1.0f,  -0.04f, false, true,  true,  false, seed + s * 97u + 19u);
 
             QVector3D mP0 = sternAnchor + u2 * 1.4f + r2 * 2.5f;
             QVector3D mP1 = bowAnchor   + u1 * 0.9f - r1 * 4.2f;
@@ -2177,6 +996,10 @@ void WorldGenerator::generateShipwrecks(WorldData& data, uint32_t seed) {
     }
 }
 
+// ============================================================================
+// ПРОЦЕДУРНЫЕ 3D-МОДЕЛИ ФАУНЫ (РЫБЫ, СКАТЫ-МАНТЫ, ГОРБАТЫЙ КИТ, УДИЛЬЩИК)
+// ============================================================================
+
 void WorldGenerator::generateFaunaMeshes(WorldData& data) {
     auto buildFish = [](std::vector<FaunaVertex>& verts, std::vector<uint32_t>& inds, int rings, int segs, bool withFins) {
         for (int i = 0; i <= rings; ++i) {
@@ -2189,7 +1012,7 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
             QVector3D bodyCol = ProcMath::mix(QVector3D(0.98f, 0.72f, 0.18f), QVector3D(0.18f, 0.84f, 0.96f), t);
 
             for (int j = 0; j <= segs; ++j) {
-                float a = (2.0f * PI * j) / segs;
+                float a = (TWO_PI * j) / segs;
                 float cx = std::cos(a), sy = std::sin(a);
                 QVector3D p(cx * rx, sy * ry, z);
                 QVector3D n(cx / std::max(rx, 0.02f), sy / std::max(ry, 0.02f), (0.5f - t) * 0.6f);
@@ -2228,36 +1051,168 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
     buildFish(data.fishLod0Verts, data.fishLod0Inds, 8, 8, true);
     buildFish(data.fishLod1Verts, data.fishLod1Inds, 4, 4, false);
 
-    auto buildManta = [](std::vector<FaunaVertex>& verts, std::vector<uint32_t>& inds, int spanSegs, int chordSegs) {
-        QVector3D dorsalCol(0.10f, 0.18f, 0.28f);
-        QVector3D bellyCol(0.86f, 0.92f, 0.96f);
+    auto buildManta = [](std::vector<FaunaVertex>& verts, std::vector<uint32_t>& inds,
+                         int spanSegs, int chordSegs, bool highLod) {
+        const QVector3D dorsalDark(0.06f, 0.11f, 0.19f);
+        const QVector3D dorsalMid(0.11f, 0.18f, 0.28f);
+        const QVector3D chevronCol(0.38f, 0.50f, 0.60f);
+        const QVector3D bellyLight(0.70f, 0.76f, 0.80f);
+        const QVector3D bellyBorder(0.20f, 0.28f, 0.37f);
+        const QVector3D eyeCol(0.02f, 0.03f, 0.05f);
 
+        // Гарантированный обход против часовой стрелки (CCW) по направлению вершинных нормалей
+        auto emitTriCCW = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+            const QVector3D& p0 = verts[i0].pos;
+            const QVector3D& p1 = verts[i1].pos;
+            const QVector3D& p2 = verts[i2].pos;
+            QVector3D faceN = QVector3D::crossProduct(p1 - p0, p2 - p0);
+            QVector3D avgN  = verts[i0].normal + verts[i1].normal + verts[i2].normal;
+            if (QVector3D::dotProduct(faceN, avgN) >= 0.0f) {
+                inds.insert(inds.end(), {i0, i1, i2});
+            } else {
+                inds.insert(inds.end(), {i0, i2, i1});
+            }
+        };
+
+        auto appendTubeCCW = [&](const std::vector<QVector3D>& spine,
+                                 const std::vector<float>& radii,
+                                 int radialSegs,
+                                 const QVector3D& topCol,
+                                 const QVector3D& botCol,
+                                 bool closeTip) {
+            if (spine.size() < 2) return;
+            const uint32_t baseIdx = static_cast<uint32_t>(verts.size());
+            const int nPts = static_cast<int>(spine.size());
+
+            for (int i = 0; i < nPts; ++i) {
+                QVector3D tang;
+                if (i == 0) tang = spine[1] - spine[0];
+                else if (i + 1 == nPts) tang = spine[i] - spine[i - 1];
+                else tang = spine[i + 1] - spine[i - 1];
+                tang.normalize();
+
+                QVector3D u = QVector3D::crossProduct(tang, QVector3D(0.0f, 1.0f, 0.0f));
+                if (u.lengthSquared() < 1e-4f) {
+                    u = QVector3D::crossProduct(tang, QVector3D(1.0f, 0.0f, 0.0f));
+                }
+                u.normalize();
+                QVector3D v = QVector3D::crossProduct(tang, u).normalized();
+
+                float r = radii[i];
+                for (int j = 0; j < radialSegs; ++j) {
+                    float a = (TWO_PI * j) / radialSegs;
+                    QVector3D n = (u * std::cos(a) + v * std::sin(a)).normalized();
+                    float topMix = ProcMath::smoothstep(-0.35f, 0.35f, n.y());
+                    QVector3D col = ProcMath::mix(botCol, topCol, topMix);
+                    verts.push_back({spine[i] + n * r, n, col});
+                }
+            }
+
+            for (int i = 0; i + 1 < nPts; ++i) {
+                uint32_t r0 = baseIdx + i * radialSegs;
+                uint32_t r1 = baseIdx + (i + 1) * radialSegs;
+                for (int j = 0; j < radialSegs; ++j) {
+                    int jNext = (j + 1) % radialSegs;
+                    emitTriCCW(r0 + j, r1 + j, r0 + jNext);
+                    emitTriCCW(r0 + jNext, r1 + j, r1 + jNext);
+                }
+            }
+
+            if (closeTip) {
+                QVector3D tipDir = (spine.back() - spine[nPts - 2]).normalized();
+                uint32_t tipIdx = static_cast<uint32_t>(verts.size());
+                verts.push_back({spine.back() + tipDir * (radii.back() * 2.2f), tipDir, topCol});
+                uint32_t lastR = baseIdx + (nPts - 1) * radialSegs;
+                for (int j = 0; j < radialSegs; ++j) {
+                    int jNext = (j + 1) % radialSegs;
+                    emitTriCCW(lastR + j, tipIdx, lastR + jNext);
+                }
+            }
+        };
+
+        // 1. Крылья и тело ската (верхняя и нижняя поверхности с гладкими нормалями)
         auto addSurface = [&](float ySign) {
-            uint32_t base = static_cast<uint32_t>(verts.size());
+            const int cols = chordSegs + 1;
+            const int rows = spanSegs + 1;
+            std::vector<QVector3D> gridPos(rows * cols);
+            std::vector<QVector3D> gridCol(rows * cols);
+
             for (int ix = 0; ix <= spanSegs; ++ix) {
                 float u = (static_cast<float>(ix) / spanSegs) * 2.0f - 1.0f;
                 float absU = std::abs(u);
-                float x = u * 2.15f;
-                float leadZ = 0.85f - absU * 0.72f;
-                float trailZ = -1.05f + absU * 0.68f;
+                float x = u * 2.35f;
+
+                // Плавный стреловидный передний край и изогнутый задний край
+                float leadZ  = 0.78f - 1.18f * std::pow(absU, 1.35f);
+                float trailZ = -1.15f + 0.68f * std::pow(absU, 0.85f) + 0.16f * std::sin(absU * PI);
+                float spanThick = 0.13f * std::pow(1.0f - absU * 0.94f, 1.15f)
+                                  + 0.12f * std::exp(-(absU * absU) / 0.075f);
+
                 for (int iz = 0; iz <= chordSegs; ++iz) {
                     float v = static_cast<float>(iz) / chordSegs;
                     float z = ProcMath::mix(leadZ, trailZ, v);
-                    float thickness = (1.0f - absU * 0.88f) * std::sin(v * PI) * 0.22f;
-                    float y = ySign * thickness;
-                    QVector3D n(u * 0.18f, ySign, (v - 0.5f) * 0.15f);
-                    n.normalize();
-                    verts.push_back({QVector3D(x, y, z), n, (ySign > 0.0f) ? dorsalCol : bellyCol});
+                    float chordProf = std::sin(std::pow(ProcMath::clamp(v, 0.0f, 1.0f), 0.72f) * PI);
+                    float yScale = (ySign > 0.0f) ? 1.0f : 0.65f;
+                    float y = ySign * spanThick * chordProf * yScale;
+
+                    QVector3D col;
+                    if (ySign > 0.0f) {
+                        // Спина: тёмно-синий градиент + характерные светлые плечевые пятна манты
+                        float wingFade = ProcMath::smoothstep(0.15f, 0.95f, absU);
+                        col = ProcMath::mix(dorsalMid, dorsalDark, wingFade * 0.75f + v * 0.25f);
+
+                        float chevU = (absU - 0.25f) / 0.16f;
+                        float chevV = (v - (0.20f + absU * 0.35f)) / 0.13f;
+                        float chevron = std::exp(-(chevU * chevU + chevV * chevV));
+                        chevron *= ProcMath::smoothstep(0.05f, 0.14f, absU)
+                                   * (1.0f - ProcMath::smoothstep(0.42f, 0.58f, absU));
+                        col = ProcMath::mix(col, chevronCol, chevron * 0.72f);
+                    } else {
+                        // Брюхо: мягкий светлый оттенок, тёмная окантовка крыльев и жаберные складки
+                        float edgeBorder = ProcMath::smoothstep(0.68f, 0.98f, v) * 0.65f
+                                           + ProcMath::smoothstep(0.62f, 0.98f, absU) * 0.55f;
+                        col = ProcMath::mix(bellyLight, bellyBorder, ProcMath::clamp(edgeBorder, 0.0f, 0.85f));
+
+                        float gillMask = ProcMath::smoothstep(0.05f, 0.11f, absU)
+                                         * (1.0f - ProcMath::smoothstep(0.20f, 0.28f, absU))
+                                         * ProcMath::smoothstep(0.15f, 0.23f, v)
+                                         * (1.0f - ProcMath::smoothstep(0.42f, 0.50f, v));
+                        float gillStripes = 0.5f + 0.5f * std::sin(v * 70.0f);
+                        col *= (1.0f - 0.16f * gillMask * gillStripes);
+                    }
+
+                    gridPos[ix * cols + iz] = QVector3D(x, y, z);
+                    gridCol[ix * cols + iz] = col;
                 }
             }
+
+            uint32_t base = static_cast<uint32_t>(verts.size());
+            for (int ix = 0; ix <= spanSegs; ++ix) {
+                int ixL = std::max(0, ix - 1);
+                int ixR = std::min(spanSegs, ix + 1);
+                for (int iz = 0; iz <= chordSegs; ++iz) {
+                    int izF = std::max(0, iz - 1);
+                    int izB = std::min(chordSegs, iz + 1);
+
+                    QVector3D tX = gridPos[ixR * cols + iz] - gridPos[ixL * cols + iz];
+                    QVector3D tZ = gridPos[ix * cols + izB] - gridPos[ix * cols + izF];
+                    // tX вдоль +X, tZ вдоль -Z -> cross(tX, tZ) смотрит строго вверх (+Y)
+                    QVector3D n = QVector3D::crossProduct(tX, tZ) * ySign;
+                    if (n.lengthSquared() < 1e-6f) n = QVector3D(0.0f, ySign, 0.0f);
+                    n.normalize();
+
+                    verts.push_back({gridPos[ix * cols + iz], n, gridCol[ix * cols + iz]});
+                }
+            }
+
             for (int ix = 0; ix < spanSegs; ++ix) {
                 for (int iz = 0; iz < chordSegs; ++iz) {
-                    uint32_t i00 = base + ix * (chordSegs + 1) + iz;
-                    uint32_t i10 = i00 + (chordSegs + 1);
+                    uint32_t i00 = base + ix * cols + iz;
+                    uint32_t i10 = i00 + cols;
                     uint32_t i01 = i00 + 1;
                     uint32_t i11 = i10 + 1;
-                    if (ySign > 0.0f) inds.insert(inds.end(), {i00, i01, i10, i10, i01, i11});
-                    else              inds.insert(inds.end(), {i00, i10, i01, i10, i11, i01});
+                    emitTriCCW(i00, i10, i01);
+                    emitTriCCW(i10, i11, i01);
                 }
             }
         };
@@ -2265,15 +1220,89 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
         addSurface( 1.0f);
         addSurface(-1.0f);
 
-        uint32_t tb = static_cast<uint32_t>(verts.size());
-        verts.push_back({QVector3D(-0.05f, 0.0f, -0.95f), QVector3D(0, 1, 0), dorsalCol});
-        verts.push_back({QVector3D( 0.05f, 0.0f, -0.95f), QVector3D(0, 1, 0), dorsalCol});
-        verts.push_back({QVector3D( 0.0f,  0.0f, -2.95f), QVector3D(0, 1, 0), dorsalCol});
-        inds.insert(inds.end(), {tb, tb + 1, tb + 2});
+        // 2. Головные плавники («рожки» манты по бокам рта)
+        for (float side : {-1.0f, 1.0f}) {
+            std::vector<QVector3D> lobeSpine = {
+                QVector3D(side * 0.36f, -0.01f, 0.58f),
+                QVector3D(side * 0.35f, -0.02f, 0.80f),
+                QVector3D(side * 0.30f, -0.03f, 1.00f),
+                QVector3D(side * 0.24f, -0.04f, 1.16f)
+            };
+            std::vector<float> lobeRadii = {0.068f, 0.056f, 0.038f, 0.018f};
+            appendTubeCCW(lobeSpine, lobeRadii, highLod ? 6 : 4, dorsalDark, bellyBorder, true);
+        }
+
+        // 3. Небольшой спинной плавник у основания хвоста
+        {
+            uint32_t base = static_cast<uint32_t>(verts.size());
+            QVector3D pFront(0.0f, 0.06f, -0.88f);
+            QVector3D pPeak (0.0f, 0.22f, -1.16f);
+            QVector3D pBack (0.0f, 0.02f, -1.24f);
+            QVector3D pLeft (-0.035f, 0.05f, -1.06f);
+            QVector3D pRight( 0.035f, 0.05f, -1.06f);
+
+            verts.push_back({pFront, QVector3D(0.0f, 0.5f, 0.85f).normalized(), dorsalMid});
+            verts.push_back({pPeak,  QVector3D(0.0f, 0.9f, -0.3f).normalized(), dorsalDark});
+            verts.push_back({pBack,  QVector3D(0.0f, 0.3f, -0.95f).normalized(), dorsalDark});
+            verts.push_back({pLeft,  QVector3D(-1.0f, 0.2f, 0.0f).normalized(), dorsalDark});
+            verts.push_back({pRight, QVector3D( 1.0f, 0.2f, 0.0f).normalized(), dorsalDark});
+
+            emitTriCCW(base + 0, base + 3, base + 1);
+            emitTriCCW(base + 3, base + 2, base + 1);
+            emitTriCCW(base + 0, base + 1, base + 4);
+            emitTriCCW(base + 4, base + 1, base + 2);
+        }
+
+        // 4. Объёмный 3D-хвост (плавно сужающийся кнут с правильными нормалями)
+        {
+            const int tailSegs = highLod ? 8 : 4;
+            std::vector<QVector3D> tailSpine;
+            std::vector<float> tailRadii;
+            tailSpine.reserve(tailSegs + 1);
+            tailRadii.reserve(tailSegs + 1);
+
+            for (int k = 0; k <= tailSegs; ++k) {
+                float t = static_cast<float>(k) / static_cast<float>(tailSegs);
+                float z = ProcMath::mix(-0.98f, -3.12f, t);
+                float y = -0.02f * std::sin(t * PI * 0.85f);
+                float r = 0.052f * std::pow(1.0f - t, 1.35f) + 0.006f;
+                tailSpine.emplace_back(0.0f, y, z);
+                tailRadii.push_back(r);
+            }
+            appendTubeCCW(tailSpine, tailRadii, highLod ? 6 : 4, dorsalDark, bellyBorder, true);
+        }
+
+        // 5. Глаза у основания головных плавников (на LOD0)
+        if (highLod) {
+            for (float side : {-1.0f, 1.0f}) {
+                QVector3D c(side * 0.41f, 0.025f, 0.66f);
+                uint32_t eBase = static_cast<uint32_t>(verts.size());
+                constexpr int stN = 4, slN = 6;
+                for (int st = 0; st <= stN; ++st) {
+                    float phi = PI * static_cast<float>(st) / stN;
+                    float sp = std::sin(phi), cp = std::cos(phi);
+                    for (int sl = 0; sl <= slN; ++sl) {
+                        float th = TWO_PI * static_cast<float>(sl) / slN;
+                        QVector3D n(sp * std::cos(th), cp, sp * std::sin(th));
+                        verts.push_back({c + n * 0.032f, n, eyeCol});
+                    }
+                }
+                for (int st = 0; st < stN; ++st) {
+                    for (int sl = 0; sl < slN; ++sl) {
+                        uint32_t i00 = eBase + st * (slN + 1) + sl;
+                        uint32_t i10 = i00 + 1;
+                        uint32_t i01 = i00 + (slN + 1);
+                        uint32_t i11 = i01 + 1;
+                        if (st > 0) emitTriCCW(i00, i01, i10);
+                        if (st + 1 < stN) emitTriCCW(i10, i01, i11);
+                    }
+                }
+            }
+        }
     };
 
-    buildManta(data.mantaLod0Verts, data.mantaLod0Inds, 12, 6);
-    buildManta(data.mantaLod1Verts, data.mantaLod1Inds, 6, 3);
+    buildManta(data.mantaLod0Verts, data.mantaLod0Inds, 24, 12, true);
+    buildManta(data.mantaLod1Verts, data.mantaLod1Inds, 10, 5, false);
 }
 
 void WorldGenerator::generateWhaleMeshes(WorldData& data) {
@@ -2288,7 +1317,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
         const QVector3D eyeSclera(0.48f, 0.54f, 0.59f);
         const QVector3D eyePupil(0.02f, 0.025f, 0.04f);
 
-        // Гарантированный внешний CCW-обход треугольников (FaunaFrag не перевернёт нормали)
         auto emitTriCCW = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
             const QVector3D& p0 = verts[i0].pos;
             const QVector3D& p1 = verts[i1].pos;
@@ -2309,7 +1337,7 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
                 float phi = PI * static_cast<float>(st) / static_cast<float>(stacks);
                 float sp = std::sin(phi), cp = std::cos(phi);
                 for (int sl = 0; sl <= slices; ++sl) {
-                    float th = 2.0f * PI * static_cast<float>(sl) / static_cast<float>(slices);
+                    float th = TWO_PI * static_cast<float>(sl) / static_cast<float>(slices);
                     QVector3D n(sp * std::cos(th), cp, sp * std::sin(th));
                     QVector3D p = center + QVector3D(n.x() * radii.x(), n.y() * radii.y(), n.z() * radii.z());
                     QVector3D rn(n.x() / std::max(radii.x(), 0.01f),
@@ -2331,7 +1359,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             }
         };
 
-        // Единая функция поверхности корпуса (используется и для тела, и для точной посадки глаз/усов)
         auto evalBodySurface = [&](float t, float ang, QVector3D& outPos, QVector3D& outCol) {
             float z = 4.95f - t * 10.05f;
             float rx = 0.0f, ryTop = 0.0f, ryBot = 0.0f;
@@ -2340,8 +1367,8 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
                 float u = t / 0.34f;
                 float s = std::sin(u * PI * 0.5f);
                 rx    = 1.24f * std::pow(s, 0.80f);
-                ryTop = 0.84f * std::pow(s, 0.96f); // приплюснутый обтекаемый рострум
-                ryBot = 1.12f * std::pow(s, 0.78f); // глубокая нижняя челюсть
+                ryTop = 0.84f * std::pow(s, 0.96f);
+                ryBot = 1.12f * std::pow(s, 0.78f);
             } else {
                 float u = (t - 0.34f) / 0.66f;
                 rx    = 1.24f * std::pow(1.0f - u, 1.55f) + 0.09f * (1.0f - u);
@@ -2353,13 +1380,11 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             float sa = std::sin(ang);
             float ry = (sa >= 0.0f) ? ryTop : ryBot;
 
-            // Лёгкий естественный изгиб осевой линии и более плоский верх головы
             float centerY = 0.08f * (1.0f - ProcMath::smoothstep(0.0f, 0.42f, t));
             if (sa > 0.15f && t < 0.30f) {
                 ry *= (1.0f - 0.10f * (1.0f - t / 0.30f) * sa);
             }
 
-            // Изогнутая линия пасти (от кончика рыла до области под глазами)
             float mt = ProcMath::clamp(t / 0.31f, 0.0f, 1.0f);
             float mouthSa = -0.05f + 0.11f * std::sin(mt * PI) - 0.25f * mt * mt;
             float mouthFade = (1.0f - ProcMath::smoothstep(0.24f, 0.315f, t))
@@ -2367,12 +1392,10 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             float dMouth = std::abs(sa - mouthSa);
             float mouthGroove = (1.0f - ProcMath::smoothstep(0.015f, 0.145f, dMouth)) * mouthFade;
 
-            // Вдавливаем щель пасти и слегка выделяем верхнюю/нижнюю губы
             float lipUpper = (1.0f - ProcMath::smoothstep(0.08f, 0.22f, std::abs(sa - (mouthSa + 0.14f)))) * mouthFade;
             float lipLower = (1.0f - ProcMath::smoothstep(0.08f, 0.22f, std::abs(sa - (mouthSa - 0.14f)))) * mouthFade;
             float radialMod = 1.0f - 0.26f * mouthGroove + 0.035f * lipUpper + 0.030f * lipLower;
 
-            // Рельеф горловых складок на нижней челюсти и груди
             float bellyMask = ProcMath::smoothstep(-0.18f, -0.58f, sa)
                               * (1.0f - ProcMath::smoothstep(0.54f, 0.84f, t));
             float pleatWave = (bellyMask > 0.15f) ? std::sin(ang * 18.0f) : 0.0f;
@@ -2382,13 +1405,11 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
                                centerY + sa * ry * radialMod * pleatRelief,
                                z);
 
-            // Окраска: тёмно-синяя спина -> бок -> мягкое серо-голубое брюшко со складками
             float flankBlend = ProcMath::smoothstep(0.35f, -0.25f, sa);
             QVector3D col = ProcMath::mix(backCol, flankCol, flankBlend * 0.75f);
             float pleatShade = 0.88f + 0.12f * pleatWave;
             col = ProcMath::mix(col, bellyCol * pleatShade, bellyMask);
 
-            // Тёмная полость пасти и светлая кромка китового уса сверху щели
             if (mouthGroove > 0.01f) {
                 float baleenMask = ProcMath::smoothstep(0.0f, 0.09f, sa - mouthSa) * mouthGroove;
                 QVector3D cleftCol = ProcMath::mix(mouthDark, baleenCol, baleenMask * 0.72f);
@@ -2397,7 +1418,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             outCol = col;
         };
 
-        // 1. Герметичный корпус со сгущением колец у рыла и хвоста
         std::vector<float> tRings;
         tRings.reserve(bodySegs + 3);
         tRings.push_back(0.010f);
@@ -2414,7 +1434,7 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
 
         for (int r = 0; r < numRings; ++r) {
             for (int j = 0; j < radialSegs; ++j) {
-                float ang = (2.0f * PI * j) / radialSegs;
+                float ang = (TWO_PI * j) / radialSegs;
                 evalBodySurface(tRings[r], ang, gridPos[r * radialSegs + j], gridCol[r * radialSegs + j]);
             }
         }
@@ -2443,7 +1463,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
         uint32_t tailIdx = static_cast<uint32_t>(verts.size());
         verts.push_back({tailTipPos, QVector3D(0.0f, 0.0f, -1.0f), backCol});
 
-        // Сшиваем кольца тела + плотно закрываем нос и хвост
         for (int j = 0; j < radialSegs; ++j) {
             int jNext = (j + 1) % radialSegs;
             emitTriCCW(noseIdx, bodyBase + j, bodyBase + jNext);
@@ -2460,7 +1479,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             }
         }
 
-        // 2. Пластины китового уса внутри передне-боковой щели пасти (LOD0)
         if (highLod) {
             for (float side : {-1.0f, 1.0f}) {
                 for (int k = 0; k < 10; ++k) {
@@ -2481,7 +1499,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             }
         }
 
-        // 3. Глаза (посажены точно на боковую поверхность головы позади уголка пасти)
         for (float side : {-1.0f, 1.0f}) {
             float angEye = (side > 0.0f) ? -0.10f : (PI + 0.10f);
             QVector3D skinP, dummyCol;
@@ -2489,18 +1506,14 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             QVector3D outDir(side * 0.94f, -0.03f, 0.34f);
             outDir.normalize();
 
-            // Тёмное веко / надбровный валик
             appendSphereCCW(skinP - outDir * 0.025f, QVector3D(0.115f, 0.100f, 0.165f),
                             highLod ? 6 : 4, highLod ? 8 : 5, backCol * 0.72f);
-            // Глазное яблоко (спокойная серо-голубая склера)
             appendSphereCCW(skinP + outDir * 0.028f, QVector3D(0.082f, 0.074f, 0.094f),
                             highLod ? 7 : 4, highLod ? 9 : 6, eyeSclera);
-            // Тёмный глянцевый зрачок
             appendSphereCCW(skinP + outDir * 0.076f, QVector3D(0.052f, 0.050f, 0.056f),
                             highLod ? 5 : 3, highLod ? 7 : 5, eyePupil);
         }
 
-        // 4. Генератор объёмных 3D-плавников (замкнутый гидропрофиль без Z-fighting)
         struct FinSection {
             QVector3D le;
             QVector3D te;
@@ -2578,7 +1591,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
 
         const int finChordSegs = highLod ? 5 : 3;
 
-        // Грудные плавники (объёмные, тёмно-синие сверху и приглушённо-серые снизу)
         for (float s : {-1.0f, 1.0f}) {
             std::vector<FinSection> pec = {
                 {QVector3D(s * 0.88f, -0.34f,  1.45f), QVector3D(s * 0.86f, -0.40f,  0.32f), 0.15f, backCol, finVentralCol},
@@ -2589,7 +1601,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             appendAirfoilFin(pec, QVector3D(s * 4.32f, -0.67f, -0.78f), QVector3D(0.0f, 1.0f, 0.0f), finChordSegs);
         }
 
-        // Хвостовые лопасти (объёмные, с характерной центральной выемкой, без переворота нормалей)
         for (float s : {-1.0f, 1.0f}) {
             std::vector<FinSection> fluke = {
                 {QVector3D(0.0f,      0.00f, -4.62f), QVector3D(0.0f,      0.00f, -5.20f), 0.13f, backCol, finVentralCol * 0.90f},
@@ -2600,7 +1611,6 @@ void WorldGenerator::generateWhaleMeshes(WorldData& data) {
             appendAirfoilFin(fluke, QVector3D(s * 2.92f, 0.01f, -6.62f), QVector3D(0.0f, 1.0f, 0.0f), finChordSegs);
         }
 
-        // Спинной плавник (объёмный, плавно изогнутый назад)
         std::vector<FinSection> dorsal = {
             {QVector3D(0.0f, 0.42f, -1.05f), QVector3D(0.0f, 0.32f, -2.35f), 0.12f, backCol, backCol},
             {QVector3D(0.0f, 0.78f, -1.65f), QVector3D(0.0f, 0.68f, -2.38f), 0.072f, backCol, backCol},
@@ -2635,7 +1645,7 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
             float ryDown = 0.08f + 0.74f * std::pow(env, 0.75f) * (1.0f - 0.28f * t);
 
             for (int j = 0; j <= radialSegs; ++j) {
-                float a = (2.0f * PI * j) / radialSegs;
+                float a = (TWO_PI * j) / radialSegs;
                 float ca = std::cos(a), sa = std::sin(a);
                 float ry = (sa >= 0.0f) ? ryUp : ryDown;
 
@@ -2705,19 +1715,16 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
 
         QVector3D pupilCol(0.02f, 0.02f, 0.03f);
         for (float side : {-1.0f, 1.0f}) {
-            // Тёмная мясистая глазница — перекрывает стык с головой без щелей на LOD0 и LOD1
             QVector3D socketCenter(side * 0.49f, 0.33f, 0.49f);
             appendFaunaSphere(verts, inds, socketCenter,
                               QVector3D(0.112f, 0.106f, 0.106f),
                               highLod ? 6 : 4, highLod ? 8 : 5, skinDark);
 
-            // Светящееся глазное яблоко — выступает наружу из профиля головы (включая вид сверху)
             QVector3D eyeCenter(side * 0.52f, 0.35f, 0.53f);
             appendFaunaSphere(verts, inds, eyeCenter,
                               QVector3D(0.095f, 0.095f, 0.095f),
                               highLod ? 7 : 4, highLod ? 9 : 6, eyeGlow);
 
-            // Тёмный зрачок на передне-боковой стороне глаза (контрастно читается на светящемся фоне)
             if (highLod) {
                 QVector3D lookDir = QVector3D(side * 0.56f, 0.37f, 0.74f).normalized();
                 appendFaunaSphere(verts, inds, eyeCenter + lookDir * 0.070f,
@@ -2741,7 +1748,7 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
 
         if (highLod) {
             for (int f = 0; f < 4; ++f) {
-                float a = (2.0f * PI * f) / 4.0f + 0.4f;
+                float a = (TWO_PI * f) / 4.0f + 0.4f;
                 QVector3D bP(std::cos(a) * 0.08f, 0.72f, 1.38f + std::sin(a) * 0.08f);
                 QVector3D tP(std::cos(a) * 0.16f, 0.56f, 1.38f + std::sin(a) * 0.16f);
                 appendFaunaCone(verts, inds, bP, tP, 0.022f, 4, lureGlow, lureGlow);
@@ -2783,40 +1790,48 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
     buildAngler(data.anglerLod1Verts, data.anglerLod1Inds, 7, 7, false);
 }
 
+// ============================================================================
+// ЗАСЕЛЕНИЕ ФАУНОЙ, ОБЪЁМНЫЕ СОЛНЕЧНЫЕ ЛУЧИ И ЗАВЕСЫ ПУЗЫРЬКОВ
+// ============================================================================
+
 void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
     const QVector3D schoolTints[] = {
-        {1.10f, 0.96f, 0.82f},
-        {0.56f, 1.12f, 1.22f},
-        {1.22f, 0.58f, 0.72f},
-        {0.78f, 1.18f, 0.68f},
-        {1.18f, 0.94f, 0.38f}
+        {1.12f, 0.96f, 0.80f},
+        {0.56f, 1.14f, 1.24f},
+        {1.24f, 0.56f, 0.74f},
+        {0.76f, 1.18f, 0.66f},
+        {1.20f, 0.92f, 0.36f}
     };
 
-    for (int sc = 0; sc < 28; ++sc) {
+    constexpr int SCHOOL_COUNT    = 34;
+    constexpr int FISH_PER_SCHOOL = 26;
+    data.fishAgents.reserve(SCHOOL_COUNT * FISH_PER_SCHOOL);
+
+    for (int sc = 0; sc < SCHOOL_COUNT; ++sc) {
         float sx, sz;
-        if (sc < 3) {
-            float a = sc * 2.1f;
+        if (sc < 4) {
+            float a = sc * 1.57f + 0.35f;
             sx = std::cos(a) * 28.0f;
             sz = 10.0f + std::sin(a) * 28.0f;
         } else {
-            float a = ProcMath::hash3(sc, 1, 2, seed + 811u) * 2.0f * PI;
-            float r = 65.0f + ProcMath::hash3(sc, 3, 4, seed + 811u) * 380.0f;
+            float a = ProcMath::hash3(sc, 1, 2, seed + 811u) * TWO_PI;
+            float r = 55.0f + ProcMath::hash3(sc, 3, 4, seed + 811u) * 390.0f;
             sx = std::cos(a) * r;
             sz = std::sin(a) * r;
         }
         float floorY = ProcMath::sampleTerrainHeight(sx, sz, seed);
         float safeFloor = std::max(floorY, -24.0f);
-        float baseY = ProcMath::clamp(safeFloor + 7.5f + ProcMath::hash3(sc, 5, 6, seed) * 10.0f, -18.0f, 16.0f);
+        float baseY = ProcMath::clamp(safeFloor + 7.0f + ProcMath::hash3(sc, 5, 6, seed) * 10.5f, -18.0f, 16.5f);
         QVector3D schoolCenter(sx, baseY, sz);
         QVector3D tint = schoolTints[sc % 5];
 
-        for (int f = 0; f < 24; ++f) {
+        for (int f = 0; f < FISH_PER_SCHOOL; ++f) {
             float h1 = ProcMath::hash3(sc, f, 1, seed + 823u);
             float h2 = ProcMath::hash3(sc, f, 2, seed + 823u);
             float h3 = ProcMath::hash3(sc, f, 3, seed + 823u);
 
-            float ang = h1 * 2.0f * PI;
-            float rad = 3.0f + h2 * 14.0f;
+            float ang = h1 * TWO_PI;
+            float rad = 2.8f + h2 * 13.5f;
             QVector3D pos(sx + std::cos(ang) * rad, baseY + (h3 - 0.5f) * 6.0f, sz + std::sin(ang) * rad);
 
             data.collision.resolveSphereCollision(pos, nullptr, 1.2f, 1.5f, 3.0f);
@@ -2827,7 +1842,7 @@ void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
             agent.homeRadius = 22.0f + h2 * 16.0f;
             agent.preferredDepth = baseY;
             agent.cruiseSpeed = 4.2f + h3 * 2.6f;
-            agent.scale = 0.55f + h1 * 0.55f;
+            agent.scale = 0.52f + h1 * 0.56f;
             agent.boundingRadius = 0.85f * agent.scale;
             agent.phase = h1 * 12.0f;
             agent.type = 0.0f;
@@ -2838,17 +1853,20 @@ void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
         }
     }
 
-    for (int m = 0; m < 26; ++m) {
+    constexpr int MANTA_COUNT = 32;
+    data.mantaAgents.reserve(MANTA_COUNT);
+
+    for (int m = 0; m < MANTA_COUNT; ++m) {
         float h1 = ProcMath::hash3(m, 1, 7, seed + 907u);
         float h2 = ProcMath::hash3(m, 2, 8, seed + 907u);
         float h3 = ProcMath::hash3(m, 3, 9, seed + 907u);
 
-        float a = (2.0f * PI * m) / 26.0f + h1 * 0.35f;
-        float dist = (m < 3) ? (35.0f + m * 14.0f) : (75.0f + h2 * 365.0f);
+        float a = (TWO_PI * m) / static_cast<float>(MANTA_COUNT) + h1 * 0.35f;
+        float dist = (m < 4) ? (30.0f + m * 14.0f) : (70.0f + h2 * 375.0f);
         float mx = std::cos(a) * dist;
         float mz = std::sin(a) * dist;
         float floorY = ProcMath::sampleTerrainHeight(mx, mz, seed);
-        float my = ProcMath::clamp(std::max(floorY + 10.0f, -2.0f + h3 * 16.0f), -10.0f, 20.0f);
+        float my = ProcMath::clamp(std::max(floorY + 10.0f, -2.0f + h3 * 16.0f), -10.0f, 20.5f);
 
         QVector3D pos(mx, my, mz);
         data.collision.resolveSphereCollision(pos, nullptr, 3.6f, 2.5f, 4.0f);
@@ -2859,7 +1877,7 @@ void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
         manta.homeRadius = 55.0f + h1 * 50.0f;
         manta.preferredDepth = my;
         manta.cruiseSpeed = 4.6f + h2 * 2.2f;
-        manta.scale = 1.15f + h3 * 0.75f;
+        manta.scale = 1.15f + h3 * 0.78f;
         manta.boundingRadius = 2.6f * manta.scale;
         manta.phase = h1 * 10.0f;
         manta.type = 1.0f;
@@ -2874,7 +1892,7 @@ void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
         float h1 = ProcMath::hash3(i, 11, 21, seed + 3313u);
         float h2 = ProcMath::hash3(i, 12, 22, seed + 3313u);
 
-        float ang = h1 * 2.0f * PI;
+        float ang = h1 * TWO_PI;
         float ax = pit.x + std::cos(ang) * 6.0f;
         float az = pit.z + std::sin(ang) * 6.0f;
         float bottomY = ProcMath::sampleTerrainHeight(ax, az, seed);
@@ -2901,58 +1919,143 @@ void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
 }
 
 void WorldGenerator::generateGodRaysAndParticles(WorldData& data, uint32_t seed) {
-    for (int i = 0; i < 140; ++i) {
+    // 1. Единая замкнутая прокси-геометрия единичного цилиндра (CCW наружу)
+    // Локальные координаты: x = cos(a), y = 0 (верх) .. 1 (низ), z = sin(a)
+    constexpr int SIDES = 16;
+    data.godRayMeshVerts.clear();
+    data.godRayMeshInds.clear();
+    data.godRayMeshVerts.reserve(2 + SIDES * 2);
+
+    const uint32_t topCenterIdx = 0;
+    const uint32_t botCenterIdx = 1;
+    data.godRayMeshVerts.emplace_back(0.0f, 0.0f, 0.0f);
+    data.godRayMeshVerts.emplace_back(0.0f, 1.0f, 0.0f);
+
+    const uint32_t topRingBase = 2;
+    const uint32_t botRingBase = 2 + SIDES;
+    for (int s = 0; s < SIDES; ++s) {
+        float a = (TWO_PI * static_cast<float>(s)) / static_cast<float>(SIDES);
+        float c = std::cos(a), sn = std::sin(a);
+        data.godRayMeshVerts.emplace_back(c, 0.0f, sn);
+    }
+    for (int s = 0; s < SIDES; ++s) {
+        float a = (TWO_PI * static_cast<float>(s)) / static_cast<float>(SIDES);
+        float c = std::cos(a), sn = std::sin(a);
+        data.godRayMeshVerts.emplace_back(c, 1.0f, sn);
+    }
+
+    for (int s = 0; s < SIDES; ++s) {
+        uint32_t sNext = static_cast<uint32_t>((s + 1) % SIDES);
+        uint32_t t0 = topRingBase + s;
+        uint32_t t1 = topRingBase + sNext;
+        uint32_t b0 = botRingBase + s;
+        uint32_t b1 = botRingBase + sNext;
+
+        // Боковая стенка (нормаль наружу в правостороннем базисе U, A, W)
+        data.godRayMeshInds.insert(data.godRayMeshInds.end(), {t0, b0, t1, t1, b0, b1});
+        // Верхний торец (нормаль -A)
+        data.godRayMeshInds.insert(data.godRayMeshInds.end(), {topCenterIdx, t0, t1});
+        // Нижний торец (нормаль +A)
+        data.godRayMeshInds.insert(data.godRayMeshInds.end(), {botCenterIdx, b1, b0});
+    }
+
+    // 2. Инстансы объёмных солнечных столбов по всей акватории
+    const QVector3D sunDir = QVector3D(-0.28f, 0.92f, -0.22f).normalized();
+    constexpr int SHAFT_COUNT = 210;
+    data.godRayInstances.clear();
+    data.godRayInstances.reserve(SHAFT_COUNT);
+
+    for (int i = 0; i < SHAFT_COUNT; ++i) {
         float h1 = ProcMath::hash3(i, 1, 2, seed + 601u);
         float h2 = ProcMath::hash3(i, 3, 4, seed + 601u);
         float h3 = ProcMath::hash3(i, 5, 6, seed + 601u);
+        float h4 = ProcMath::hash3(i, 7, 8, seed + 601u);
 
-        float ang = h1 * 2.0f * PI;
-        float dist = std::sqrt(h2) * 470.0f;
+        float ang  = h1 * TWO_PI;
+        // Первые 14 лучей — ближе к центральному каньону, остальные по всей чаше
+        float dist = (i < 14) ? (24.0f + std::sqrt(h2) * 95.0f) : (std::sqrt(h2) * 460.0f);
         float x = std::cos(ang) * dist;
         float z = std::sin(ang) * dist;
-        float floorY = ProcMath::sampleTerrainHeight(x, z, seed);
-        if (floorY > 14.0f) continue;
 
-        float topY = ProcMath::WATER_SURFACE_Y;
-        float botY = std::max(floorY - 2.0f, -34.0f);
-        float width = 3.8f + h3 * 5.2f;
-        QVector3D slant(-0.28f, 0.92f, -0.22f);
-        slant.normalize();
+        float floorTop = ProcMath::sampleTerrainHeight(x, z, seed);
+        if (floorTop > 13.0f) continue;
+
+        float topY = ProcMath::WATER_SURFACE_Y - 0.10f;
+        // Проверяем глубину и в точке падения наклонного луча, чтобы столб не обрывался над ямой
+        float estDrop = std::max(18.0f, topY - floorTop);
+        QVector3D estBot = QVector3D(x, topY, z) - sunDir * (estDrop / sunDir.y());
+        float floorBot = ProcMath::sampleTerrainHeight(estBot.x(), estBot.z(), seed);
+        float botY = std::max(std::min(floorTop, floorBot) - 6.0f, -40.0f);
+
+        float shaftLen = (topY - botY) / sunDir.y();
+        if (shaftLen < 10.0f) continue;
 
         QVector3D topCenter(x, topY, z);
-        QVector3D botCenter = topCenter - slant * ((topY - botY) / slant.y());
-        QVector3D side(std::cos(h3 * PI), 0.0f, std::sin(h3 * PI));
-        side *= width;
+        QVector3D botCenter = topCenter - sunDir * shaftLen;
 
-        QVector4D col(0.45f, 0.95f, 1.0f, 0.095f);
-        RayVertex v0{botCenter - side, col, {0.0f, 0.0f}};
-        RayVertex v1{botCenter + side, col, {1.0f, 0.0f}};
-        RayVertex v2{topCenter + side, col, {1.0f, 1.0f}};
-        RayVertex v3{topCenter - side, col, {0.0f, 1.0f}};
-        data.godRayVertices.insert(data.godRayVertices.end(), {v0, v1, v2, v0, v2, v3});
+        float rTop = 2.2f + h3 * 3.0f;
+        float rBot = rTop * (1.35f + h4 * 0.35f); // лёгкое рассеивание пучка с глубиной
+        float intensity = 0.85f + h4 * 0.50f;
+        float freqScale = 0.85f + h3 * 0.45f;
+
+        GodRayInstance inst;
+        inst.topCenterRTop = QVector4D(topCenter.x(), topCenter.y(), topCenter.z(), rTop);
+        inst.botCenterRBot = QVector4D(botCenter.x(), botCenter.y(), botCenter.z(), rBot);
+        inst.rayParams     = QVector4D(intensity, h1, freqScale, 0.0f);
+        data.godRayInstances.push_back(inst);
     }
 
-    data.particles.reserve(2200);
-    for (int i = 0; i < 2200; ++i) {
+    // 1. Всплывающие вертикальные завесы пузырьков (как вдоль колонн ламинарии на референсе)
+    constexpr int BUBBLE_STREAMS      = 36;
+    constexpr int BUBBLES_PER_STREAM  = 34;
+    constexpr int AMBIENT_PARTICLES   = 2376; // Всего ровно 3600 частиц
+    data.particles.reserve(BUBBLE_STREAMS * BUBBLES_PER_STREAM + AMBIENT_PARTICLES);
+
+    for (int st = 0; st < BUBBLE_STREAMS; ++st) {
+        float sx = (ProcMath::hash3(st, 1, 7, seed + 751u) - 0.5f) * 156.0f;
+        float sz = (ProcMath::hash3(st, 2, 9, seed + 751u) - 0.5f) * 156.0f;
+        float streamSpd = 1.9f + ProcMath::hash3(st, 3, 11, seed + 751u) * 1.8f;
+
+        for (int b = 0; b < BUBBLES_PER_STREAM; ++b) {
+            float h1 = ProcMath::hash3(st, b, 1, seed + 761u);
+            float h2 = ProcMath::hash3(st, b, 2, seed + 761u);
+            float h3 = ProcMath::hash3(st, b, 3, seed + 761u);
+
+            float ang = h1 * TWO_PI;
+            float rad = 0.12f + h2 * 1.15f;
+            float y = -28.0f + (static_cast<float>(b) / static_cast<float>(BUBBLES_PER_STREAM)) * 56.0f + (h3 - 0.5f) * 1.2f;
+
+            Particle p;
+            p.pos = QVector3D(sx + std::cos(ang) * rad, y, sz + std::sin(ang) * rad);
+            float szVal = -(0.12f + h3 * 0.34f); // отрицательный размер -> шейдер рисует пузырёк с бликом
+            p.colorSize = QVector4D(0.80f, 0.97f, 1.00f, szVal);
+            p.speedY = streamSpd + (h2 - 0.5f) * 0.45f;
+            p.phase = h1 * TWO_PI;
+            data.particles.push_back(p);
+        }
+    }
+
+    // 2. Рассеянные пузырьки, морской снег и биолюминесцентный планктон в толще воды
+    for (int i = 0; i < AMBIENT_PARTICLES; ++i) {
         float hx = ProcMath::hash3(i, 1, 3, seed + 733u);
         float hy = ProcMath::hash3(i, 2, 4, seed + 733u);
         float hz = ProcMath::hash3(i, 3, 5, seed + 733u);
         float ht = ProcMath::hash3(i, 4, 6, seed + 733u);
 
-        bool isBubble = (ht > 0.58f);
+        bool isBubble = (ht > 0.54f);
         Particle p;
-        p.pos = QVector3D((hx - 0.5f) * 160.0f, -24.0f + hy * 50.0f, (hz - 0.5f) * 160.0f);
+        p.pos = QVector3D((hx - 0.5f) * 160.0f, -26.0f + hy * 54.0f, (hz - 0.5f) * 160.0f);
         if (isBubble) {
-            float sz = -(0.14f + (ht - 0.58f) * 0.45f);
-            p.colorSize = QVector4D(0.75f, 0.95f, 1.0f, sz);
-            p.speedY = 1.6f + hy * 2.2f;
+            float sz = -(0.13f + (ht - 0.54f) * 0.42f);
+            p.colorSize = QVector4D(0.76f, 0.96f, 1.0f, sz);
+            p.speedY = 1.55f + hy * 2.15f;
         } else {
-            float sz = 0.16f + ht * 0.34f;
-            p.colorSize = (ht < 0.28f) ? QVector4D(0.32f, 1.0f, 0.78f, sz)
-                                       : QVector4D(0.45f, 0.75f, 1.0f, sz);
-            p.speedY = 0.22f + hy * 0.45f;
+            float sz = 0.15f + ht * 0.34f;
+            p.colorSize = (ht < 0.28f) ? QVector4D(0.36f, 1.0f, 0.78f, sz)
+                                       : QVector4D(0.50f, 0.80f, 1.0f, sz);
+            p.speedY = 0.18f + hy * 0.42f;
         }
-        p.phase = hx * 6.28318f;
+        p.phase = hx * TWO_PI;
         data.particles.push_back(p);
     }
 }
