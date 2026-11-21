@@ -2,6 +2,7 @@
 #include <QSurfaceFormat>
 #include "GpuCapabilities.h"
 #include "DeepDiveWidget.h"
+#include "version.h"
 
 #ifdef _WIN32
 // Аппаратные флаги для драйверов NVIDIA Optimus и AMD PowerXpress:
@@ -23,6 +24,8 @@ int main(int argc, char* argv[]) {
     auto adapters = GpuUtils::enumerateAndSelectBestGpu();
 
     QApplication app(argc, argv);
+    app.setApplicationName("DeepDive");
+    app.setApplicationVersion(DEEPDIVE_VERSION_STRING);
 
     QSurfaceFormat fmt;
     fmt.setVersion(3, 3);
@@ -35,7 +38,10 @@ int main(int argc, char* argv[]) {
     QSurfaceFormat::setDefaultFormat(fmt);
 
     DeepDiveWidget window(adapters);
-    window.setWindowTitle("Deep Dive — Procedural Underwater World (Qt6 / OpenGL 3.3)");
+    window.setWindowTitle(
+        QString("Deep Dive v%1 — Procedural Underwater World (Qt6 / OpenGL 3.3)")
+            .arg(DEEPDIVE_VERSION_STRING)
+        );
     window.resize(1440, 810);
     window.show();
 

@@ -1,0 +1,29 @@
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @DEEPDIVE_VERSION_MAJOR@,@DEEPDIVE_VERSION_MINOR@,@DEEPDIVE_VERSION_PATCH@,@DEEPDIVE_VERSION_TWEAK@
+ PRODUCTVERSION @DEEPDIVE_VERSION_MAJOR@,@DEEPDIVE_VERSION_MINOR@,@DEEPDIVE_VERSION_PATCH@,@DEEPDIVE_VERSION_TWEAK@
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "DeepDive"
+            VALUE "FileDescription", "@PROJECT_DESCRIPTION@"
+            VALUE "FileVersion", "@PROJECT_VERSION@"
+            VALUE "InternalName", "DeepDive"
+            VALUE "OriginalFilename", "DeepDive.exe"
+            VALUE "ProductName", "Deep Dive"
+            VALUE "ProductVersion", "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

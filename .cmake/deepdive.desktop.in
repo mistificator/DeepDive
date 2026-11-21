@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Deep Dive
+Comment=@PROJECT_DESCRIPTION@
+Exec=DeepDive
+Terminal=false
+Categories=Graphics;3DGraphics;Game;

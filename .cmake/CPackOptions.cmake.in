@@ -1,0 +1,22 @@
+if(CPACK_GENERATOR STREQUAL "NSIS")
+    set(CPACK_PACKAGE_FILE_NAME "DeepDive-@PROJECT_VERSION@-@DEEPDIVE_ARCH@-setup")
+
+elseif(CPACK_GENERATOR STREQUAL "ZIP")
+    if(APPLE)
+        set(CPACK_PACKAGE_FILE_NAME "DeepDive-@PROJECT_VERSION@-macos-@DEEPDIVE_ARCH@-portable")
+        # DeepDive.app уже является каталогом, лишняя обёртка не нужна
+        set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
+    else()
+        set(CPACK_PACKAGE_FILE_NAME "DeepDive-@PROJECT_VERSION@-@DEEPDIVE_ARCH@-portable")
+    endif()
+
+elseif(CPACK_GENERATOR STREQUAL "DEB")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+
+elseif(CPACK_GENERATOR STREQUAL "TXZ")
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/")
+    set(CPACK_PACKAGE_FILE_NAME "DeepDive-@PROJECT_VERSION@-linux-@DEEPDIVE_ARCH@")
+
+elseif(CPACK_GENERATOR STREQUAL "DragNDrop")
+    set(CPACK_PACKAGE_FILE_NAME "DeepDive-@PROJECT_VERSION@-macos-@DEEPDIVE_ARCH@")
+endif()
