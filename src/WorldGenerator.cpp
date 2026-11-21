@@ -1077,11 +1077,18 @@ void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
 
                         col = ProcMath::mix(col, abyssSlate, abyssMix * 0.92f);
 
+                        float maxEdgeSlope = std::max({
+                                                 std::abs(wy - hL), std::abs(wy - hR),
+                                                 std::abs(wy - hD), std::abs(wy - hU)
+                                             }) / CELL_SZ;
+                        float localFlatness = 1.0f / std::sqrt(1.0f + maxEdgeSlope * maxEdgeSlope);
+                        float steepness = ProcMath::clamp(1.0f - localFlatness, 0.0f, 1.0f);
+
                         EnvVertex& v = dst[iz * G + ix];
                         v.pos    = QVector3D(wx, wy, wz);
                         v.normal = norm;
                         v.color  = col;
-                        v.param  = QVector2D(0.0f, 0.0f);
+                        v.param  = QVector2D(0.0f, steepness);
                     }
                 }
 
@@ -2270,92 +2277,340 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
 }
 
 void WorldGenerator::generateWhaleMeshes(WorldData& data) {
-    auto buildWhale = [](std::vector<FaunaVertex>& verts, std::vector<uint32_t>& inds, int bodySegs, int radialSegs) {
-        QVector3D backCol(0.11f, 0.16f, 0.24f);
-        QVector3D bellyCol(0.72f, 0.78f, 0.84f);
+    auto buildWhale = [](std::vector<FaunaVertex>& verts, std::vector<uint32_t>& inds,
+                         int bodySegs, int radialSegs, bool highLod) {
+        const QVector3D backCol(0.10f, 0.16f, 0.25f);
+        const QVector3D flankCol(0.16f, 0.23f, 0.33f);
+        const QVector3D bellyCol(0.54f, 0.62f, 0.68f);
+        const QVector3D finVentralCol(0.24f, 0.31f, 0.39f);
+        const QVector3D mouthDark(0.05f, 0.04f, 0.07f);
+        const QVector3D baleenCol(0.36f, 0.38f, 0.41f);
+        const QVector3D eyeSclera(0.48f, 0.54f, 0.59f);
+        const QVector3D eyePupil(0.02f, 0.025f, 0.04f);
 
-        for (int i = 0; i <= bodySegs; ++i) {
-            float t = static_cast<float>(i) / bodySegs;
-            float z = 4.8f - t * 10.0f;
-
-            float width, height;
-            if (t < 0.28f) {
-                float u = t / 0.28f;
-                width  = 0.12f + 1.22f * std::pow(std::sin(u * PI * 0.5f), 0.75f);
-                height = 0.14f + 1.08f * std::pow(std::sin(u * PI * 0.5f), 0.70f);
+        // Гарантированный внешний CCW-обход треугольников (FaunaFrag не перевернёт нормали)
+        auto emitTriCCW = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+            const QVector3D& p0 = verts[i0].pos;
+            const QVector3D& p1 = verts[i1].pos;
+            const QVector3D& p2 = verts[i2].pos;
+            QVector3D faceN = QVector3D::crossProduct(p1 - p0, p2 - p0);
+            QVector3D avgN  = verts[i0].normal + verts[i1].normal + verts[i2].normal;
+            if (QVector3D::dotProduct(faceN, avgN) >= 0.0f) {
+                inds.insert(inds.end(), {i0, i1, i2});
             } else {
-                float u = (t - 0.28f) / 0.72f;
-                width  = 1.34f * std::pow(1.0f - u, 1.35f) + 0.14f;
-                height = 1.22f * std::pow(1.0f - u, 1.15f) + 0.18f;
+                inds.insert(inds.end(), {i0, i2, i1});
             }
-
-            for (int j = 0; j <= radialSegs; ++j) {
-                float ang = (2.0f * PI * j) / radialSegs;
-                float ca = std::cos(ang), sa = std::sin(ang);
-                float yOff = (sa < 0.0f && t < 0.55f) ? (sa * height * 1.12f) : (sa * height);
-                QVector3D p(ca * width, yOff, z);
-                QVector3D n(ca / std::max(width, 0.08f), sa / std::max(height, 0.08f), (0.35f - t) * 0.2f);
-                n.normalize();
-
-                float bellyMask = ProcMath::smoothstep(-0.15f, -0.65f, sa) * (1.0f - ProcMath::smoothstep(0.55f, 0.85f, t));
-                float pleats = (bellyMask > 0.2f) ? (0.94f + 0.06f * std::sin(ang * 14.0f)) : 1.0f;
-                QVector3D col = ProcMath::mix(backCol, bellyCol * pleats, bellyMask);
-                verts.push_back({p, n, col});
-            }
-        }
-
-        for (int i = 0; i < bodySegs; ++i) {
-            for (int j = 0; j < radialSegs; ++j) {
-                uint32_t i00 = i * (radialSegs + 1) + j;
-                uint32_t i10 = i00 + 1;
-                uint32_t i01 = i00 + (radialSegs + 1);
-                uint32_t i11 = i01 + 1;
-                inds.insert(inds.end(), {i00, i01, i10, i10, i01, i11});
-            }
-        }
-
-        auto addWingQuad = [&](const QVector3D& p0, const QVector3D& p1, const QVector3D& p2, const QVector3D& p3,
-                               const QVector3D& n, const QVector3D& col) {
-            uint32_t b = static_cast<uint32_t>(verts.size());
-            verts.push_back({p0, n, col});
-            verts.push_back({p1, n, col});
-            verts.push_back({p2, n, col});
-            verts.push_back({p3, n, col});
-            inds.insert(inds.end(), {b, b + 1, b + 2, b, b + 2, b + 3});
-            inds.insert(inds.end(), {b, b + 2, b + 1, b, b + 3, b + 2});
         };
 
-        for (float s : {-1.0f, 1.0f}) {
-            QVector3D r0(s * 1.05f, -0.38f,  2.15f);
-            QVector3D r1(s * 1.02f, -0.42f,  0.85f);
-            QVector3D m0(s * 2.65f, -0.55f,  1.25f);
-            QVector3D m1(s * 2.45f, -0.58f,  0.25f);
-            QVector3D tip(s * 4.25f, -0.68f, -0.45f);
-            addWingQuad(r0, m0, m1, r1, QVector3D(0.0f, 1.0f, 0.0f), backCol * 1.15f);
-            uint32_t tb = static_cast<uint32_t>(verts.size());
-            verts.push_back({m0, QVector3D(0, 1, 0), bellyCol * 0.85f});
-            verts.push_back({tip, QVector3D(0, 1, 0), bellyCol * 0.95f});
-            verts.push_back({m1, QVector3D(0, 1, 0), bellyCol * 0.85f});
-            inds.insert(inds.end(), {tb, tb + 1, tb + 2, tb, tb + 2, tb + 1});
+        auto appendSphereCCW = [&](const QVector3D& center, const QVector3D& radii,
+                                   int stacks, int slices, const QVector3D& col) {
+            uint32_t base = static_cast<uint32_t>(verts.size());
+            for (int st = 0; st <= stacks; ++st) {
+                float phi = PI * static_cast<float>(st) / static_cast<float>(stacks);
+                float sp = std::sin(phi), cp = std::cos(phi);
+                for (int sl = 0; sl <= slices; ++sl) {
+                    float th = 2.0f * PI * static_cast<float>(sl) / static_cast<float>(slices);
+                    QVector3D n(sp * std::cos(th), cp, sp * std::sin(th));
+                    QVector3D p = center + QVector3D(n.x() * radii.x(), n.y() * radii.y(), n.z() * radii.z());
+                    QVector3D rn(n.x() / std::max(radii.x(), 0.01f),
+                                 n.y() / std::max(radii.y(), 0.01f),
+                                 n.z() / std::max(radii.z(), 0.01f));
+                    rn.normalize();
+                    verts.push_back({p, rn, col});
+                }
+            }
+            for (int st = 0; st < stacks; ++st) {
+                for (int sl = 0; sl < slices; ++sl) {
+                    uint32_t i00 = base + st * (slices + 1) + sl;
+                    uint32_t i10 = i00 + 1;
+                    uint32_t i01 = i00 + (slices + 1);
+                    uint32_t i11 = i01 + 1;
+                    if (st > 0) emitTriCCW(i00, i01, i10);
+                    if (st + 1 < stacks) emitTriCCW(i10, i01, i11);
+                }
+            }
+        };
+
+        // Единая функция поверхности корпуса (используется и для тела, и для точной посадки глаз/усов)
+        auto evalBodySurface = [&](float t, float ang, QVector3D& outPos, QVector3D& outCol) {
+            float z = 4.95f - t * 10.05f;
+            float rx = 0.0f, ryTop = 0.0f, ryBot = 0.0f;
+
+            if (t < 0.34f) {
+                float u = t / 0.34f;
+                float s = std::sin(u * PI * 0.5f);
+                rx    = 1.24f * std::pow(s, 0.80f);
+                ryTop = 0.84f * std::pow(s, 0.96f); // приплюснутый обтекаемый рострум
+                ryBot = 1.12f * std::pow(s, 0.78f); // глубокая нижняя челюсть
+            } else {
+                float u = (t - 0.34f) / 0.66f;
+                rx    = 1.24f * std::pow(1.0f - u, 1.55f) + 0.09f * (1.0f - u);
+                ryTop = 0.84f * std::pow(1.0f - u, 1.18f) + 0.14f * (1.0f - u);
+                ryBot = 1.12f * std::pow(1.0f - u, 1.38f) + 0.12f * (1.0f - u);
+            }
+
+            float ca = std::cos(ang);
+            float sa = std::sin(ang);
+            float ry = (sa >= 0.0f) ? ryTop : ryBot;
+
+            // Лёгкий естественный изгиб осевой линии и более плоский верх головы
+            float centerY = 0.08f * (1.0f - ProcMath::smoothstep(0.0f, 0.42f, t));
+            if (sa > 0.15f && t < 0.30f) {
+                ry *= (1.0f - 0.10f * (1.0f - t / 0.30f) * sa);
+            }
+
+            // Изогнутая линия пасти (от кончика рыла до области под глазами)
+            float mt = ProcMath::clamp(t / 0.31f, 0.0f, 1.0f);
+            float mouthSa = -0.05f + 0.11f * std::sin(mt * PI) - 0.25f * mt * mt;
+            float mouthFade = (1.0f - ProcMath::smoothstep(0.24f, 0.315f, t))
+                              * ProcMath::smoothstep(0.004f, 0.026f, t);
+            float dMouth = std::abs(sa - mouthSa);
+            float mouthGroove = (1.0f - ProcMath::smoothstep(0.015f, 0.145f, dMouth)) * mouthFade;
+
+            // Вдавливаем щель пасти и слегка выделяем верхнюю/нижнюю губы
+            float lipUpper = (1.0f - ProcMath::smoothstep(0.08f, 0.22f, std::abs(sa - (mouthSa + 0.14f)))) * mouthFade;
+            float lipLower = (1.0f - ProcMath::smoothstep(0.08f, 0.22f, std::abs(sa - (mouthSa - 0.14f)))) * mouthFade;
+            float radialMod = 1.0f - 0.26f * mouthGroove + 0.035f * lipUpper + 0.030f * lipLower;
+
+            // Рельеф горловых складок на нижней челюсти и груди
+            float bellyMask = ProcMath::smoothstep(-0.18f, -0.58f, sa)
+                              * (1.0f - ProcMath::smoothstep(0.54f, 0.84f, t));
+            float pleatWave = (bellyMask > 0.15f) ? std::sin(ang * 18.0f) : 0.0f;
+            float pleatRelief = 1.0f + 0.016f * pleatWave * bellyMask;
+
+            outPos = QVector3D(ca * rx * radialMod * pleatRelief,
+                               centerY + sa * ry * radialMod * pleatRelief,
+                               z);
+
+            // Окраска: тёмно-синяя спина -> бок -> мягкое серо-голубое брюшко со складками
+            float flankBlend = ProcMath::smoothstep(0.35f, -0.25f, sa);
+            QVector3D col = ProcMath::mix(backCol, flankCol, flankBlend * 0.75f);
+            float pleatShade = 0.88f + 0.12f * pleatWave;
+            col = ProcMath::mix(col, bellyCol * pleatShade, bellyMask);
+
+            // Тёмная полость пасти и светлая кромка китового уса сверху щели
+            if (mouthGroove > 0.01f) {
+                float baleenMask = ProcMath::smoothstep(0.0f, 0.09f, sa - mouthSa) * mouthGroove;
+                QVector3D cleftCol = ProcMath::mix(mouthDark, baleenCol, baleenMask * 0.72f);
+                col = ProcMath::mix(col, cleftCol, ProcMath::smoothstep(0.18f, 0.78f, mouthGroove));
+            }
+            outCol = col;
+        };
+
+        // 1. Герметичный корпус со сгущением колец у рыла и хвоста
+        std::vector<float> tRings;
+        tRings.reserve(bodySegs + 3);
+        tRings.push_back(0.010f);
+        tRings.push_back(0.028f);
+        for (int i = 1; i < bodySegs; ++i) {
+            float u = static_cast<float>(i) / static_cast<float>(bodySegs);
+            tRings.push_back(0.045f + u * 0.935f);
+        }
+        tRings.push_back(0.990f);
+
+        const int numRings = static_cast<int>(tRings.size());
+        std::vector<QVector3D> gridPos(numRings * radialSegs);
+        std::vector<QVector3D> gridCol(numRings * radialSegs);
+
+        for (int r = 0; r < numRings; ++r) {
+            for (int j = 0; j < radialSegs; ++j) {
+                float ang = (2.0f * PI * j) / radialSegs;
+                evalBodySurface(tRings[r], ang, gridPos[r * radialSegs + j], gridCol[r * radialSegs + j]);
+            }
         }
 
-        for (float s : {-1.0f, 1.0f}) {
-            QVector3D f0(0.0f,      0.0f, -4.95f);
-            QVector3D f1(s * 1.35f, 0.04f, -5.45f);
-            QVector3D f2(s * 2.95f, 0.02f, -6.25f);
-            QVector3D f3(s * 0.25f, 0.0f, -5.65f);
-            addWingQuad(f0, f1, f2, f3, QVector3D(0.0f, 1.0f, 0.0f), backCol * 1.1f);
+        const QVector3D noseTipPos(0.0f, 0.075f, 5.02f);
+        const QVector3D tailTipPos(0.0f, 0.0f, -5.22f);
+
+        uint32_t bodyBase = static_cast<uint32_t>(verts.size());
+        for (int r = 0; r < numRings; ++r) {
+            for (int j = 0; j < radialSegs; ++j) {
+                const QVector3D& pPrev = (r > 0) ? gridPos[(r - 1) * radialSegs + j] : noseTipPos;
+                const QVector3D& pNext = (r + 1 < numRings) ? gridPos[(r + 1) * radialSegs + j] : tailTipPos;
+                int jPrev = (j - 1 + radialSegs) % radialSegs;
+                int jNext = (j + 1) % radialSegs;
+                QVector3D tZ = pNext - pPrev;
+                QVector3D tA = gridPos[r * radialSegs + jNext] - gridPos[r * radialSegs + jPrev];
+                QVector3D n = QVector3D::crossProduct(tZ, tA);
+                if (n.lengthSquared() < 1e-6f) n = QVector3D(0.0f, 1.0f, 0.0f);
+                n.normalize();
+                verts.push_back({gridPos[r * radialSegs + j], n, gridCol[r * radialSegs + j]});
+            }
         }
 
-        addWingQuad(QVector3D(0.0f, 0.65f, -1.35f),
-                    QVector3D(0.0f, 1.18f, -2.05f),
-                    QVector3D(0.0f, 0.82f, -2.35f),
-                    QVector3D(0.0f, 0.52f, -2.25f),
-                    QVector3D(1.0f, 0.0f, 0.0f), backCol);
+        uint32_t noseIdx = static_cast<uint32_t>(verts.size());
+        verts.push_back({noseTipPos, QVector3D(0.0f, 0.08f, 1.0f).normalized(), backCol * 1.05f});
+        uint32_t tailIdx = static_cast<uint32_t>(verts.size());
+        verts.push_back({tailTipPos, QVector3D(0.0f, 0.0f, -1.0f), backCol});
+
+        // Сшиваем кольца тела + плотно закрываем нос и хвост
+        for (int j = 0; j < radialSegs; ++j) {
+            int jNext = (j + 1) % radialSegs;
+            emitTriCCW(noseIdx, bodyBase + j, bodyBase + jNext);
+            uint32_t lastRing = bodyBase + (numRings - 1) * radialSegs;
+            emitTriCCW(tailIdx, lastRing + jNext, lastRing + j);
+        }
+        for (int r = 0; r + 1 < numRings; ++r) {
+            uint32_t r0 = bodyBase + r * radialSegs;
+            uint32_t r1 = bodyBase + (r + 1) * radialSegs;
+            for (int j = 0; j < radialSegs; ++j) {
+                int jNext = (j + 1) % radialSegs;
+                emitTriCCW(r0 + j, r1 + j, r0 + jNext);
+                emitTriCCW(r0 + jNext, r1 + j, r1 + jNext);
+            }
+        }
+
+        // 2. Пластины китового уса внутри передне-боковой щели пасти (LOD0)
+        if (highLod) {
+            for (float side : {-1.0f, 1.0f}) {
+                for (int k = 0; k < 10; ++k) {
+                    float tB = 0.035f + static_cast<float>(k) * 0.022f;
+                    float mt = ProcMath::clamp(tB / 0.31f, 0.0f, 1.0f);
+                    float mouthSa = -0.05f + 0.11f * std::sin(mt * PI) - 0.25f * mt * mt;
+                    float aTop = (side > 0.0f) ? std::asin(ProcMath::clamp(mouthSa + 0.06f, -0.95f, 0.95f))
+                                               : (PI - std::asin(ProcMath::clamp(mouthSa + 0.06f, -0.95f, 0.95f)));
+                    float aBot = (side > 0.0f) ? std::asin(ProcMath::clamp(mouthSa - 0.06f, -0.95f, 0.95f))
+                                               : (PI - std::asin(ProcMath::clamp(mouthSa - 0.06f, -0.95f, 0.95f)));
+                    QVector3D pTop, pBot, dummyCol;
+                    evalBodySurface(tB, aTop, pTop, dummyCol);
+                    evalBodySurface(tB, aBot, pBot, dummyCol);
+                    pTop.setX(pTop.x() * 0.96f);
+                    pBot.setX(pBot.x() * 0.92f);
+                    appendFaunaCone(verts, inds, pTop, pBot, 0.032f, 4, baleenCol, mouthDark * 1.4f);
+                }
+            }
+        }
+
+        // 3. Глаза (посажены точно на боковую поверхность головы позади уголка пасти)
+        for (float side : {-1.0f, 1.0f}) {
+            float angEye = (side > 0.0f) ? -0.10f : (PI + 0.10f);
+            QVector3D skinP, dummyCol;
+            evalBodySurface(0.305f, angEye, skinP, dummyCol);
+            QVector3D outDir(side * 0.94f, -0.03f, 0.34f);
+            outDir.normalize();
+
+            // Тёмное веко / надбровный валик
+            appendSphereCCW(skinP - outDir * 0.025f, QVector3D(0.115f, 0.100f, 0.165f),
+                            highLod ? 6 : 4, highLod ? 8 : 5, backCol * 0.72f);
+            // Глазное яблоко (спокойная серо-голубая склера)
+            appendSphereCCW(skinP + outDir * 0.028f, QVector3D(0.082f, 0.074f, 0.094f),
+                            highLod ? 7 : 4, highLod ? 9 : 6, eyeSclera);
+            // Тёмный глянцевый зрачок
+            appendSphereCCW(skinP + outDir * 0.076f, QVector3D(0.052f, 0.050f, 0.056f),
+                            highLod ? 5 : 3, highLod ? 7 : 5, eyePupil);
+        }
+
+        // 4. Генератор объёмных 3D-плавников (замкнутый гидропрофиль без Z-fighting)
+        struct FinSection {
+            QVector3D le;
+            QVector3D te;
+            float thick;
+            QVector3D topCol;
+            QVector3D botCol;
+        };
+
+        auto appendAirfoilFin = [&](const std::vector<FinSection>& secs,
+                                    const QVector3D& tipPos,
+                                    const QVector3D& upAxis,
+                                    int chordSegs) {
+            const int ringPts = chordSegs * 2;
+            const int nSec = static_cast<int>(secs.size());
+            std::vector<QVector3D> pts(nSec * ringPts);
+            std::vector<QVector3D> cols(nSec * ringPts);
+            std::vector<QVector3D> centers(nSec);
+
+            for (int k = 0; k < nSec; ++k) {
+                const auto& s = secs[k];
+                centers[k] = 0.5f * (s.le + s.te);
+                for (int j = 0; j < ringPts; ++j) {
+                    bool isTop = (j <= chordSegs);
+                    float c = isTop
+                                  ? (static_cast<float>(j) / static_cast<float>(chordSegs))
+                                  : (static_cast<float>(ringPts - j) / static_cast<float>(chordSegs));
+                    float profile = std::sin(std::pow(ProcMath::clamp(c, 0.0f, 1.0f), 0.65f) * PI);
+                    float yOff = (isTop ? 1.0f : -1.0f) * s.thick * profile;
+                    pts[k * ringPts + j] = ProcMath::mix(s.le, s.te, c) + upAxis * yOff;
+                    cols[k * ringPts + j] = (j == 0 || j == chordSegs)
+                                                ? ProcMath::mix(s.topCol, s.botCol, 0.35f)
+                                                : (isTop ? s.topCol : s.botCol);
+                }
+            }
+
+            uint32_t fBase = static_cast<uint32_t>(verts.size());
+            for (int k = 0; k < nSec; ++k) {
+                for (int j = 0; j < ringPts; ++j) {
+                    int jPrev = (j - 1 + ringPts) % ringPts;
+                    int jNext = (j + 1) % ringPts;
+                    const QVector3D& pPrev = (k > 0) ? pts[(k - 1) * ringPts + j] : pts[k * ringPts + j];
+                    const QVector3D& pNext = (k + 1 < nSec) ? pts[(k + 1) * ringPts + j] : tipPos;
+
+                    QVector3D tSpan = pNext - pPrev;
+                    QVector3D tChord = pts[k * ringPts + jNext] - pts[k * ringPts + jPrev];
+                    QVector3D n = QVector3D::crossProduct(tSpan, tChord);
+                    QVector3D radialOut = pts[k * ringPts + j] - centers[k];
+                    if (n.lengthSquared() < 1e-6f) n = radialOut;
+                    if (QVector3D::dotProduct(n, radialOut) < 0.0f) n = -n;
+                    n.normalize();
+
+                    verts.push_back({pts[k * ringPts + j], n, cols[k * ringPts + j]});
+                }
+            }
+
+            QVector3D tipDir = (tipPos - centers.back()).normalized();
+            uint32_t tipIdx = static_cast<uint32_t>(verts.size());
+            verts.push_back({tipPos, tipDir, ProcMath::mix(secs.back().topCol, secs.back().botCol, 0.45f)});
+
+            for (int k = 0; k + 1 < nSec; ++k) {
+                uint32_t r0 = fBase + k * ringPts;
+                uint32_t r1 = fBase + (k + 1) * ringPts;
+                for (int j = 0; j < ringPts; ++j) {
+                    int jNext = (j + 1) % ringPts;
+                    emitTriCCW(r0 + j, r1 + j, r0 + jNext);
+                    emitTriCCW(r0 + jNext, r1 + j, r1 + jNext);
+                }
+            }
+            uint32_t lastR = fBase + (nSec - 1) * ringPts;
+            for (int j = 0; j < ringPts; ++j) {
+                int jNext = (j + 1) % ringPts;
+                emitTriCCW(lastR + j, tipIdx, lastR + jNext);
+            }
+        };
+
+        const int finChordSegs = highLod ? 5 : 3;
+
+        // Грудные плавники (объёмные, тёмно-синие сверху и приглушённо-серые снизу)
+        for (float s : {-1.0f, 1.0f}) {
+            std::vector<FinSection> pec = {
+                {QVector3D(s * 0.88f, -0.34f,  1.45f), QVector3D(s * 0.86f, -0.40f,  0.32f), 0.15f, backCol, finVentralCol},
+                {QVector3D(s * 2.02f, -0.48f,  1.05f), QVector3D(s * 1.96f, -0.52f,  0.00f), 0.11f, backCol * 1.05f, finVentralCol * 1.06f},
+                {QVector3D(s * 3.12f, -0.58f,  0.36f), QVector3D(s * 3.00f, -0.60f, -0.42f), 0.075f, backCol * 1.12f, finVentralCol * 1.12f},
+                {QVector3D(s * 3.92f, -0.64f, -0.22f), QVector3D(s * 3.82f, -0.65f, -0.68f), 0.040f, backCol * 1.15f, finVentralCol * 1.15f}
+            };
+            appendAirfoilFin(pec, QVector3D(s * 4.32f, -0.67f, -0.78f), QVector3D(0.0f, 1.0f, 0.0f), finChordSegs);
+        }
+
+        // Хвостовые лопасти (объёмные, с характерной центральной выемкой, без переворота нормалей)
+        for (float s : {-1.0f, 1.0f}) {
+            std::vector<FinSection> fluke = {
+                {QVector3D(0.0f,      0.00f, -4.62f), QVector3D(0.0f,      0.00f, -5.20f), 0.13f, backCol, finVentralCol * 0.90f},
+                {QVector3D(s * 0.95f, 0.02f, -4.92f), QVector3D(s * 0.88f, 0.02f, -5.78f), 0.088f, backCol, finVentralCol * 0.95f},
+                {QVector3D(s * 2.10f, 0.03f, -5.48f), QVector3D(s * 1.98f, 0.02f, -6.24f), 0.052f, backCol * 1.05f, finVentralCol},
+                {QVector3D(s * 2.68f, 0.02f, -5.98f), QVector3D(s * 2.58f, 0.02f, -6.46f), 0.026f, backCol * 1.08f, finVentralCol}
+            };
+            appendAirfoilFin(fluke, QVector3D(s * 2.92f, 0.01f, -6.62f), QVector3D(0.0f, 1.0f, 0.0f), finChordSegs);
+        }
+
+        // Спинной плавник (объёмный, плавно изогнутый назад)
+        std::vector<FinSection> dorsal = {
+            {QVector3D(0.0f, 0.42f, -1.05f), QVector3D(0.0f, 0.32f, -2.35f), 0.12f, backCol, backCol},
+            {QVector3D(0.0f, 0.78f, -1.65f), QVector3D(0.0f, 0.68f, -2.38f), 0.072f, backCol, backCol},
+            {QVector3D(0.0f, 1.04f, -2.08f), QVector3D(0.0f, 0.96f, -2.48f), 0.038f, backCol * 1.06f, backCol * 1.06f}
+        };
+        appendAirfoilFin(dorsal, QVector3D(0.0f, 1.18f, -2.58f), QVector3D(1.0f, 0.0f, 0.0f), highLod ? 4 : 3);
     };
 
-    buildWhale(data.whaleLod0Verts, data.whaleLod0Inds, 22, 14);
-    buildWhale(data.whaleLod1Verts, data.whaleLod1Inds, 9, 7);
+    buildWhale(data.whaleLod0Verts, data.whaleLod0Inds, 28, 20, true);
+    buildWhale(data.whaleLod1Verts, data.whaleLod1Inds, 12, 10, false);
 }
 
 void WorldGenerator::generateAnglerMeshes(WorldData& data) {
@@ -2391,7 +2646,7 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
                     col = mouthDark;
                 }
 
-                float bump = 1.0f + 0.05f * std::sin(a * 5.0f + t * 14.0f);
+                float bump = 1.0f + 0.05f * std::sin(std::abs(ca) * 5.0f + sa * 3.0f + t * 14.0f);
                 QVector3D p(ca * rx * bump, sa * ry * bump, zMod);
                 QVector3D n(ca / std::max(rx, 0.05f), sa / std::max(ry, 0.05f), (0.35f - t) * 0.45f);
                 n.normalize();
@@ -2448,9 +2703,27 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
             appendFaunaCone(verts, inds, baseP, tipP, 0.036f, highLod ? 5 : 4, toothBase, toothTip);
         }
 
+        QVector3D pupilCol(0.02f, 0.02f, 0.03f);
         for (float side : {-1.0f, 1.0f}) {
-            appendFaunaSphere(verts, inds, QVector3D(side * 0.42f, 0.28f, 0.46f),
-                              QVector3D(0.085f, 0.085f, 0.085f), highLod ? 6 : 4, highLod ? 8 : 5, eyeGlow);
+            // Тёмная мясистая глазница — перекрывает стык с головой без щелей на LOD0 и LOD1
+            QVector3D socketCenter(side * 0.49f, 0.33f, 0.49f);
+            appendFaunaSphere(verts, inds, socketCenter,
+                              QVector3D(0.112f, 0.106f, 0.106f),
+                              highLod ? 6 : 4, highLod ? 8 : 5, skinDark);
+
+            // Светящееся глазное яблоко — выступает наружу из профиля головы (включая вид сверху)
+            QVector3D eyeCenter(side * 0.52f, 0.35f, 0.53f);
+            appendFaunaSphere(verts, inds, eyeCenter,
+                              QVector3D(0.095f, 0.095f, 0.095f),
+                              highLod ? 7 : 4, highLod ? 9 : 6, eyeGlow);
+
+            // Тёмный зрачок на передне-боковой стороне глаза (контрастно читается на светящемся фоне)
+            if (highLod) {
+                QVector3D lookDir = QVector3D(side * 0.56f, 0.37f, 0.74f).normalized();
+                appendFaunaSphere(verts, inds, eyeCenter + lookDir * 0.070f,
+                                  QVector3D(0.036f, 0.036f, 0.036f),
+                                  5, 7, pupilCol);
+            }
         }
 
         std::vector<QVector3D> stalk = {

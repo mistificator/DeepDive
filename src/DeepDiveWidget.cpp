@@ -9,6 +9,7 @@
 #include <QOpenGLContext>
 #include <QSurface>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -102,6 +103,11 @@ DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget*
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     setMinimumSize(1280, 720);
+
+    std::random_device rd;
+    const auto timeSeed = static_cast<uint32_t>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    m_rng.seed(rd() ^ timeSeed);
 
     m_audioEngine = new UnderwaterAudioEngine(this);
 
@@ -657,265 +663,528 @@ void DeepDiveWidget::rebuildWorld(uint32_t seed) {
 }
 
 // ============================================================================
-// НАВИГАЦИЯ КИТА В ВЫСОКОЙ ОТКРЫТОЙ ВОДЕ
+// НАВИГАЦИЯ КИТА (честный определитель свободной воды, уверенный обход, всплытие)
 // ============================================================================
 
 float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
-    constexpr float CRUISE_CEILING = ProcMath::WATER_SURFACE_Y - 5.2f;
+    const float sc           = std::max(m_whale.scale, 2.65f);
+    const float bodyBot      = 1.12f * sc;
+    const float skimCeilingY = ProcMath::WATER_SURFACE_Y - 0.25f * sc; // допустимый подъём над мелководьем
+    const float maxPassableY = skimCeilingY - bodyBot - 0.6f;          // ~23.8 м для 1x, ~20.1 м для 2x
+    const float trunkR       = 1.25f * sc;                             // реальная полуширина корпуса
 
-    float r = std::sqrt(x * x + z * z);
-    float wallF = ProcMath::sampleBasinWallFactor(x, z, m_seed);
-    if (wallF > 0.04f || r > ProcMath::BASIN_INNER_RADIUS - 75.0f) {
-        return -60.0f - (r - (ProcMath::BASIN_INNER_RADIUS - 75.0f)) * 0.8f - wallF * 80.0f;
+    const float r = std::sqrt(x * x + z * z);
+    const float wallF = ProcMath::sampleBasinWallFactor(x, z, m_seed);
+    const float safeOuterR = ProcMath::BASIN_INNER_RADIUS - (28.0f + trunkR);
+    if (wallF > 0.08f || r > safeOuterR) {
+        return -50.0f - std::max(0.0f, r - safeOuterR) - wallF * 100.0f;
     }
 
-    float maxTerrain = ProcMath::sampleTerrainHeight(x, z, m_seed);
-    constexpr float offsets[4][2] = {{18.0f, 0.0f}, {-18.0f, 0.0f}, {0.0f, 18.0f}, {0.0f, -18.0f}};
-    for (const auto& o : offsets) {
-        maxTerrain = std::max(maxTerrain, ProcMath::sampleTerrainHeight(x + o[0], z + o[1], m_seed));
-    }
+    // Реальная высота рельефа (кекуры уже входят в sampleTerrainHeight — без двойного штрафа)
+    float maxObsY = std::max({
+        ProcMath::sampleTerrainHeight(x, z, m_seed),
+        ProcMath::sampleTerrainHeight(x + trunkR, z, m_seed),
+        ProcMath::sampleTerrainHeight(x - trunkR, z, m_seed),
+        ProcMath::sampleTerrainHeight(x, z + trunkR, m_seed),
+        ProcMath::sampleTerrainHeight(x, z - trunkR, m_seed)
+    });
 
-    float clearance = CRUISE_CEILING - maxTerrain;
-
-    const auto& spires = ProcMath::getCentralSpires(m_seed);
-    for (const auto& sp : spires) {
-        float dx = x - sp.x;
-        float dz = z - sp.z;
-        float keepOut = sp.radius + 34.0f;
-        float d2 = dx * dx + dz * dz;
-        if (d2 < keepOut * keepOut) {
-            float d = std::sqrt(d2);
-            float peakPenalty = (keepOut - d) * (0.65f + ProcMath::smoothstep(24.0f, 52.0f, sp.height) * 0.95f);
-            clearance -= peakPenalty;
+    // Учитываем только высокие валуны в текущей ячейке spatial grid
+    const auto& col = m_world.collision;
+    if (!col.cellSpheres.empty()) {
+        int cx = std::clamp(static_cast<int>(std::floor((x + col.worldHalfSize) / col.chunkSize)),
+                            0, col.chunksPerSide - 1);
+        int cz = std::clamp(static_cast<int>(std::floor((z + col.worldHalfSize) / col.chunkSize)),
+                            0, col.chunksPerSide - 1);
+        for (uint32_t id : col.cellSpheres[cz * col.chunksPerSide + cx]) {
+            const auto& sph = col.spheres[id];
+            float topY = sph.center.y() + sph.radius;
+            if (topY <= maxObsY) continue;
+            float dx = x - sph.center.x();
+            float dz = z - sph.center.z();
+            float rSum = sph.radius + trunkR * 0.85f;
+            if (dx * dx + dz * dz < rSum * rSum) {
+                maxObsY = topY;
+            }
         }
     }
 
-    return clearance;
+    return maxPassableY - maxObsY;
+}
+
+float DeepDiveWidget::measureWhaleFreeDist(float x, float z, float yaw, float maxDist) const {
+    const float sx = std::sin(yaw);
+    const float sz = std::cos(yaw);
+    constexpr float STEP = 6.0f;
+    for (float d = STEP; d <= maxDist; d += STEP) {
+        if (sampleWhaleClearance(x + sx * d, z + sz * d) <= 0.0f) {
+            return d - STEP;
+        }
+    }
+    return maxDist;
 }
 
 QVector3D DeepDiveWidget::pickWhaleOpenWaypoint(const QVector3D& nearAnchor, float minDist, float maxDist) const {
-    constexpr float CRUISE_Y = ProcMath::WATER_SURFACE_Y - 7.5f;
-    QVector3D bestPos(0.0f, CRUISE_Y, 0.0f);
+    const float sc                = std::max(m_whale.scale, 2.65f);
+    const float submergedCeilingY = ProcMath::WATER_SURFACE_Y - (0.85f * sc + 0.9f);
+    const float cruiseY           = submergedCeilingY - 0.8f;
+    const float maxPlayR          = ProcMath::BASIN_INNER_RADIUS - (65.0f + 2.5f * sc);
+
+    QVector3D bestPos(0.0f, cruiseY, 0.0f);
     float bestScore = -1e9f;
 
-    float baseAng = std::fmod(m_time * 0.31f + m_whale.yaw + 0.7f, TWO_PI);
+    float baseAng = std::fmod(m_time * 0.37f + m_whale.yaw + 0.5f, TWO_PI);
     for (int i = 0; i < 28; ++i) {
         float h1 = ProcMath::hash3(i, static_cast<int>(m_time * 3.0f), 11, m_seed + 4101u);
         float h2 = ProcMath::hash3(i, static_cast<int>(m_time * 3.0f), 19, m_seed + 4101u);
-        float ang = baseAng + (TWO_PI * static_cast<float>(i)) / 28.0f + (h1 - 0.5f) * 0.35f;
+        float ang = baseAng + (TWO_PI * static_cast<float>(i)) / 28.0f + (h1 - 0.5f) * 0.25f;
         float dist = ProcMath::mix(minDist, maxDist, h2);
 
         float cx = nearAnchor.x() + std::cos(ang) * dist;
         float cz = nearAnchor.z() + std::sin(ang) * dist;
 
         float rad = std::sqrt(cx * cx + cz * cz);
-        float maxPlayR = ProcMath::BASIN_INNER_RADIUS - 105.0f;
         if (rad > maxPlayR) {
             float k = maxPlayR / std::max(rad, 1.0f);
             cx *= k;
             cz *= k;
         }
 
-        float clear = sampleWhaleClearance(cx, cz);
-        float midClear = sampleWhaleClearance(0.5f * (m_whale.pos.x() + cx), 0.5f * (m_whale.pos.z() + cz));
-        float score = std::min(clear, midClear * 1.1f) + clear * 0.35f;
+        float cl = sampleWhaleClearance(cx, cz);
+        float dirYaw = std::atan2(cx - m_whale.pos.x(), cz - m_whale.pos.z());
+        float freeD = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), dirYaw, std::min(dist, 120.0f));
+        float score = freeD * 1.4f + std::clamp(cl, -20.0f, 18.0f) * 2.5f;
 
         if (score > bestScore) {
             bestScore = score;
-            float floorY = ProcMath::sampleTerrainHeight(cx, cz, m_seed);
-            float y = ProcMath::clamp(std::max(floorY + 14.0f, 18.0f + h1 * 3.5f),
-                                      15.0f, ProcMath::WATER_SURFACE_Y - 6.0f);
-            bestPos = QVector3D(cx, y, cz);
+            bestPos = QVector3D(cx, cruiseY, cz);
         }
     }
     return bestPos;
 }
 
 void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
-    m_whale.type = 2.0f;
-    m_whale.scale = 2.65f;
-    m_whale.boundingRadius = 5.0f;
-    m_whale.cruiseSpeed = 5.2f;
-    m_whale.preferredDepth = ProcMath::WATER_SURFACE_Y - 7.5f;
-    m_whale.homeCenter = QVector3D(0.0f, m_whale.preferredDepth, 0.0f);
-    m_whale.homeRadius = ProcMath::BASIN_INNER_RADIUS - 115.0f;
-    m_whale.tint = QVector3D(1.0f, 1.0f, 1.0f);
-    m_whale.phase = 0.0f;
+    constexpr float BASE_WHALE_SCALE = 2.65f;
+    std::uniform_real_distribution<float> sizeDist(1.0f, 2.0f);
+    std::uniform_real_distribution<float> phaseDist(0.0f, TWO_PI);
+    std::uniform_real_distribution<float> firstSurfCdDist(5.0f, 9.0f);
 
-    QVector3D anchor = nearPlayer ? m_camPos : QVector3D(0.0f, 19.0f, 0.0f);
-    float anchorR = std::sqrt(anchor.x() * anchor.x() + anchor.z() * anchor.z());
-    if (anchorR > ProcMath::BASIN_INNER_RADIUS - 140.0f) {
-        float k = (ProcMath::BASIN_INNER_RADIUS - 140.0f) / std::max(anchorR, 1.0f);
-        anchor.setX(anchor.x() * k);
-        anchor.setZ(anchor.z() * k);
-    }
+    const float sizeMult = sizeDist(m_rng); // случайный размер в диапазоне [1.0 .. 2.0]
 
-    QVector3D bestPos(0.0f, 20.5f, -55.0f);
-    QVector3D bestDir(1.0f, 0.0f, 0.2f);
-    bestDir.normalize();
+    m_whale.type           = 2.0f;
+    m_whale.scale          = BASE_WHALE_SCALE * sizeMult; // 2.65 .. 5.30
+    m_whale.boundingRadius = 6.8f * m_whale.scale;
+    m_whale.cruiseSpeed    = 5.0f + 0.85f * (sizeMult - 1.0f);
+
+    const float sc                = m_whale.scale;
+    const float bodyBot           = 1.12f * sc;
+    const float submergedCeilingY = ProcMath::WATER_SURFACE_Y - (0.85f * sc + 0.9f);
+    const float skimCeilingY      = ProcMath::WATER_SURFACE_Y - 0.25f * sc;
+    const float cruiseY           = submergedCeilingY - 0.8f;
+
+    m_whale.preferredDepth = cruiseY;
+    m_whale.homeCenter     = QVector3D(0.0f, cruiseY, 0.0f);
+    m_whale.homeRadius     = ProcMath::BASIN_INNER_RADIUS - 80.0f;
+    m_whale.tint           = QVector3D(1.0f, 1.0f, 1.0f);
+    m_whale.phase          = phaseDist(m_rng);
+
+    auto pickSafeY = [&](float x, float z) {
+        float floorY = ProcMath::sampleTerrainHeight(x, z, m_seed);
+        return ProcMath::clamp(std::max(cruiseY, floorY + bodyBot + 1.2f), 10.0f, skimCeilingY);
+    };
+
+    QVector3D bestPos(0.0f, cruiseY, -55.0f);
+    float bestYaw = 0.2f;
     float bestScore = -1e9f;
 
-    float baseAng = std::fmod(m_time * 0.41f + 0.9f, TWO_PI);
-    for (int attempt = 0; attempt < 28; ++attempt) {
-        float ang = baseAng + (TWO_PI * static_cast<float>(attempt)) / 28.0f;
-        QVector3D dir(std::sin(ang), 0.0f, std::cos(ang));
-        QVector3D side(-dir.z(), 0.0f, dir.x());
+    auto evalCandidate = [&](float cx, float cz, float candYaw, float distPenalty) {
+        float c0 = sampleWhaleClearance(cx, cz);
+        float cBack = sampleWhaleClearance(cx - std::sin(candYaw) * (4.5f * sc),
+                                           cz - std::cos(candYaw) * (4.5f * sc));
+        float freeAhead = measureWhaleFreeDist(cx, cz, candYaw, 110.0f);
+        float minCl = std::min(c0, cBack);
+        float score = (minCl > 0.0f ? (25.0f + std::min(minCl, 16.0f) * 2.0f) : (minCl * 4.0f))
+                      + freeAhead * 1.15f - distPenalty;
+        if (score > bestScore) {
+            bestScore = score;
+            bestPos = QVector3D(cx, pickSafeY(cx, cz), cz);
+            bestYaw = candYaw;
+        }
+    };
 
-        float distBack = nearPlayer ? 72.0f : 120.0f;
-        QVector3D cand = anchor - dir * distBack + side * (nearPlayer ? 14.0f : 26.0f);
+    if (nearPlayer) {
+        // Спавним кита прямо перед взглядом игрока — проходит поперёк экрана слева/справа
+        QVector3D camFwd(std::sin(m_yaw), 0.0f, -std::cos(m_yaw));
+        QVector3D camRgt(std::cos(m_yaw), 0.0f,  std::sin(m_yaw));
+        float sideSign = (sizeDist(m_rng) > 1.5f) ? 1.0f : -1.0f;
 
-        float c0 = sampleWhaleClearance(cand.x(), cand.z());
-        float c1 = sampleWhaleClearance(cand.x() + dir.x() * 35.0f, cand.z() + dir.z() * 35.0f);
-        float c2 = sampleWhaleClearance(cand.x() + dir.x() * 75.0f, cand.z() + dir.z() * 75.0f);
-        float minCourseClear = std::min({c0, c1, c2});
+        const float fwdDists[4]  = {36.0f + 3.0f * sc, 52.0f + 3.5f * sc, 72.0f + 4.0f * sc, 28.0f + 2.5f * sc};
+        const float sideOffs[3]  = {-24.0f * sideSign, 0.0f, 24.0f * sideSign};
+        const float yawRel[4]    = {1.45f * sideSign, 1.10f * sideSign, -1.45f * sideSign, -1.10f * sideSign};
+        const float camHeading   = std::atan2(camFwd.x(), camFwd.z());
 
-        if (minCourseClear > bestScore) {
-            bestScore = minCourseClear;
-            float floorY = ProcMath::sampleTerrainHeight(cand.x(), cand.z(), m_seed);
-            float y = ProcMath::clamp(std::max(floorY + 13.5f, 19.5f),
-                                      16.0f, ProcMath::WATER_SURFACE_Y - 5.8f);
-            bestPos = QVector3D(cand.x(), y, cand.z());
-            bestDir = dir;
+        for (float fd : fwdDists) {
+            for (float so : sideOffs) {
+                float cx = m_camPos.x() + camFwd.x() * fd + camRgt.x() * so;
+                float cz = m_camPos.z() + camFwd.z() * fd + camRgt.z() * so;
+                for (float yr : yawRel) {
+                    evalCandidate(cx, cz, wrapAngle(camHeading + yr), fd * 0.25f);
+                }
+            }
+        }
+
+        // Если игрок смотрит вплотную в отвесную стену — ищем чистый коридор в 360° рядом с игроком
+        if (bestScore < 55.0f) {
+            for (int i = 0; i < 24; ++i) {
+                float ang = (TWO_PI * static_cast<float>(i)) / 24.0f;
+                float rad = 45.0f + 4.0f * sc;
+                float cx = m_camPos.x() + std::cos(ang) * rad;
+                float cz = m_camPos.z() + std::sin(ang) * rad;
+                float tangYaw = std::atan2(-std::sin(ang), std::cos(ang));
+                evalCandidate(cx, cz, tangYaw, 15.0f);
+                evalCandidate(cx, cz, wrapAngle(tangYaw + PI), 15.0f);
+            }
         }
     }
 
-    m_whale.pos = bestPos;
-    m_whale.yaw = std::atan2(bestDir.x(), bestDir.z());
-    m_whale.pitch = 0.0f;
-    m_whale.bank = 0.0f;
-    m_whale.vel = bestDir * m_whale.cruiseSpeed;
-    m_whaleWanderAngle = m_whale.yaw;
-
-    QVector3D forwardHint = bestPos + bestDir * 150.0f;
-    if (sampleWhaleClearance(forwardHint.x(), forwardHint.z()) > 12.0f) {
-        m_whaleWaypoint = QVector3D(forwardHint.x(), 20.0f, forwardHint.z());
-    } else {
-        m_whaleWaypoint = pickWhaleOpenWaypoint(QVector3D(0.0f, 20.0f, 0.0f), 90.0f, 260.0f);
+    // При старте мира (или если игрок совсем за краем кальдеры) — чистая центральная лагуна
+    if (!nearPlayer || bestScore < 30.0f) {
+        bestScore = -1e9f;
+        float baseAng = phaseDist(m_rng);
+        for (int i = 0; i < 32; ++i) {
+            float ang = baseAng + (TWO_PI * static_cast<float>(i)) / 32.0f;
+            float rad = 70.0f + 35.0f * (i % 3);
+            float cx = std::cos(ang) * rad;
+            float cz = std::sin(ang) * rad;
+            float tangYaw = std::atan2(-std::sin(ang), std::cos(ang));
+            evalCandidate(cx, cz, tangYaw, 0.0f);
+        }
     }
-    m_whaleWaypointTimer = 26.0f;
-    m_whaleSongTimer = nearPlayer ? 2.5f : 8.0f;
+
+    QVector3D dir(std::sin(bestYaw), 0.0f, std::cos(bestYaw));
+    m_whale.pos   = bestPos;
+    m_whale.yaw   = bestYaw;
+    m_whale.pitch = 0.0f;
+    m_whale.bank  = 0.0f;
+    m_whale.vel   = dir * m_whale.cruiseSpeed;
+
+    m_whaleState          = WhaleState::Cruising;
+    m_whaleTurnDir        = (sizeMult > 1.5f) ? 1.0f : -1.0f;
+    m_whaleAvoidTimer     = 0.0f;
+    m_whaleAvoidAccumYaw  = 0.0f;
+    m_whaleCurrentYawRate = 0.0f;
+    m_whaleProgressAnchor = m_whale.pos;
+    m_whaleProgressTimer  = 0.0f;
+    m_whaleStuckAccum     = 0.0f;
+
+    m_whaleSurfacing       = false;
+    m_whaleSurfaceBlend    = 0.0f;
+    m_whaleSurfaceTimer    = 0.0f;
+    m_whaleSurfaceCooldown = firstSurfCdDist(m_rng);
+
+    float freeD = measureWhaleFreeDist(bestPos.x(), bestPos.z(), bestYaw, 140.0f);
+    if (freeD >= 45.0f) {
+        m_whaleWaypoint = QVector3D(bestPos.x() + dir.x() * (freeD - 10.0f),
+                                    cruiseY,
+                                    bestPos.z() + dir.z() * (freeD - 10.0f));
+    } else {
+        m_whaleWaypoint = pickWhaleOpenWaypoint(QVector3D(0.0f, cruiseY, 0.0f), 90.0f, 240.0f);
+    }
+    m_whaleWaypointTimer = 24.0f;
+    m_whaleSongTimer = nearPlayer ? 1.8f : 7.0f;
 }
 
 void DeepDiveWidget::updateWhaleNavigation(float dt) {
-    QVector3D toWp(m_whaleWaypoint.x() - m_whale.pos.x(), 0.0f, m_whaleWaypoint.z() - m_whale.pos.z());
-    float distToWp = toWp.length();
-    m_whaleWaypointTimer -= dt;
-    if (distToWp < 42.0f || m_whaleWaypointTimer <= 0.0f) {
-        m_whaleWaypoint = pickWhaleOpenWaypoint(QVector3D(0.0f, 20.0f, 0.0f), 110.0f, 320.0f);
-        m_whaleWaypointTimer = 28.0f;
-        toWp = QVector3D(m_whaleWaypoint.x() - m_whale.pos.x(), 0.0f, m_whaleWaypoint.z() - m_whale.pos.z());
-        distToWp = toWp.length();
-    }
+    const float sc                = std::max(m_whale.scale, 2.65f);
+    const float halfLen           = 5.2f * sc;
+    const float bodyBot           = 1.12f * sc;
+    const float submergedCeilingY = ProcMath::WATER_SURFACE_Y - (0.85f * sc + 0.9f);
+    const float skimCeilingY      = ProcMath::WATER_SURFACE_Y - 0.25f * sc;
+    const float surfacingCeilingY = ProcMath::WATER_SURFACE_Y; // ватерлиния ровно посередине корпуса
+    const float cruiseY           = submergedCeilingY - 0.8f;
+    const float safeTurnR         = ProcMath::BASIN_INNER_RADIUS - (65.0f + halfLen);
 
-    QVector3D desiredHoriz = (distToWp > 1.0f)
-                                 ? (toWp / distToWp)
-                                 : QVector3D(std::sin(m_whale.yaw), 0.0f, std::cos(m_whale.yaw));
-    float baseTargetYaw = std::atan2(desiredHoriz.x(), desiredHoriz.z())
-                          + std::sin(m_time * 0.16f) * 0.14f;
+    // Порог срабатывания обхода и порог «окна возможностей» (в реальных метрах)
+    const float triggerDist = halfLen * 1.35f + 16.0f; // ~35 м (1x) .. ~53 м (2x)
+    const float openDist    = halfLen * 1.80f + 22.0f; // ~47 м (1x) .. ~72 м (2x)
 
-    constexpr float PROBE_ANGLES[5] = {0.0f, 0.42f, -0.42f, 0.90f, -0.90f};
-    constexpr float PROBE_DISTS[3]  = {24.0f, 48.0f, 76.0f};
+    // Плавный подъём потолка при всплытии и погружении
+    const float surfBlendRate = m_whaleSurfacing ? (dt * 0.65f) : (dt * 0.20f);
+    m_whaleSurfaceBlend = ProcMath::clamp(
+        m_whaleSurfaceBlend + (m_whaleSurfacing ? surfBlendRate : -surfBlendRate), 0.0f, 1.0f);
+    const float smoothSurf     = m_whaleSurfaceBlend * m_whaleSurfaceBlend * (3.0f - 2.0f * m_whaleSurfaceBlend);
+    const float activeCeilingY = ProcMath::mix(skimCeilingY, surfacingCeilingY, smoothSurf);
 
-    float straightMinClear = 1e9f;
-    float bestBeamYaw = m_whale.yaw;
-    float bestBeamScore = -1e9f;
+    const float fxPre = std::sin(m_whale.yaw);
+    const float fzPre = std::cos(m_whale.yaw);
+    const float distFromCenter = std::sqrt(m_whale.pos.x() * m_whale.pos.x() + m_whale.pos.z() * m_whale.pos.z());
+    const float freeForward    = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), m_whale.yaw, 120.0f);
+    const bool  atRimHeadingOut = (distFromCenter > safeTurnR)
+                                 && ((fxPre * m_whale.pos.x() + fzPre * m_whale.pos.z()) > -0.10f * distFromCenter);
 
-    for (int b = 0; b < 5; ++b) {
-        float candYaw = wrapAngle(m_whale.yaw + PROBE_ANGLES[b]);
-        float sx = std::sin(candYaw);
-        float sz = std::cos(candYaw);
+    // Однократный уверенный выбор стороны разворота: ищем ближайшую открытую сторону
+    auto pickTurnDirection = [&](const QVector3D* wallPushDir) -> float {
+        const float sideX =  std::cos(m_whale.yaw); // направление при +yaw
+        const float sideZ = -std::sin(m_whale.yaw);
 
-        float minClear = 1e9f;
-        float avgClear = 0.0f;
-        for (float pd : PROBE_DISTS) {
-            float cl = sampleWhaleClearance(m_whale.pos.x() + sx * pd, m_whale.pos.z() + sz * pd);
-            minClear = std::min(minClear, cl);
-            avgClear += cl;
+        // Ищем минимальный угол до настоящего окна (>= openDist) влево и вправо
+        float posWindowAng = 99.0f;
+        float negWindowAng = 99.0f;
+        float posSum = 0.0f;
+        float negSum = 0.0f;
+
+        for (int step = 1; step <= 11; ++step) {
+            float a = static_cast<float>(step) * (PI / 12.0f); // 15° .. 165°
+            float dPos = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), wrapAngle(m_whale.yaw + a), 110.0f);
+            float dNeg = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), wrapAngle(m_whale.yaw - a), 110.0f);
+            posSum += dPos;
+            negSum += dNeg;
+            if (posWindowAng > 10.0f && dPos >= openDist) posWindowAng = a;
+            if (negWindowAng > 10.0f && dNeg >= openDist) negWindowAng = a;
         }
-        avgClear /= 3.0f;
-        if (b == 0) straightMinClear = minClear;
 
-        float align = std::cos(wrapAngle(candYaw - baseTargetYaw));
-        float turnPenalty = std::abs(PROBE_ANGLES[b]) * 4.5f;
-        float score = std::min(minClear, 24.0f) * 2.4f + std::min(avgClear, 28.0f) * 0.6f
-                      + align * 12.0f - turnPenalty;
+        // У края кальдеры отдаём предпочтение стороне, уводящей внутрь лагуны
+        if (distFromCenter > ProcMath::BASIN_INNER_RADIUS * 0.62f) {
+            float inwardDot = (-m_whale.pos.x() * sideX - m_whale.pos.z() * sideZ) / std::max(distFromCenter, 1.0f);
+            if (inwardDot > 0.25f)  return  1.0f;
+            if (inwardDot < -0.25f) return -1.0f;
+        }
 
-        if (score > bestBeamScore) {
-            bestBeamScore = score;
-            bestBeamYaw = candYaw;
+        if (std::abs(posWindowAng - negWindowAng) > 0.20f) {
+            return (posWindowAng < negWindowAng) ? 1.0f : -1.0f;
+        }
+        if (wallPushDir && wallPushDir->lengthSquared() > 1e-4f) {
+            float sideDot = wallPushDir->x() * sideX + wallPushDir->z() * sideZ;
+            if (std::abs(sideDot) > 0.22f) return (sideDot >= 0.0f) ? 1.0f : -1.0f;
+        }
+        return (posSum >= negSum) ? 1.0f : -1.0f;
+    };
+
+    auto startAvoidingTurn = [&](const QVector3D* wallPushDir) {
+        if (m_whaleState == WhaleState::AvoidingTurn) return; // сторону не меняем до открытия окна!
+        m_whaleState         = WhaleState::AvoidingTurn;
+        m_whaleTurnDir       = pickTurnDirection(wallPushDir);
+        m_whaleAvoidTimer    = 0.0f;
+        m_whaleAvoidAccumYaw = 0.0f;
+    };
+
+    // ------------------------------------------------------------------------
+    // 1. Периодическое всплытие (нижняя половина в воде, верхняя — над гладью)
+    // ------------------------------------------------------------------------
+    if (m_whaleSurfacing) {
+        m_whaleSurfaceTimer -= dt;
+        if (m_whaleSurfaceTimer <= 0.0f || m_whaleState == WhaleState::AvoidingTurn) {
+            m_whaleSurfacing = false;
+            std::uniform_real_distribution<float> cdDist(14.0f, 24.0f);
+            m_whaleSurfaceCooldown = cdDist(m_rng);
+        }
+    } else if (m_whaleState == WhaleState::Cruising) {
+        m_whaleSurfaceCooldown -= dt;
+        if (m_whaleSurfaceCooldown <= 0.0f && freeForward >= 42.0f && distFromCenter < safeTurnR) {
+            m_whaleSurfacing = true;
+            std::uniform_real_distribution<float> durDist(12.0f, 18.0f);
+            m_whaleSurfaceTimer = durDist(m_rng);
+            if (m_audioEngine && (m_whale.pos - m_camPos).length() < 360.0f) {
+                m_audioEngine->triggerWhaleCall();
+            }
         }
     }
 
-    float chosenYaw = (straightMinClear > 14.0f) ? baseTargetYaw : bestBeamYaw;
+    // ------------------------------------------------------------------------
+    // 2. Конечный автомат: уверенное плавание или зафиксированный разворот
+    // ------------------------------------------------------------------------
+    float targetYawRate = 0.0f;
+    float speedScale    = 1.0f;
 
-    float distFromCenter = std::sqrt(m_whale.pos.x() * m_whale.pos.x() + m_whale.pos.z() * m_whale.pos.z());
-    if (distFromCenter > ProcMath::BASIN_INNER_RADIUS - 105.0f) {
-        float inwardYaw = std::atan2(-m_whale.pos.x(), -m_whale.pos.z());
-        float edgeBlend = ProcMath::smoothstep(ProcMath::BASIN_INNER_RADIUS - 105.0f,
-                                               ProcMath::BASIN_INNER_RADIUS - 65.0f,
-                                               distFromCenter);
-        chosenYaw = wrapAngle(chosenYaw + wrapAngle(inwardYaw - chosenYaw) * edgeBlend);
+    if (m_whaleState == WhaleState::Cruising) {
+        if (freeForward < triggerDist || atRimHeadingOut) {
+            startAvoidingTurn(nullptr);
+        }
     }
 
-    constexpr float MAX_YAW_RATE = 0.42f;
-    float yawErr = wrapAngle(chosenYaw - m_whale.yaw);
-    float yawStep = ProcMath::clamp(yawErr * 1.4f, -MAX_YAW_RATE, MAX_YAW_RATE) * dt;
-    m_whale.yaw = wrapAngle(m_whale.yaw + yawStep);
+    if (m_whaleState == WhaleState::Cruising) {
+        QVector3D toWp(m_whaleWaypoint.x() - m_whale.pos.x(), 0.0f, m_whaleWaypoint.z() - m_whale.pos.z());
+        float distToWp = toWp.length();
+        m_whaleWaypointTimer -= dt;
+        if (distToWp < (32.0f + halfLen * 0.5f) || m_whaleWaypointTimer <= 0.0f) {
+            m_whaleWaypoint = pickWhaleOpenWaypoint(QVector3D(0.0f, cruiseY, 0.0f), 100.0f, 270.0f);
+            m_whaleWaypointTimer = 24.0f;
+            toWp = QVector3D(m_whaleWaypoint.x() - m_whale.pos.x(), 0.0f, m_whaleWaypoint.z() - m_whale.pos.z());
+            distToWp = toWp.length();
+        }
 
-    float fx = std::sin(m_whale.yaw);
-    float fz = std::cos(m_whale.yaw);
-    float floorHere  = ProcMath::sampleTerrainHeight(m_whale.pos.x(), m_whale.pos.z(), m_seed);
-    float floorAhead = ProcMath::sampleTerrainHeight(m_whale.pos.x() + fx * 26.0f, m_whale.pos.z() + fz * 26.0f, m_seed);
-    float maxLocalFloor = std::max(floorHere, floorAhead);
+        float desiredYaw = (distToWp > 1.0f)
+                               ? (std::atan2(toWp.x(), toWp.z()) + std::sin(m_time * 0.14f) * 0.07f)
+                               : m_whale.yaw;
+        float yawErr = wrapAngle(desiredYaw - m_whale.yaw);
+        targetYawRate = ProcMath::clamp(yawErr * 0.85f, -0.40f, 0.40f);
+        speedScale    = 1.0f;
+    } else {
+        // AvoidingTurn: уверенный поворот строго в m_whaleTurnDir до открытия окна
+        m_whaleAvoidTimer += dt;
 
-    constexpr float SURFACE_LIMIT_Y = ProcMath::WATER_SURFACE_Y - 5.4f;
-    float desiredAlt = 19.5f + std::sin(m_time * 0.24f) * 2.2f;
-    float targetY = ProcMath::clamp(std::max(desiredAlt, maxLocalFloor + 10.5f),
-                                    13.5f, SURFACE_LIMIT_Y);
+        float prox = ProcMath::clamp(freeForward / openDist, 0.0f, 1.0f);
+        speedScale    = ProcMath::mix(0.32f, 0.90f, prox);
+        targetYawRate = m_whaleTurnDir * ProcMath::mix(0.95f, 0.62f, prox);
 
-    float targetPitch = ProcMath::clamp((targetY - m_whale.pos.y()) * 0.065f, -0.22f, 0.22f);
-    m_whale.pitch = ProcMath::mix(m_whale.pitch, targetPitch, ProcMath::clamp(dt * 1.8f, 0.0f, 1.0f));
+        float freeLeft  = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), wrapAngle(m_whale.yaw + 0.20f), openDist);
+        float freeRight = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), wrapAngle(m_whale.yaw - 0.20f), openDist);
+        bool inwardOk   = (distFromCenter < safeTurnR)
+                        || ((fxPre * (-m_whale.pos.x()) + fzPre * (-m_whale.pos.z())) > 0.20f * distFromCenter);
 
-    float yawRate = (dt > 1e-4f) ? (yawStep / dt) : 0.0f;
-    float targetBank = ProcMath::clamp(-yawRate * 0.42f, -0.18f, 0.18f);
-    m_whale.bank = ProcMath::mix(m_whale.bank, targetBank, ProcMath::clamp(dt * 2.0f, 0.0f, 1.0f));
+        bool windowOpened = (m_whaleAvoidTimer >= 0.45f)
+                            && (freeForward >= openDist)
+                            && (freeLeft >= openDist * 0.60f)
+                            && (freeRight >= openDist * 0.60f)
+                            && inwardOk;
 
-    QVector3D forward(std::sin(m_whale.yaw) * std::cos(m_whale.pitch),
+        // Страховка: если прошли дугу > 215° и идеального окна нет (узкая бухта), выходим в лучший коридор
+        if (!windowOpened && m_whaleAvoidAccumYaw > 3.75f) {
+            float bestYaw = m_whale.yaw;
+            float bestD   = -1.0f;
+            for (int i = 0; i < 24; ++i) {
+                float a = (TWO_PI * static_cast<float>(i)) / 24.0f;
+                float d = measureWhaleFreeDist(m_whale.pos.x(), m_whale.pos.z(), a, 120.0f);
+                if (d > bestD) { bestD = d; bestYaw = a; }
+            }
+            if (std::abs(wrapAngle(bestYaw - m_whale.yaw)) < 0.35f || m_whaleAvoidAccumYaw > 5.8f) {
+                if (bestD < 14.0f) {
+                    // Крайний случай — мягко выводим из тупика к центру лагуны
+                    QVector3D toCenter(-m_whale.pos.x(), 0.0f, -m_whale.pos.z());
+                    if (toCenter.lengthSquared() > 1.0f) {
+                        toCenter.normalize();
+                        m_whale.pos += toCenter * 10.0f;
+                        m_whale.yaw = std::atan2(toCenter.x(), toCenter.z());
+                    }
+                }
+                windowOpened = true;
+            }
+        }
+
+        if (windowOpened) {
+            m_whaleState         = WhaleState::Cruising;
+            m_whaleAvoidAccumYaw = 0.0f;
+            m_whaleStuckAccum    = 0.0f;
+
+            float wpDist = std::clamp(freeForward - 8.0f, 45.0f, 130.0f);
+            float wx = m_whale.pos.x() + fxPre * wpDist;
+            float wz = m_whale.pos.z() + fzPre * wpDist;
+            float wr = std::sqrt(wx * wx + wz * wz);
+            float maxWpR = ProcMath::BASIN_INNER_RADIUS - 85.0f;
+            if (wr > maxWpR) {
+                float k = maxWpR / wr;
+                wx *= k;
+                wz *= k;
+            }
+            m_whaleWaypoint      = QVector3D(wx, cruiseY, wz);
+            m_whaleWaypointTimer = 18.0f;
+        }
+    }
+
+    // Плавная инерция угловой скорости
+    m_whaleCurrentYawRate = ProcMath::mix(m_whaleCurrentYawRate, targetYawRate,
+                                          ProcMath::clamp(dt * 3.5f, 0.0f, 1.0f));
+    float yawStep = m_whaleCurrentYawRate * dt;
+    m_whale.yaw   = wrapAngle(m_whale.yaw + yawStep);
+    if (m_whaleState == WhaleState::AvoidingTurn) {
+        m_whaleAvoidAccumYaw += std::abs(yawStep);
+    }
+
+    const float fx = std::sin(m_whale.yaw);
+    const float fz = std::cos(m_whale.yaw);
+    const float rx =  fz;
+    const float rz = -fx;
+
+    // Замер высоты дна под телом и немного впереди — чтобы плавно подниматься над рифами
+    float maxLocalFloor = std::max({
+        ProcMath::sampleTerrainHeight(m_whale.pos.x(), m_whale.pos.z(), m_seed),
+        ProcMath::sampleTerrainHeight(m_whale.pos.x() + fx * (halfLen * 0.85f), m_whale.pos.z() + fz * (halfLen * 0.85f), m_seed),
+        ProcMath::sampleTerrainHeight(m_whale.pos.x() + fx * (halfLen * 1.50f), m_whale.pos.z() + fz * (halfLen * 1.50f), m_seed),
+        ProcMath::sampleTerrainHeight(m_whale.pos.x() + rx * (1.25f * sc),      m_whale.pos.z() + rz * (1.25f * sc),      m_seed),
+        ProcMath::sampleTerrainHeight(m_whale.pos.x() - rx * (1.25f * sc),      m_whale.pos.z() - rz * (1.25f * sc),      m_seed)
+    });
+
+    float desiredAlt = m_whaleSurfacing
+                           ? (surfacingCeilingY + std::sin(m_time * 0.65f) * 0.12f)
+                           : (cruiseY + std::sin(m_time * 0.22f) * 1.0f);
+    float targetY = ProcMath::clamp(std::max(desiredAlt, maxLocalFloor + bodyBot + 1.0f),
+                                    10.0f, activeCeilingY);
+
+    float maxUpPitch = m_whaleSurfacing ? 0.34f : 0.26f;
+    float targetPitch = ProcMath::clamp((targetY - m_whale.pos.y()) * 0.13f, -0.26f, maxUpPitch);
+    m_whale.pitch = ProcMath::mix(m_whale.pitch, targetPitch, ProcMath::clamp(dt * 2.4f, 0.0f, 1.0f));
+
+    float targetBank = ProcMath::clamp(-m_whaleCurrentYawRate * 0.30f, -0.20f, 0.20f);
+    m_whale.bank = ProcMath::mix(m_whale.bank, targetBank, ProcMath::clamp(dt * 2.4f, 0.0f, 1.0f));
+
+    QVector3D forward(fx * std::cos(m_whale.pitch),
                       std::sin(m_whale.pitch),
-                      std::cos(m_whale.yaw) * std::cos(m_whale.pitch));
+                      fz * std::cos(m_whale.pitch));
     forward.normalize();
-    m_whale.vel = forward * m_whale.cruiseSpeed;
+    m_whale.vel = forward * (m_whale.cruiseSpeed * speedScale);
     m_whale.pos += m_whale.vel * dt;
 
-    const auto& spires = ProcMath::getCentralSpires(m_seed);
-    for (const auto& sp : spires) {
-        if (sp.height < 22.0f) continue;
-        float dx = m_whale.pos.x() - sp.x;
-        float dz = m_whale.pos.z() - sp.z;
-        float safeR = sp.radius + 18.0f;
-        float d2 = dx * dx + dz * dz;
-        if (d2 < safeR * safeR && d2 > 1e-4f) {
-            float d = std::sqrt(d2);
-            float push = std::min((safeR - d), 10.0f * dt);
-            m_whale.pos.setX(m_whale.pos.x() + (dx / d) * push);
-            m_whale.pos.setZ(m_whale.pos.z() + (dz / d) * push);
+    // ------------------------------------------------------------------------
+    // 3. Мягкое разрешение коллизий (только позиция, без вмешательства в yaw)
+    // ------------------------------------------------------------------------
+    const QVector3D checkPts[3] = {
+        m_whale.pos,
+        m_whale.pos + QVector3D(fx, 0.0f, fz) * (halfLen * 0.72f),
+        m_whale.pos - QVector3D(fx, 0.0f, fz) * (halfLen * 0.68f)
+    };
+
+    QVector3D horizPush(0.0f, 0.0f, 0.0f);
+    float neededMinY = -1e9f;
+    const float gradStep = 3.5f * sc;
+
+    for (int i = 0; i < 3; ++i) {
+        const auto& pt = checkPts[i];
+        float reqClear = (i == 0) ? (bodyBot + 0.5f) : (0.65f * sc + 0.5f);
+        float h = ProcMath::sampleTerrainHeight(pt.x(), pt.z(), m_seed);
+        float reqY = h + reqClear;
+        if (reqY > m_whale.pos.y()) {
+            neededMinY = std::max(neededMinY, std::min(reqY, activeCeilingY));
+        }
+        if (reqY > activeCeilingY) {
+            float hPx = ProcMath::sampleTerrainHeight(pt.x() + gradStep, pt.z(), m_seed);
+            float hNx = ProcMath::sampleTerrainHeight(pt.x() - gradStep, pt.z(), m_seed);
+            float hPz = ProcMath::sampleTerrainHeight(pt.x(), pt.z() + gradStep, m_seed);
+            float hNz = ProcMath::sampleTerrainHeight(pt.x(), pt.z() - gradStep, m_seed);
+            QVector3D outDir(hNx - hPx, 0.0f, hNz - hPz);
+            if (outDir.lengthSquared() < 0.25f) outDir = QVector3D(-pt.x(), 0.0f, -pt.z());
+            if (outDir.lengthSquared() > 1e-4f) {
+                outDir.normalize();
+                horizPush += outDir * std::clamp((reqY - activeCeilingY) * 0.6f + 2.0f, 2.0f, 12.0f);
+            }
         }
     }
 
-    float curFloor = ProcMath::sampleTerrainHeight(m_whale.pos.x(), m_whale.pos.z(), m_seed);
-    if (m_whale.pos.y() < curFloor + 6.5f) {
-        m_whale.pos.setY(std::min(curFloor + 6.5f, SURFACE_LIMIT_Y));
+    if (horizPush.lengthSquared() > 1e-4f) {
+        float pushLen = horizPush.length();
+        QVector3D pushDir = horizPush / pushLen;
+        float step = std::min(pushLen, 12.0f * dt);
+        m_whale.pos.setX(m_whale.pos.x() + pushDir.x() * step);
+        m_whale.pos.setZ(m_whale.pos.z() + pushDir.z() * step);
+        if (m_whaleState == WhaleState::Cruising) {
+            startAvoidingTurn(&pushDir);
+        }
     }
-    if (m_whale.pos.y() > SURFACE_LIMIT_Y) {
-        m_whale.pos.setY(SURFACE_LIMIT_Y);
+
+    if (neededMinY > m_whale.pos.y()) {
+        m_whale.pos.setY(std::min(neededMinY, activeCeilingY));
+    }
+    if (m_whale.pos.y() > activeCeilingY) {
+        m_whale.pos.setY(activeCeilingY);
     }
 
     float curR = std::sqrt(m_whale.pos.x() * m_whale.pos.x() + m_whale.pos.z() * m_whale.pos.z());
-    float hardWhaleR = ProcMath::BASIN_INNER_RADIUS - 55.0f;
+    float hardWhaleR = ProcMath::BASIN_INNER_RADIUS - 36.0f;
     if (curR > hardWhaleR) {
         float k = hardWhaleR / curR;
         m_whale.pos.setX(m_whale.pos.x() * k);
         m_whale.pos.setZ(m_whale.pos.z() * k);
+        QVector3D inward(-m_whale.pos.x() / curR, 0.0f, -m_whale.pos.z() / curR);
+        startAvoidingTurn(&inward);
     }
 
     m_whaleSongTimer -= dt;
@@ -1222,7 +1491,7 @@ void DeepDiveWidget::cullAndUploadFauna(const FrustumPlanes& frustum) {
 
     {
         float whaleDist = (m_whale.pos - m_camPos).length();
-        if (whaleDist <= WHALE_MAX_DIST && frustum.intersectsSphere(m_whale.pos, 18.0f)) {
+        if (whaleDist <= WHALE_MAX_DIST && frustum.intersectsSphere(m_whale.pos, m_whale.boundingRadius * 1.25f)) {
             m_whaleLodState = updateBinaryLod(m_whaleLodState, whaleDist, WHALE_LOD0_DIST, 12.0f);
             if (m_whaleLodState == 0) m_visWhaleLod0.push_back(packFaunaInstance(m_whale));
             else                      m_visWhaleLod1.push_back(packFaunaInstance(m_whale));
@@ -1516,7 +1785,7 @@ void DeepDiveWidget::paintGL() {
             float d = distanceToAABB(m_camPos, chunk.minBounds, chunk.maxBounds);
             shadowChunks.emplace_back(i, d);
 
-            int sLod = (d < 135.0f) ? 1 : (d < 240.0f ? 2 : 3);
+            int sLod = (d < 85.0f) ? 0 : (d < 165.0f ? 1 : (d < 260.0f ? 2 : 3));
             const auto& range = m_world.terrainLodRanges[sLod];
             const void* idxPtr = reinterpret_cast<const void*>(
                 static_cast<uintptr_t>(range.indexOffset) * sizeof(uint32_t));
@@ -1723,6 +1992,11 @@ void DeepDiveWidget::paintGL() {
     m_waterShader.setUniformValue("uWaterColorShallow", waterShallow);
     m_waterShader.setUniformValue("uFogScale", fogScale);
     m_waterShader.setUniformValue("uTime", m_time);
+    m_waterShader.setUniformValue("uWhaleSurfA",
+                                  QVector4D(m_whale.pos.x(), m_whale.pos.y(), m_whale.pos.z(), m_whale.scale));
+    m_waterShader.setUniformValue("uWhaleSurfB",
+                                  QVector4D(std::sin(m_whale.yaw), std::cos(m_whale.yaw),
+                                            std::sin(m_whale.pitch), std::cos(m_whale.pitch)));
     glBindVertexArray(m_waterVAO);
     glDrawElements(GL_TRIANGLES, m_waterIndexCount, GL_UNSIGNED_INT, nullptr);
     m_stats.drawnTriangles += static_cast<int>(m_waterIndexCount / 3);

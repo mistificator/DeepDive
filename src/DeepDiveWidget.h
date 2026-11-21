@@ -8,6 +8,7 @@
 #include <QMatrix4x4>
 #include <array>
 #include <vector>
+#include <random>
 #include "GpuCapabilities.h"
 #include "GamepadInput.h"
 #include "WorldGenerator.h"
@@ -86,6 +87,7 @@ private:
     void rebuildWorld(uint32_t seed);
     void spawnWhalePass(bool nearPlayer);
     float sampleWhaleClearance(float x, float z) const;
+    float measureWhaleFreeDist(float x, float z, float yaw, float maxDist) const;
     QVector3D pickWhaleOpenWaypoint(const QVector3D& nearAnchor, float minDist, float maxDist) const;
     void updateWhaleNavigation(float dt);
     void updateFaunaAgents(float dt);
@@ -177,12 +179,33 @@ private:
     GLuint m_bloomFBO[2] = {0, 0};
     GLuint m_bloomTex[2] = {0, 0};
 
+    enum class WhaleState {
+        Cruising,
+        AvoidingTurn
+    };
+
     // Автономный горбатый кит
+    std::mt19937 m_rng;
     FaunaAgent m_whale;
     QVector3D m_whaleWaypoint{0.0f, 20.5f, 0.0f};
     float m_whaleWaypointTimer = 0.0f;
     float m_whaleSongTimer = 7.0f;
-    float m_whaleWanderAngle = 0.0f;
+
+    // Уверенный обход с фиксацией стороны разворота (без дрожания)
+    WhaleState m_whaleState = WhaleState::Cruising;
+    float m_whaleTurnDir = 1.0f;         // +1 или -1, фиксируется до открытия окна
+    float m_whaleAvoidTimer = 0.0f;
+    float m_whaleAvoidAccumYaw = 0.0f;
+    float m_whaleCurrentYawRate = 0.0f;  // плавная инерция поворота
+    QVector3D m_whaleProgressAnchor{0.0f, 20.5f, 0.0f};
+    float m_whaleProgressTimer = 0.0f;
+    float m_whaleStuckAccum = 0.0f;
+
+    // Периодическое всплытие (в воде остаётся только нижняя половина тела)
+    bool  m_whaleSurfacing = false;
+    float m_whaleSurfaceCooldown = 8.0f;
+    float m_whaleSurfaceTimer = 0.0f;
+    float m_whaleSurfaceBlend = 0.0f;
 
     QVector3D m_camPos{0.0f, -6.0f, 20.0f};
     QVector3D m_camVel{0.0f, 0.0f, 0.0f};

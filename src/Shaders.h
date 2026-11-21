@@ -65,9 +65,11 @@ void main() {
         localPos.y += sin(phase - wingDist * 1.15 - localPos.z * 0.35) * 0.42 * (wf * sqrt(wf));
     } else if (aInstRotPhase.z < 2.5) {
         float phase = aInstRotPhase.y + uTime * 1.35;
-        float tailWeight = smoothstep(1.2, -5.2, localPos.z);
-        float spineWave = sin(phase - localPos.z * 0.55) * 0.55 * (tailWeight * tailWeight);
-        float finSway = sin(phase - abs(localPos.x) * 0.6) * 0.12 * clamp((abs(localPos.x) - 0.8) / 2.0, 0.0, 1.0);
+        float tailWeight = smoothstep(1.2, -6.4, localPos.z);
+        float spineWave = sin(phase - localPos.z * 0.50) * 0.58 * (tailWeight * tailWeight);
+        float flipperWeight = clamp((abs(localPos.x) - 1.30) / 2.8, 0.0, 1.0)
+                            * smoothstep(-1.4, 0.2, localPos.z);
+        float finSway = sin(phase - abs(localPos.x) * 0.55) * 0.16 * flipperWeight;
         localPos.y += spineWave + finSway;
     } else {
         float phase = aInstRotPhase.y + uTime * 3.2;
@@ -213,6 +215,21 @@ vec4 sampleTriplanar(sampler2D tex, vec3 p, vec3 blend) {
     return tx * blend.x + ty * blend.y + tz * blend.z;
 }
 
+void sampleTriplanarDetail(sampler2D tex, vec3 p, vec3 blend, out vec3 outPerturb, out float outHeight) {
+    vec4 tx = texture(tex, p.yz);
+    vec4 ty = texture(tex, p.xz);
+    vec4 tz = texture(tex, p.xy);
+
+    vec2 nx = tx.rg * 2.0 - 1.0;
+    vec2 ny = ty.rg * 2.0 - 1.0;
+    vec2 nz = tz.rg * 2.0 - 1.0;
+
+    outPerturb = vec3(0.0, nx.x, nx.y) * blend.x
+               + vec3(ny.x, 0.0, ny.y) * blend.y
+               + vec3(nz.x, nz.y, 0.0) * blend.z;
+    outHeight  = tx.a * blend.x + ty.a * blend.y + tz.a * blend.z;
+}
+
 float organicCaustics(vec2 p, float t) {
     mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
     vec2 uv1 = p * 0.10 + vec2(t * 0.06, -t * 0.04);
@@ -301,47 +318,60 @@ void main() {
     vec3 V = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
     vec3 L = normalize(uSunDir);
 
-    vec3 triN = geomN;
+// Для трипланарных весов подавляем ТОЛЬКО верхнюю проекцию (p.xz) на крутых гранях,
+    // чтобы не тянулись вертикальные полосы, сохраняя плавное соотношение X/Z из geomN.
+    vec3 blendN = abs(geomN);
     if (vParam.x < 0.5) {
-        float steepMismatch = smoothstep(0.08, 0.32, geomN.y - max(trueFaceN.y, 0.0));
-        triN = normalize(mix(geomN, trueFaceN, steepMismatch));
+        float faceY = abs(trueFaceN.y);
+        float steepFace = smoothstep(0.62, 0.28, faceY);
+        blendN.y = mix(blendN.y, min(blendN.y, faceY), steepFace);
+
+        // На острых гребнях, где geomN.xz почти нулевой, мягко подмешиваем горизонталь грани
+        float horizLen = length(blendN.xz);
+        float ridgeFallback = (1.0 - smoothstep(0.15, 0.45, horizLen)) * steepFace;
+        blendN.xz = mix(blendN.xz, abs(trueFaceN.xz), ridgeFallback);
     }
 
-    vec3 blend = max(abs(triN), vec3(0.0001));
-    blend = blend * blend;
+    vec3 blend = max(blendN, vec3(0.0001));
     blend = blend * blend;
     blend /= (blend.x + blend.y + blend.z);
 
-    vec3 N = triN;
+    // Базовая нормаль освещения — ВСЕГДА гладкая geomN (никакого flat shading)
+    vec3 N = geomN;
     float vibStrength = (vParam.x > 1.5) ? uVibrance : mix(1.0, uVibrance, 0.50);
     vec3 baseCol = applyVibrance(clamp(vColor, 0.0, 1.0), vibStrength);
     float ao = 1.0;
 
     if (vParam.x < 1.5) {
-        vec4 macroSample = sampleTriplanar(uRockTex, vWorldPos * 0.045, blend);
-        vec4 microSample = sampleTriplanar(uRockTex, vWorldPos * 0.24, blend);
+        vec3 pMacro, pMicro, pFine;
+        float hMacro, hMicro, hFine;
+        sampleTriplanarDetail(uRockTex, vWorldPos * 0.045, blend, pMacro, hMacro);
+        sampleTriplanarDetail(uRockTex, vWorldPos * 0.24,  blend, pMicro, hMicro);
         float fineWeight = 1.0 - smoothstep(95.0, 225.0, dist);
-        vec4 fineSample  = (fineWeight > 0.01) ? sampleTriplanar(uRockTex, vWorldPos * 0.95, blend) : microSample;
+        if (fineWeight > 0.01) {
+            sampleTriplanarDetail(uRockTex, vWorldPos * 0.95, blend, pFine, hFine);
+        } else {
+            pFine = pMicro;
+            hFine = hMicro;
+        }
 
-        vec3 nMacro = macroSample.rgb * 2.0 - 1.0;
-        vec3 nMicro = microSample.rgb * 2.0 - 1.0;
-        vec3 nFine  = fineSample.rgb  * 2.0 - 1.0;
+        vec3 perturb = pMacro * 0.55 + pMicro * 0.44 + pFine * (0.24 * fineWeight);
+        N = normalize(geomN + perturb * 0.72);
 
-        vec3 perturb = (nMacro * 0.55 + nMicro * 0.44 + nFine * (0.24 * fineWeight));
-        N = normalize(triN + perturb * 0.72);
-
-        float strata = sin(vWorldPos.y * 1.65 + macroSample.a * 4.8) * 0.075;
-        float detailHeight = macroSample.a * 0.52 + microSample.a * 0.34 + fineSample.a * 0.14;
+        float strata = sin(vWorldPos.y * 1.65 + hMacro * 4.8) * 0.075;
+        float detailHeight = hMacro * 0.52 + hMicro * 0.34 + hFine * 0.14;
         ao = smoothstep(0.10, 0.78, detailHeight) * 0.48 + 0.52;
 
         baseCol = clamp(baseCol * (0.74 + detailHeight * 0.52 + strata), 0.0, 1.25);
     } else {
-        vec4 orgSample = sampleTriplanar(uRockTex, vWorldPos * 0.40, blend);
-        N = normalize(geomN + (orgSample.rgb * 2.0 - 1.0) * 0.20);
-        baseCol *= (0.88 + orgSample.a * 0.30);
+        vec3 pOrg;
+        float hOrg;
+        sampleTriplanarDetail(uRockTex, vWorldPos * 0.40, blend, pOrg, hOrg);
+        N = normalize(geomN + pOrg * 0.24);
+        baseCol *= (0.88 + hOrg * 0.30);
     }
 
-    float shadow = calcUnderwaterShadow(vLightSpacePos, triN, trueFaceN, L);
+    float shadow = calcUnderwaterShadow(vLightSpacePos, geomN, trueFaceN, L);
     float directShadow = mix(0.20, 1.0, shadow);
 
     float abyssDark = smoothstep(-22.0, -56.0, vWorldPos.y);
@@ -367,9 +397,10 @@ void main() {
     float caust = organicCaustics(caustProj, uTime);
     float depthAtten = clamp((vWorldPos.y + 34.0) / 58.0, 0.08, 1.0);
     float underwaterMask = 1.0 - smoothstep(26.4, 28.4, vWorldPos.y);
-    float slopeUp = min(max(triN.y, 0.0), max(trueFaceN.y, 0.0) + 0.08);
-    float slopeCaustFade = smoothstep(0.35, 0.80, slopeUp);
-    float sunFaceFade = smoothstep(0.08, 0.46, dot(trueFaceN, L));
+    float vertexFlatness = (vParam.x < 0.5) ? clamp(1.0 - vParam.y, 0.0, 1.0) : 1.0;
+    float slopeUp = min(max(geomN.y, 0.0), vertexFlatness);
+    float slopeCaustFade = smoothstep(0.38, 0.80, slopeUp);
+    float sunFaceFade = smoothstep(0.10, 0.48, dot(geomN, L));
     float caustMask = slopeCaustFade * sunFaceFade * depthAtten * ao * shadow * underwaterMask * (1.0 - abyssDark);
 
     vec3 sunColor = uSunColor;
@@ -489,14 +520,15 @@ void main() {
         localN = normalize(vec3(localN.x - dFlapDx * localN.y, localN.y, localN.z));
     } else if (aInstRotPhase.z < 2.5) {
         float phase = aInstRotPhase.y + uTime * 1.35;
-        float tailWeight = smoothstep(1.2, -5.2, localPos.z);
+        float tailWeight = smoothstep(1.2, -6.4, localPos.z);
         float w2 = tailWeight * tailWeight;
-        float waveArg = phase - localPos.z * 0.55;
-        float spineWave = sin(waveArg) * 0.55 * w2;
-        float dWaveDz = -0.55 * cos(waveArg) * 0.55 * w2;
+        float waveArg = phase - localPos.z * 0.50;
+        float spineWave = sin(waveArg) * 0.58 * w2;
+        float dWaveDz = -0.50 * cos(waveArg) * 0.58 * w2;
 
-        float flipperWeight = clamp((abs(localPos.x) - 0.8) / 2.0, 0.0, 1.0);
-        float finSway = sin(phase - abs(localPos.x) * 0.6) * 0.12 * flipperWeight;
+        float flipperWeight = clamp((abs(localPos.x) - 1.30) / 2.8, 0.0, 1.0)
+                            * smoothstep(-1.4, 0.2, localPos.z);
+        float finSway = sin(phase - abs(localPos.x) * 0.55) * 0.16 * flipperWeight;
 
         localPos.y += spineWave + finSway;
         localN = normalize(vec3(localN.x, localN.y, localN.z - dWaveDz * localN.y));
@@ -564,6 +596,13 @@ uniform vec3 uLurePos[8];
 
 out vec4 FragColor;
 
+vec4 sampleTriplanar(sampler2D tex, vec3 p, vec3 blend) {
+    vec4 tx = texture(tex, p.yz);
+    vec4 ty = texture(tex, p.xz);
+    vec4 tz = texture(tex, p.xy);
+    return tx * blend.x + ty * blend.y + tz * blend.z;
+}
+
 vec3 applyVibrance(vec3 col, float vib) {
     float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
     float sat = max(col.r, max(col.g, col.b)) - min(col.r, min(col.g, col.b));
@@ -627,7 +666,9 @@ void main() {
     vec2 caustUV = vWorldPos.xz * 0.12 + vec2(uTime * 0.05, -uTime * 0.04);
     float h1 = texture(uRockTex, caustUV).a;
     float h2 = texture(uRockTex, caustUV * 1.4 - vec2(uTime * 0.04)).a;
-    float caust = pow(clamp(1.0 - abs(h1 - h2) * 2.1, 0.0, 1.0), 4.0) * clamp(N.y, 0.0, 1.0) * shadow * (1.0 - abyssDark);
+    float underwaterMask = 1.0 - smoothstep(26.4, 28.4, vWorldPos.y);
+    float caust = pow(clamp(1.0 - abs(h1 - h2) * 2.1, 0.0, 1.0), 4.0)
+                * clamp(N.y, 0.0, 1.0) * shadow * underwaterMask * (1.0 - abyssDark);
 
     float depthAtten = clamp((vWorldPos.y + 34.0) / 58.0, 0.08, 1.0);
     vec3 ambient = mix(uWaterColorDeep, uWaterColorShallow * 1.05, depthAtten) * ambSurvival;
@@ -650,6 +691,30 @@ void main() {
             float spL = pow(max(clamp(dot(N, hL), 0.0, 1.0), 0.0001), 24.0) * 0.55;
             lit += (baseCol * ndl + vec3(spL)) * lureCol * (atten * 3.2);
         }
+    }
+
+    // Полоса прибойной пены и поднимающихся пузырьков на теле кита у уреза воды (как на скалах)
+    float waveSurfY = 28.0
+                    + sin(dot(vWorldPos.xz, vec2(0.82, 0.57)) * 0.17 + uTime * 1.15) * 0.17
+                    + sin(dot(vWorldPos.xz, vec2(-0.64, 0.77)) * 0.27 + uTime * 1.48) * 0.11;
+    float belowSurf = waveSurfY - vWorldPos.y;
+    if (belowSurf > -0.35 && belowSurf < 2.2) {
+        vec3 fBlend = max(abs(N), vec3(0.0001));
+        fBlend = fBlend * fBlend;
+        fBlend /= (fBlend.x + fBlend.y + fBlend.z);
+
+        float band = (1.0 - smoothstep(0.0, 2.1, max(belowSurf, 0.0))) * smoothstep(-0.35, 0.08, belowSurf);
+        vec4 b1 = sampleTriplanar(uRockTex, vWorldPos * 0.48 + vec3(0.0, -uTime * 0.18, 0.0), fBlend);
+        vec4 b2 = sampleTriplanar(uRockTex, vWorldPos * 1.35 + vec3(0.0, -uTime * 0.34, 0.0), fBlend);
+
+        float foamRibbon   = (1.0 - smoothstep(0.0, 0.55, abs(belowSurf))) * (0.48 + 0.52 * b1.a);
+        float bubbleVeil   = smoothstep(0.42, 0.82, b1.a * 0.55 + b2.a * 0.45) * band;
+        float microBubbles = smoothstep(0.76, 0.91, b2.a) * band * 1.15;
+        float surfFoam     = clamp(foamRibbon * 0.90 + bubbleVeil * 0.72 + microBubbles, 0.0, 1.0);
+
+        vec3 surfFoamCol = mix(uWaterColorShallow * 1.30, vec3(0.95, 1.02, 1.05), 0.72)
+                         * mix(vec3(1.0), uSunColor, 0.55);
+        lit = mix(lit, surfFoamCol, surfFoam * 0.78);
     }
 
     float pulse = 0.82 + 0.18 * sin(uTime * 3.4 + vWorldPos.x * 0.2);
@@ -745,6 +810,8 @@ uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
 uniform float uFogScale;
 uniform float uTime;
+uniform vec4 uWhaleSurfA; // xyz: whale world pos, w: whale scale
+uniform vec4 uWhaleSurfB; // x: sin(yaw), y: cos(yaw), z: sin(pitch), w: cos(pitch)
 
 out vec4 FragColor;
 
@@ -788,8 +855,8 @@ void main() {
                   ? texture(uRockTex, (rot1 * p) * 0.72 + vec2(-uTime * 0.085, uTime * 0.072))
                   : s3;
 
-    // ------------------------------------------------------------------------
-    // КОНТАКТ СО СКАЛАМИ: точное 3D-расстояние до геометрии по буферу глубины
+// ------------------------------------------------------------------------
+    // КОНТАКТ СО СКАЛАМИ И ВСПЛЫВАЮЩИМ КИТОМ: единая механика пены и ряби
     // ------------------------------------------------------------------------
     vec2 screenUV = clamp(gl_FragCoord.xy * uInvResolution, 0.001, 0.999);
     float rawSceneDepth = texture(uSceneDepthTex, screenUV).r;
@@ -800,12 +867,66 @@ void main() {
     float shoreBubbles = 0.0;
     vec2 shoreRippleGrad = vec2(0.0);
 
+    float contactDist3D = 1e6;
+    vec2 contactOriginXZ = p;
+    bool hasContact = false;
+
     if (rawSceneDepth < 0.9992 && sceneLin >= waterLin - 0.08) {
         float ratio = sceneLin / max(waterLin, 0.001);
         vec3 rockPos = uCamPos + (vWorldPos - uCamPos) * ratio;
-        float dist3D = length(rockPos - vWorldPos);
+        contactDist3D = length(rockPos - vWorldPos);
+        contactOriginXZ = rockPos.xz;
+        hasContact = true;
+    }
 
-        // Зона прибойных разводов (до 4.2 м) и плотная пенная кромка у самой скалы (до 1.15 м)
+    float whaleScale = uWhaleSurfA.w;
+    if (whaleScale > 0.1) {
+        vec3 dW = vWorldPos - uWhaleSurfA.xyz;
+        float maxR = 6.5 * whaleScale + 5.0;
+        if (dot(dW, dW) < maxR * maxR) {
+            float sy = uWhaleSurfB.x, cy = uWhaleSurfB.y;
+            float sp = uWhaleSurfB.z, cp = uWhaleSurfB.w;
+            // Обратный поворот в локальное пространство кита (rotY * rotX)^T
+            vec3 r1 = vec3(cy * dW.x - sy * dW.z, dW.y, sy * dW.x + cy * dW.z);
+            vec3 lp = vec3(r1.x, cp * r1.y - sp * r1.z, sp * r1.y + cp * r1.z) / whaleScale;
+
+            float zClamped = clamp(lp.z, -5.05, 4.95);
+            float tBody = clamp((4.95 - zClamped) / 10.05, 0.0, 1.0);
+            float rx, ry;
+            if (tBody < 0.34) {
+                float u = tBody / 0.34;
+                float s = sin(u * 1.5707963);
+                rx = 1.24 * pow(max(s, 0.001), 0.80);
+                ry = (lp.y >= 0.0 ? 0.88 : 1.12) * pow(max(s, 0.001), 0.85);
+            } else {
+                float u = (tBody - 0.34) / 0.66;
+                rx = 1.24 * pow(max(1.0 - u, 0.0), 1.55) + 0.09 * (1.0 - u);
+                ry = (lp.y >= 0.0 ? 0.88 : 1.12) * pow(max(1.0 - u, 0.0), 1.25) + 0.13 * (1.0 - u);
+            }
+
+            float aboveBack  = (lp.y - ry) * whaleScale;
+            float belowBelly = (-ry - lp.y) * whaleScale;
+            float pierceFade = (1.0 - smoothstep(0.0, 0.85, aboveBack))
+                             * (1.0 - smoothstep(0.0, 0.85, belowBelly));
+            if (pierceFade > 0.005) {
+                float sliceFrac = clamp(lp.y / max(ry, 0.05), -0.99, 0.99);
+                float halfW = rx * sqrt(max(1.0 - sliceFrac * sliceFrac, 0.0));
+                float dxOut = max(abs(lp.x) - halfW, 0.0);
+                float dzEnd = lp.z - zClamped;
+                float whaleDist = length(vec2(dxOut, dzEnd)) * whaleScale + (1.0 - pierceFade) * 4.5;
+                if (whaleDist < contactDist3D) {
+                    contactDist3D = whaleDist;
+                    contactOriginXZ = uWhaleSurfA.xz + vec2(sy, cy) * (cp * zClamped * whaleScale);
+                    hasContact = true;
+                }
+            }
+        }
+    }
+
+    if (hasContact) {
+        float dist3D = contactDist3D;
+
+        // Зона прибойных разводов (до 4.2 м) и плотная пенная кромка (до 1.15 м)
         float shoreZone = 1.0 - smoothstep(0.0, 4.2, dist3D);
         float tightSeam = 1.0 - smoothstep(0.0, 1.15, dist3D);
 
@@ -818,13 +939,13 @@ void main() {
             float ripplePhase = dist3D * 6.4 - uTime * 3.6 + swirl * 4.8;
             float rippleRing = sin(ripplePhase) * 0.5 + 0.5;
 
-            // Возмущение нормали волн от отражённой ряби у скалы
-            vec2 radialXZ = p - rockPos.xz;
+            // Возмущение нормали волн от отражённой ряби
+            vec2 radialXZ = p - contactOriginXZ;
             float radLen = length(radialXZ);
             vec2 rDir = (radLen > 0.01) ? (radialXZ / radLen) : vec2(1.0, 0.0);
             shoreRippleGrad = rDir * (cos(ripplePhase) * 0.38 * shoreZone);
 
-            // Кружевные разводы пены + расходящиеся белые кольца + плотная кромка прибоя
+            // Кружевные разводы пены + расходящиеся кольца + плотная кромка прибоя
             float laceMask = smoothstep(0.46 - tightSeam * 0.34, 0.74 - tightSeam * 0.24, swirl) * shoreZone;
             float ringMask = smoothstep(0.42, 0.92, rippleRing) * shoreZone * smoothstep(0.28, 0.68, f1.a) * 0.68;
             shoreBubbles = smoothstep(0.72, 0.90, f3.a) * shoreZone * (0.65 + 0.65 * tightSeam);
