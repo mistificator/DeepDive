@@ -1,44 +1,87 @@
 cmake_minimum_required(VERSION 3.20)
 
 # ==============================================================================
-# Версионирование: 1.0.0.N (N — абсолютное число коммитов в текущей ветке Git)
+# Версионирование: MAJOR.MINOR.PATCH.N
+#   MAJOR.MINOR.PATCH — из ближайшего достижимого git-тега (vX.Y.Z или X.Y.Z)
+#   N (TWEAK)         — абсолютное число коммитов в текущей ветке Git
 # ==============================================================================
 set(DEEPDIVE_VERSION_MAJOR 1)
 set(DEEPDIVE_VERSION_MINOR 0)
 set(DEEPDIVE_VERSION_PATCH 0)
 set(DEEPDIVE_VERSION_TWEAK 0)
+set(DEEPDIVE_GIT_TAG "untagged")
 set(DEEPDIVE_GIT_HASH "unknown")
 
-if(DEFINED DEEPDIVE_BUILD_NUMBER AND DEEPDIVE_BUILD_NUMBER MATCHES "^[0-9]+$")
-    set(DEEPDIVE_VERSION_TWEAK "${DEEPDIVE_BUILD_NUMBER}")
-else()
-    find_package(Git QUIET)
-    if(GIT_FOUND)
-        execute_process(
-            COMMAND "${GIT_EXECUTABLE}" rev-list --count HEAD
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            OUTPUT_VARIABLE _git_commit_count
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            RESULT_VARIABLE _git_count_res
-            ERROR_QUIET
-        )
-        if(_git_count_res EQUAL 0 AND _git_commit_count MATCHES "^[0-9]+$")
-            set(DEEPDIVE_VERSION_TWEAK "${_git_commit_count}")
-        endif()
+find_package(Git QUIET)
 
-        execute_process(
-            COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            OUTPUT_VARIABLE _git_short_hash
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            RESULT_VARIABLE _git_hash_res
-            ERROR_QUIET
-        )
-        if(_git_hash_res EQUAL 0 AND NOT "${_git_short_hash}" STREQUAL "")
-            set(DEEPDIVE_GIT_HASH "${_git_short_hash}")
-        endif()
+# 1. Читаем MAJOR.MINOR.PATCH (приоритет: -DDEEPDIVE_VERSION_TAG, затем git tag, иначе fallback 1.0.0)
+set(_raw_version_tag "")
+if(DEFINED DEEPDIVE_VERSION_TAG AND NOT "${DEEPDIVE_VERSION_TAG}" STREQUAL "")
+    set(_raw_version_tag "${DEEPDIVE_VERSION_TAG}")
+elseif(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0
+                --match "v[0-9]*.[0-9]*.[0-9]*"
+                --match "[0-9]*.[0-9]*.[0-9]*"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _git_tag
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _git_tag_res
+        ERROR_QUIET
+    )
+    if(_git_tag_res EQUAL 0 AND NOT "${_git_tag}" STREQUAL "")
+        set(_raw_version_tag "${_git_tag}")
     endif()
 endif()
+
+if(_raw_version_tag MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    set(DEEPDIVE_VERSION_MAJOR "${CMAKE_MATCH_1}")
+    set(DEEPDIVE_VERSION_MINOR "${CMAKE_MATCH_2}")
+    set(DEEPDIVE_VERSION_PATCH "${CMAKE_MATCH_3}")
+    set(DEEPDIVE_GIT_TAG "${_raw_version_tag}")
+else()
+    message(WARNING "No valid semver git tag (vX.Y.Z) found; falling back to "
+                    "${DEEPDIVE_VERSION_MAJOR}.${DEEPDIVE_VERSION_MINOR}.${DEEPDIVE_VERSION_PATCH}")
+endif()
+
+# 2. Читаем TWEAK (абсолютный номер коммита) и короткий хэш
+if(DEFINED DEEPDIVE_BUILD_NUMBER AND DEEPDIVE_BUILD_NUMBER MATCHES "^[0-9]+$")
+    set(DEEPDIVE_VERSION_TWEAK "${DEEPDIVE_BUILD_NUMBER}")
+elseif(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-list --count HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _git_commit_count
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _git_count_res
+        ERROR_QUIET
+    )
+    if(_git_count_res EQUAL 0 AND _git_commit_count MATCHES "^[0-9]+$")
+        set(DEEPDIVE_VERSION_TWEAK "${_git_commit_count}")
+    endif()
+endif()
+
+if(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _git_short_hash
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _git_hash_res
+        ERROR_QUIET
+    )
+    if(_git_hash_res EQUAL 0 AND NOT "${_git_short_hash}" STREQUAL "")
+        set(DEEPDIVE_GIT_HASH "${_git_short_hash}")
+    endif()
+endif()
+
+project(DeepDive
+    VERSION "${DEEPDIVE_VERSION_MAJOR}.${DEEPDIVE_VERSION_MINOR}.${DEEPDIVE_VERSION_PATCH}.${DEEPDIVE_VERSION_TWEAK}"
+    DESCRIPTION "Procedural 3D Underwater World Tech Demo (Qt6 / OpenGL 3.3)"
+    LANGUAGES CXX
+)
+
+message(STATUS "DeepDive version: ${PROJECT_VERSION} (tag: ${DEEPDIVE_GIT_TAG}, commit: ${DEEPDIVE_GIT_HASH})")
 
 project(DeepDive
     VERSION "${DEEPDIVE_VERSION_MAJOR}.${DEEPDIVE_VERSION_MINOR}.${DEEPDIVE_VERSION_PATCH}.${DEEPDIVE_VERSION_TWEAK}"
@@ -96,6 +139,9 @@ add_executable(DeepDive WIN32 MACOSX_BUNDLE
     src/DeepDiveWidget.h
     src/DeepDiveWidget.cpp
     src/GamepadInput.h
+
+    .github/workflows/build-release.yml
+
     ${DEEPDIVE_PLATFORM_SOURCES}
 )
 
