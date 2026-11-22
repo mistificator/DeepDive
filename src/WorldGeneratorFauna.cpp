@@ -229,6 +229,42 @@ void appendFaunaTube(std::vector<FaunaVertex>& verts, std::vector<uint32_t>& ind
 // COLLISION WORLD (O(1) пространственная сетка + скольжение по нормалям)
 // ============================================================================
 
+float CollisionWorld::sampleHeight(float x, float z) const {
+    if (heightField.empty() || heightGridSize < 2) {
+        return ProcMath::sampleTerrainHeight(x, z, seed);
+    }
+    const float fx = (x + worldHalfSize) / heightCellSize;
+    const float fz = (z + worldHalfSize) / heightCellSize;
+    const int maxIdx = heightGridSize - 2;
+
+    const int ix = std::clamp(static_cast<int>(std::floor(fx)), 0, maxIdx);
+    const int iz = std::clamp(static_cast<int>(std::floor(fz)), 0, maxIdx);
+    const float tx = ProcMath::clamp(fx - static_cast<float>(ix), 0.0f, 1.0f);
+    const float tz = ProcMath::clamp(fz - static_cast<float>(iz), 0.0f, 1.0f);
+
+    const size_t row0 = static_cast<size_t>(iz) * heightGridSize + ix;
+    const size_t row1 = row0 + heightGridSize;
+
+    const float h00 = heightField[row0];
+    const float h10 = heightField[row0 + 1];
+    const float h01 = heightField[row1];
+    const float h11 = heightField[row1 + 1];
+
+    return ProcMath::mix(ProcMath::mix(h00, h10, tx), ProcMath::mix(h01, h11, tx), tz);
+}
+
+QVector3D CollisionWorld::sampleNormal(float x, float z) const {
+    if (heightField.empty() || heightGridSize < 2) {
+        return ProcMath::sampleTerrainNormal(x, z, seed);
+    }
+    const float eps = heightCellSize;
+    const float hL = sampleHeight(x - eps, z);
+    const float hR = sampleHeight(x + eps, z);
+    const float hD = sampleHeight(x, z - eps);
+    const float hU = sampleHeight(x, z + eps);
+    return QVector3D(hL - hR, 2.0f * eps, hD - hU).normalized();
+}
+
 void CollisionWorld::buildGrid() {
     const int totalCells = chunksPerSide * chunksPerSide;
     cellSpheres.assign(totalCells, {});
@@ -1005,7 +1041,7 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
         for (int i = 0; i <= rings; ++i) {
             float t = static_cast<float>(i) / rings;
             float z = 0.65f - t * 1.40f;
-            float profile = std::sin(t * PI);
+            float profile = std::max(0.0f, std::sin(t * PI));
             float rx = 0.16f * std::pow(profile, 0.75f);
             float ry = 0.28f * std::pow(profile, 0.65f);
 
@@ -1015,8 +1051,14 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
                 float a = (TWO_PI * j) / segs;
                 float cx = std::cos(a), sy = std::sin(a);
                 QVector3D p(cx * rx, sy * ry, z);
-                QVector3D n(cx / std::max(rx, 0.02f), sy / std::max(ry, 0.02f), (0.5f - t) * 0.6f);
-                n.normalize();
+                QVector3D n;
+                if (i == 0) {
+                    n = QVector3D(0.0f, 0.0f, 1.0f);
+                } else if (i == rings) {
+                    n = QVector3D(0.0f, 0.0f, -1.0f);
+                } else {
+                    n = QVector3D(cx / std::max(rx, 0.02f), sy / std::max(ry, 0.02f), (0.5f - t) * 0.6f).normalized();
+                }
                 QVector3D col = (sy < -0.2f) ? QVector3D(0.94f, 0.96f, 0.98f) : bodyCol;
                 verts.push_back({p, n, col});
             }
@@ -1031,13 +1073,19 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
             }
         }
 
+        // Основание хвоста надёжно входит внутрь хвостового стебля (тело доходит до z = -0.75)
         uint32_t tb = static_cast<uint32_t>(verts.size());
         QVector3D tailCol(0.98f, 0.44f, 0.16f);
-        verts.push_back({QVector3D(0.0f,  0.0f, -0.68f), QVector3D(1, 0, 0), tailCol});
+        verts.push_back({QVector3D(0.0f,  0.05f, -0.64f), QVector3D(1, 0, 0), tailCol});
+        verts.push_back({QVector3D(0.0f, -0.05f, -0.64f), QVector3D(1, 0, 0), tailCol});
         verts.push_back({QVector3D(0.0f,  0.34f, -1.08f), QVector3D(1, 0, 0), tailCol});
         verts.push_back({QVector3D(0.0f, -0.34f, -1.08f), QVector3D(1, 0, 0), tailCol});
-        verts.push_back({QVector3D(0.0f,  0.0f, -0.92f), QVector3D(1, 0, 0), tailCol});
-        inds.insert(inds.end(), {tb, tb + 1, tb + 3, tb, tb + 3, tb + 2});
+        verts.push_back({QVector3D(0.0f,  0.0f,  -0.90f), QVector3D(1, 0, 0), tailCol});
+        inds.insert(inds.end(), {
+                                    tb + 0, tb + 2, tb + 4,
+                                    tb + 0, tb + 4, tb + 1,
+                                    tb + 1, tb + 4, tb + 3
+                                });
 
         if (withFins) {
             uint32_t db = static_cast<uint32_t>(verts.size());
@@ -1639,7 +1687,7 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
             float t = static_cast<float>(i) / bodySegs;
             float z = 0.72f - t * 2.08f;
 
-            float env = std::sin(std::pow(t, 0.52f) * PI);
+            float env = std::max(0.0f, std::sin(std::pow(t, 0.52f) * PI));
             float rx = 0.08f + 0.70f * std::pow(env, 0.85f) * (1.0f - 0.35f * t);
             float ryUp = 0.08f + 0.56f * std::pow(env, 0.80f);
             float ryDown = 0.08f + 0.74f * std::pow(env, 0.75f) * (1.0f - 0.28f * t);

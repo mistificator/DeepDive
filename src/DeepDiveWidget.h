@@ -7,13 +7,19 @@
 #include <QSet>
 #include <QMatrix4x4>
 #include <array>
-#include <vector>
+#include <atomic>
+#include <cstdint>
 #include <random>
+#include <thread>
 #include <utility>
+#include <vector>
 #include "GpuCapabilities.h"
 #include "GamepadInput.h"
 #include "WorldGenerator.h"
 #include "UnderwaterAudio.h"
+
+class QLabel;
+class QProgressBar;
 
 struct FrustumPlanes {
     std::array<QVector4D, 6> planes; // xyz: нормаль внутрь, w: смещение
@@ -47,6 +53,7 @@ protected:
     void resizeGL(int w, int h) override;
     void paintGL() override;
 
+    void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void keyReleaseEvent(QKeyEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
@@ -81,7 +88,8 @@ private:
     };
 
     void queryOpenGLCapabilities();
-    void createProceduralRockTexture();
+    static std::vector<uint8_t> generateRockTextureData(int size);
+    void uploadRockTextureData(const std::vector<uint8_t>& rgba, int size);
     void createShadowMapBuffer();
     void createWaterSurfaceMesh();
     void resizePostProcessBuffers(int physW, int physH);
@@ -103,8 +111,13 @@ private:
     void gatherAndUploadInstProps(const std::vector<std::pair<int, float>>& chunks, bool forShadow);
     void drawInstPropBatches(bool forShadow, bool countTris);
 
+    void createLoadingOverlay();
+    void setLoadingOverlayVisible(bool visible, const QString& text = {});
+    void toggleFullscreen();
     void setMouseCapture(bool enable);
-    void rebuildWorld(uint32_t seed);
+    void startAsyncWorldLoad(uint32_t seed, bool generateRockTex);
+    void uploadWorldToGpu(WorldData&& world);
+
     void spawnWhalePass(bool nearPlayer);
     float sampleWhaleClearance(float x, float z) const;
     float measureWhaleFreeDist(float x, float z, float yaw, float maxDist) const;
@@ -122,11 +135,20 @@ private:
     std::vector<AdapterCapability> m_adapters;
     QString m_glRendererInfo;
     int m_activeSamples = 8;
-    bool m_vsyncEnabled = true;
     bool m_postProcessEnabled = true;
     bool m_shadowsEnabled = true;
     bool m_wireframeMode = false;
-    bool m_hudVisible = true;
+    bool m_hudVisible = false;
+    bool m_wasMaximizedBeforeFullscreen = false;
+
+    // Экран загрузки (крутилка с нулевым лимитом) и фоновый поток генерации
+    QWidget* m_loadingOverlay = nullptr;
+    QLabel* m_loadingLabel = nullptr;
+    QProgressBar* m_loadingBar = nullptr;
+    std::thread m_loadThread;
+    std::atomic<bool> m_destroying{false};
+    bool m_isLoading = false;
+    bool m_worldReady = false;
 
     WorldData m_world;
     uint32_t m_seed = 42u;
@@ -250,6 +272,8 @@ private:
     QTimer m_timer;
     QElapsedTimer m_clock;
     qint64 m_lastFrameNs = 0;
+    qint64 m_fpsWindowStartNs = 0;
+    int m_fpsFrameCount = 0;
     float m_time = 0.0f;
     float m_fps = 60.0f;
 };

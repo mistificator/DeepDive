@@ -43,7 +43,7 @@ int main(int argc, char* argv[]) {
             .arg(DEEPDIVE_VERSION_STRING)
         );
     window.resize(1440, 810);
-    window.show();
+    window.showMaximized();
 
     return app.exec();
 }

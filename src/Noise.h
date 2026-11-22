@@ -285,9 +285,9 @@ inline float sampleBasinWallFactor(float x, float z, uint32_t seed) {
     return smoothstep(BASIN_INNER_RADIUS, BASIN_RIM_RADIUS, effectiveR);
 }
 
-// Выразительный неровный рельеф: острые хребты, ступенчатые обрывы, трещины Вороного, 22 утёса и 5 впадин
+// Выразительный рельеф без суб-сеточного алиасинга и одноточечных пиков
 inline float sampleTerrainHeight(float x, float z, uint32_t seed) {
-    // 1. Извилистые каньоны с крутыми уступами
+    // 1. Извилистые каньоны с крутыми, но хорошо дискретизируемыми стенками
     float warp = fbm(x * 0.0062f, 0.0f, z * 0.0062f, 3, seed) * 3.4f;
     float mainCanyonX = std::sin(z * 0.0092f + warp) * 108.0f;
     float distMain = std::abs(x - mainCanyonX);
@@ -296,71 +296,69 @@ inline float sampleTerrainHeight(float x, float z, uint32_t seed) {
     float distSide = std::abs(z - sideCanyonZ);
 
     float canyonDist = std::min(distMain, distSide * 1.12f);
-    // Крутые стенки каньона вместо пологих холмов
-    float canyonWall = smoothstep(14.0f, 64.0f, canyonDist) * 24.0f;
+    float canyonWall = smoothstep(14.0f, 66.0f, canyonDist) * 24.0f;
 
-    // Компактная безопасная зона только вокруг стартовой точки камеры (0, 20)
     float startDist = std::sqrt(x * x + (z - 20.0f) * (z - 20.0f));
     float spawnClear = 1.0f - smoothstep(12.0f, 34.0f, startDist);
 
-    // 2. Domain-warping для изломанных геологических структур
-    float dwX = fbm(x * 0.015f, 0.2f, z * 0.015f, 2, seed + 223u) * 22.0f;
-    float dwZ = fbm(x * 0.015f + 7.1f, 0.8f, z * 0.015f - 4.3f, 2, seed + 229u) * 22.0f;
+    // 2. Domain-warping для естественных изломанных геологических структур
+    float dwX = fbm(x * 0.014f, 0.2f, z * 0.014f, 2, seed + 223u) * 24.0f;
+    float dwZ = fbm(x * 0.014f + 7.1f, 0.8f, z * 0.014f - 4.3f, 2, seed + 229u) * 24.0f;
     float wx = x + dwX;
     float wz = z + dwZ;
 
-    // Резкие тектонические ступени / сбросы
-    float faultNoise = fbm(wx * 0.0095f + 1.7f, 0.3f, wz * 0.0095f - 2.1f, 3, seed + 131u);
-    float shelfStep1 = smoothstep(-0.14f, 0.03f, faultNoise) * 15.5f;
-    float shelfStep2 = smoothstep(0.18f, 0.30f, faultNoise) * 12.5f;
+    // Тектонические ступени с переходом шире 2–3 ячеек (убирает «пилу» на диагоналях)
+    float faultNoise = fbm(wx * 0.0092f + 1.7f, 0.3f, wz * 0.0092f - 2.1f, 3, seed + 131u);
+    float shelfStep1 = smoothstep(-0.18f, 0.08f, faultNoise) * 15.0f;
+    float shelfStep2 = smoothstep(0.14f,  0.34f, faultNoise) * 12.0f;
 
-    // 3 частотных каскада острых скальных гребней (макро -> средние утёсы -> мелкие зубцы)
-    float macroRidges = ridgedFbm(wx * 0.0155f, 0.4f, wz * 0.0155f, 4, seed + 41u) * 26.0f;
-    float medCrags    = ridgedFbm(x * 0.041f,  1.1f, z * 0.041f,  3, seed + 89u) * 11.5f;
-    float fineJags    = ridgedFbm(x * 0.098f,  2.3f, z * 0.098f,  2, seed + 163u) * 3.2f;
+    // Сглаженные скальные гряды (без высокочастотных суб-сеточных зубцов)
+    float macroRidges = ridgedFbm(wx * 0.0145f, 0.4f, wz * 0.0145f, 3, seed + 41u) * 24.5f;
+    float medCrags    = ridgedFbm(x * 0.031f,   1.1f, z * 0.031f,   2, seed + 89u) * 8.2f;
+    float softDetail  = fbm(x * 0.055f, 2.3f, z * 0.055f, 2, seed + 163u) * 2.1f;
 
-    // Клеточные трещины и гранёные каменные плиты (Вороной)
-    float vorLarge = voronoiCracks2D(wx * 0.024f, wz * 0.024f, seed + 331u);
-    float vorSmall = voronoiCracks2D(x * 0.062f,  z * 0.062f,  seed + 379u);
-    float riftCarve  = (1.0f - smoothstep(0.03f, 0.20f, vorLarge)) * 9.5f;
-    float rockBlocks = smoothstep(0.08f, 0.38f, vorSmall) * 3.8f;
+    // Широкие геологические разломы (Вороной макро-масштаба без 1-ячеечных щелей)
+    float vorLarge = voronoiCracks2D(wx * 0.020f, wz * 0.020f, seed + 331u);
+    float riftCarve = (1.0f - smoothstep(0.05f, 0.28f, vorLarge)) * 7.8f;
 
-    // Маска песчаных русел vs скалистых участков (в узких руслах остаётся место для травы и ламинарии)
-    float rockyMask = clamp(smoothstep(12.0f, 42.0f, canyonDist) * 0.75f + 0.35f, 0.0f, 1.0f);
+    float rockyMask = clamp(smoothstep(12.0f, 44.0f, canyonDist) * 0.75f + 0.35f, 0.0f, 1.0f);
     float rawInterior = -34.0f
                         + (canyonWall + shelfStep1 + shelfStep2 + macroRidges) * (1.0f - spawnClear * 0.72f)
-                        + (medCrags + rockBlocks - riftCarve) * rockyMask * (1.0f - spawnClear * 0.65f)
-                        + fineJags * (1.0f - spawnClear * 0.50f);
+                        + (medCrags - riftCarve) * rockyMask * (1.0f - spawnClear * 0.65f)
+                        + softDetail * (1.0f - spawnClear * 0.45f);
 
-    // Ступенчатое террасирование придаёт скалам чёткие каменные уступы и полки
-    float terraced = terraceHeight(rawInterior, 7.2f, 0.19f);
-    float terraceWeight = rockyMask * (1.0f - spawnClear) * 0.56f;
+    // Более мягкое террасирование (sharpness = 0.31) — чёткие каменные полки без резкого скачка в 1 вершине
+    float terraced = terraceHeight(rawInterior, 7.6f, 0.31f);
+    float terraceWeight = rockyMask * (1.0f - spawnClear) * 0.48f;
     float interiorHeight = mix(rawInterior, terraced, terraceWeight);
     interiorHeight = clamp(interiorHeight, -38.0f, 20.0f);
 
-    // 3. 22 центральных скальных пика и кекура с гранёными уступами
+    // 3. 22 скальных массива и кекура с массивными вершинными плечами (вместо конусов)
     const auto& spires = getCentralSpires(seed);
     for (const auto& sp : spires) {
         float dx = x - sp.x;
         float dz = z - sp.z;
         float d2 = dx * dx + dz * dz;
-        float maxR = sp.radius * 1.50f;
+        float maxR = sp.radius * 1.55f;
         if (d2 < maxR * maxR) {
             float d = std::sqrt(d2);
-            float angWarp = fbm(dx * 0.072f, 1.4f, dz * 0.072f, 3, seed + 773u) * (sp.radius * 0.38f);
+            float angWarp = fbm(dx * 0.055f, 1.4f, dz * 0.055f, 3, seed + 773u) * (sp.radius * 0.34f);
             float effD = std::max(0.0f, d + angWarp);
             float t = 1.0f - smoothstep(0.0f, sp.radius, effD);
             if (t > 0.001f) {
-                float peakShape = std::pow(t, 1.25f);
-                float facet = ridgedFbm(x * 0.055f, 2.0f, z * 0.055f, 3, seed + 887u) * 10.5f * t;
+                // Куполообразно-ступенчатый профиль с плоской скальной вершиной (производная = 0 на макушке)
+                float peakDome = t * t * (3.0f - 2.0f * t);
+                float shoulder = smoothstep(0.0f, 0.78f, t);
+                float peakShape = mix(peakDome, shoulder, 0.32f);
+                float facet = ridgedFbm(x * 0.034f, 2.0f, z * 0.034f, 2, seed + 887u) * 7.2f * peakDome;
                 float spireLift = sp.height * peakShape + facet;
-                spireLift = mix(spireLift, terraceHeight(spireLift, 6.0f, 0.18f), 0.45f);
+                spireLift = mix(spireLift, terraceHeight(spireLift, 6.8f, 0.30f), 0.38f);
                 interiorHeight += spireLift;
             }
         }
     }
 
-    // 4. 5 глубоких темнеющих абиссальных впадин со ступенчатыми обрывами (до -70 м)
+    // 4. 5 глубоких абиссальных впадин со ступенчатыми обрывами
     const auto& pits = getAbyssalPits(seed);
     for (const auto& pit : pits) {
         float dx = x - pit.x;
@@ -369,31 +367,29 @@ inline float sampleTerrainHeight(float x, float z, uint32_t seed) {
         float outerR = pit.radius * 1.55f;
         if (d2 < outerR * outerR) {
             float d = std::sqrt(d2);
-            float rimJitter = fbm(dx * 0.052f, 0.8f, dz * 0.052f, 3, seed + 1237u) * (pit.radius * 0.28f);
+            float rimJitter = fbm(dx * 0.044f, 0.8f, dz * 0.044f, 3, seed + 1237u) * (pit.radius * 0.26f);
             float effD = std::max(0.0f, d + rimJitter);
 
-            // Скалистый зубчатый гребень вокруг края провала
-            float rimRing = std::exp(-std::pow((effD - pit.radius * 1.04f) / (pit.radius * 0.24f), 2.0f));
-            interiorHeight += rimRing * (9.0f + ridgedFbm(x * 0.048f, 0.0f, z * 0.048f, 2, seed + 1291u) * 5.0f);
+            float rimRing = std::exp(-std::pow((effD - pit.radius * 1.04f) / (pit.radius * 0.26f), 2.0f));
+            interiorHeight += rimRing * (8.5f + ridgedFbm(x * 0.036f, 0.0f, z * 0.036f, 2, seed + 1291u) * 4.0f);
 
-            float pitMask = 1.0f - smoothstep(pit.radius * 0.26f, pit.radius * 0.94f, effD);
+            float pitMask = 1.0f - smoothstep(pit.radius * 0.22f, pit.radius * 0.96f, effD);
             if (pitMask > 0.001f) {
                 float wallSteep = pitMask * pitMask * (3.0f - 2.0f * pitMask);
-                float pitCrags = ridgedFbm(x * 0.068f, 3.1f, z * 0.068f, 2, seed + 1451u) * 4.5f;
+                float pitCrags = fbm(x * 0.052f, 3.1f, z * 0.052f, 2, seed + 1451u) * 3.4f;
                 float targetBottom = -23.0f - pit.depth + pitCrags;
                 float mixedPit = mix(interiorHeight, targetBottom, wallSteep);
-                // Ступенчатые уступы на отвесных стенках провала
                 float wallBand = 4.0f * wallSteep * (1.0f - wallSteep);
-                interiorHeight = mix(mixedPit, terraceHeight(mixedPit, 8.5f, 0.16f), wallBand * 0.60f);
+                interiorHeight = mix(mixedPit, terraceHeight(mixedPit, 9.0f, 0.29f), wallBand * 0.45f);
             }
         }
     }
 
     // 5. Замкнутое скальное кольцо кальдеры по периметру
     float wallFactor = sampleBasinWallFactor(x, z, seed);
-    float crags = ridgedFbm(x * 0.028f, 2.4f, z * 0.028f, 4, seed + 919u) * 30.0f
-                  + fbm(x * 0.065f, 0.0f, z * 0.065f, 2, seed + 313u) * 7.5f;
-    float cliffHeight = terraceHeight(42.0f + crags, 8.0f, 0.20f);
+    float crags = ridgedFbm(x * 0.024f, 2.4f, z * 0.024f, 3, seed + 919u) * 26.0f
+                  + fbm(x * 0.052f, 0.0f, z * 0.052f, 2, seed + 313u) * 6.0f;
+    float cliffHeight = terraceHeight(42.0f + crags, 8.5f, 0.30f);
 
     float steepBlend = wallFactor * wallFactor * (3.0f - 2.0f * wallFactor);
     float h = mix(interiorHeight, cliffHeight, steepBlend);

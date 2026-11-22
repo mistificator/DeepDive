@@ -114,6 +114,7 @@ struct WorldChunk {
     float boundingRadius = 60.0f;
 
     uint32_t terrainBaseVertex = 0;
+    std::array<MeshRange, 4> terrainLodRanges{};
 
     // Статическая уникальная геометрия чанка (абиссальные светящиеся перья и затонувшие корабли)
     MeshRange detailRange;
@@ -137,6 +138,13 @@ struct CollisionWorld {
     std::vector<std::vector<uint32_t>> cellSpheres;
     std::vector<std::vector<uint32_t>> cellObbs;
 
+    int heightGridSize = 0;
+    float heightCellSize = 1.0f;
+    std::vector<float> heightField;
+
+    float sampleHeight(float x, float z) const;
+    QVector3D sampleNormal(float x, float z) const;
+
     void buildGrid();
     QVector3D computeAvoidanceForce(const QVector3D& pos, float probeRadius, float margin) const;
     bool resolveSphereCollision(QVector3D& pos, QVector3D* vel, float radius,
@@ -148,7 +156,6 @@ struct WorldData {
     static constexpr int CHUNKS_PER_SIDE = 20;
     static constexpr float CHUNK_SIZE = 80.0f;
     static constexpr int CHUNK_GRID_N = 48; // 48x48 ячеек (шаг 1.67 м на LOD0; делится на 1, 2, 4, 8)
-    static constexpr int CHUNK_VERTS_PER_CHUNK = (CHUNK_GRID_N + 1) * (CHUNK_GRID_N + 1) + 4 * (CHUNK_GRID_N + 1);
     static constexpr int TERRAIN_LOD_COUNT = 4;
 
     std::vector<EnvVertex> terrainVertices;
@@ -199,7 +206,6 @@ public:
     static WorldData generate(uint32_t seed = 42u);
 
 private:
-    static void buildTerrainLodIndices(WorldData& data);
     static void generateTerrainChunks(WorldData& data, uint32_t seed);
     static void generatePropPrototypes(WorldData& data);
     static void generateChunkProps(WorldData& data, uint32_t seed);

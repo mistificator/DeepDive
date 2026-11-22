@@ -364,19 +364,26 @@ vec4 sampleTriplanar(sampler2D tex, vec3 p, vec3 blend) {
     return tx * blend.x + ty * blend.y + tz * blend.z;
 }
 
-void sampleTriplanarDetail(sampler2D tex, vec3 p, vec3 blend, out vec3 outPerturb, out float outHeight) {
-    vec4 tx = texture(tex, p.yz);
-    vec4 ty = texture(tex, p.xz);
-    vec4 tz = texture(tex, p.xy);
+void sampleTriplanarDetailRot(sampler2D tex, vec3 p, vec3 blend, mat2 rot, vec2 phase,
+                              out vec3 outPerturb, out float outHeight, out float outCavity) {
+    vec2 uvX = rot * p.yz + phase;
+    vec2 uvY = rot * p.xz + phase * 1.37;
+    vec2 uvZ = rot * p.xy - phase * 0.83;
 
-    vec2 nx = tx.rg * 2.0 - 1.0;
-    vec2 ny = ty.rg * 2.0 - 1.0;
-    vec2 nz = tz.rg * 2.0 - 1.0;
+    vec4 tx = texture(tex, uvX);
+    vec4 ty = texture(tex, uvY);
+    vec4 tz = texture(tex, uvZ);
+
+    mat2 invRot = transpose(rot);
+    vec2 nx = invRot * (tx.rg * 2.0 - 1.0);
+    vec2 ny = invRot * (ty.rg * 2.0 - 1.0);
+    vec2 nz = invRot * (tz.rg * 2.0 - 1.0);
 
     outPerturb = vec3(0.0, nx.x, nx.y) * blend.x
                + vec3(ny.x, 0.0, ny.y) * blend.y
                + vec3(nz.x, nz.y, 0.0) * blend.z;
     outHeight  = tx.a * blend.x + ty.a * blend.y + tz.a * blend.z;
+    outCavity  = tx.b * blend.x + ty.b * blend.y + tz.b * blend.z;
 }
 
 float organicCaustics(vec2 p, float t) {
@@ -396,7 +403,7 @@ float organicCaustics(vec2 p, float t) {
     return c2 * c2;
 }
 
-float calcUnderwaterShadow(vec4 lightSpacePos, vec3 geomN, vec3 faceN, vec3 L) {
+float calcUnderwaterShadow(vec4 lightSpacePos, vec3 geomN, vec3 L) {
     if (uEnableShadows == 0) return 1.0;
 
     vec3 projCoords = lightSpacePos.xyz / max(lightSpacePos.w, 0.0001);
@@ -409,8 +416,8 @@ float calcUnderwaterShadow(vec4 lightSpacePos, vec3 geomN, vec3 faceN, vec3 L) {
     vec2 edgeDist = smoothstep(vec2(0.0), vec2(0.08), projCoords.xy) * (1.0 - smoothstep(vec2(0.92), vec2(1.0), projCoords.xy));
     float cascadeFade = edgeDist.x * edgeDist.y;
 
-    float cosTheta = clamp(min(dot(geomN, L), dot(faceN, L)), 0.0, 1.0);
-    float bias = max(0.0042 * (1.0 - cosTheta), 0.0013);
+    float cosTheta = clamp(dot(geomN, L), 0.0, 1.0);
+    float bias = max(0.0042 * (1.0 - cosTheta), 0.0015);
 
     float rndAngle = fract(sin(dot(vWorldPos.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
     float s = sin(rndAngle);
@@ -452,33 +459,28 @@ float calcUnderwaterShadow(vec4 lightSpacePos, vec3 geomN, vec3 faceN, vec3 L) {
 
     return mix(1.0, shadowSum / 16.0, cascadeFade);
 }
-
+)" // здесь слишком длинная строка, принудительно разрываем ее, чтобы компилятор не ругался
+R"(
 void main() {
     vec3 safeN = length(vNormal) > 0.0001 ? normalize(vNormal) : vec3(0.0, 1.0, 0.0);
     vec3 geomN = gl_FrontFacing ? safeN : -safeN;
-
-    vec3 rawFaceN = cross(dFdx(vWorldPos), dFdy(vWorldPos));
-    float faceLen = length(rawFaceN);
-    vec3 trueFaceN = (faceLen > 1e-6) ? (rawFaceN / faceLen) : geomN;
-    if (dot(trueFaceN, geomN) < 0.0) trueFaceN = -trueFaceN;
 
     vec3 viewVec = uCamPos - vWorldPos;
     float dist = length(viewVec);
     vec3 V = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
     vec3 L = normalize(uSunDir);
 
+    float vertexFlatness = (vParam.x < 0.5) ? clamp(1.0 - vParam.y, 0.0, 1.0) : 1.0;
+
     vec3 blendN = abs(geomN);
     if (vParam.x < 0.5) {
-        float faceY = abs(trueFaceN.y);
-        float steepFace = smoothstep(0.62, 0.28, faceY);
-        blendN.y = mix(blendN.y, min(blendN.y, faceY), steepFace);
-
-        float horizLen = length(blendN.xz);
-        float ridgeFallback = (1.0 - smoothstep(0.15, 0.45, horizLen)) * steepFace;
-        blendN.xz = mix(blendN.xz, abs(trueFaceN.xz), ridgeFallback);
+        // Плавное подавление верхней проекции на крутых стенах без полигональных стыков
+        float steepBlend = smoothstep(0.68, 0.25, vertexFlatness);
+        blendN.y = mix(blendN.y, min(blendN.y, vertexFlatness), steepBlend * 0.85);
     }
 
     vec3 blend = max(blendN, vec3(0.0001));
+    blend = blend * blend;
     blend = blend * blend;
     blend /= (blend.x + blend.y + blend.z);
 
@@ -488,41 +490,69 @@ void main() {
     float ao = 1.0;
 
     if (vParam.x < 1.5) {
-        // Глубокий многомасштабный рельеф скал и валунов с выраженным cavity AO
+        const mat2 rotA = mat2( 1.000,  0.000,  0.000,  1.000);
+        const mat2 rotB = mat2( 0.800, -0.600,  0.600,  0.800);
+        const mat2 rotC = mat2(-0.540, -0.841,  0.841, -0.540);
+
         vec3 pMacro, pMicro, pFine;
         float hMacro, hMicro, hFine;
-        sampleTriplanarDetail(uRockTex, vWorldPos * 0.052, blend, pMacro, hMacro);
-        sampleTriplanarDetail(uRockTex, vWorldPos * 0.26,  blend, pMicro, hMicro);
-        float fineWeight = 1.0 - smoothstep(85.0, 210.0, dist);
+        float cMacro, cMicro, cFine;
+
+        sampleTriplanarDetailRot(uRockTex, vWorldPos * 0.036, blend, rotA, vec2(0.0), pMacro, hMacro, cMacro);
+        vec3 warpedPos = vWorldPos + pMacro * 1.45;
+
+        sampleTriplanarDetailRot(uRockTex, warpedPos * 0.19, blend, rotB, vec2(0.37, 0.71), pMicro, hMicro, cMicro);
+
+        float fineWeight = 1.0 - smoothstep(75.0, 195.0, dist);
         if (fineWeight > 0.01) {
-            sampleTriplanarDetail(uRockTex, vWorldPos * 1.10, blend, pFine, hFine);
+            sampleTriplanarDetailRot(uRockTex, warpedPos * 0.88, blend, rotC, vec2(0.61, 0.19), pFine, hFine, cFine);
         } else {
             pFine = pMicro;
             hFine = hMicro;
+            cFine = cMicro;
         }
 
-        vec3 perturb = pMacro * 0.58 + pMicro * 0.48 + pFine * (0.28 * fineWeight);
-        N = normalize(geomN + perturb * 0.86);
+        float strataCoord = vWorldPos.y * 1.55 + hMacro * 4.6 + hMicro * 1.3;
+        float strataWave  = sin(strataCoord);
+        float strataRidge = smoothstep(-0.35, 0.55, strataWave) * 0.14 - 0.06;
+        vec3 strataPerturb = vec3(0.0, cos(strataCoord) * 0.22 * (1.0 - abs(geomN.y)), 0.0);
 
-        float strata = sin(vWorldPos.y * 1.85 + hMacro * 5.2) * 0.085;
-        float detailHeight = hMacro * 0.48 + hMicro * 0.36 + hFine * 0.16;
-        float crevice = smoothstep(0.08, 0.74, detailHeight);
-        ao = crevice * 0.56 + 0.44;
+        vec3 perturb = pMacro * 0.52 + pMicro * 0.50 + pFine * (0.34 * fineWeight) + strataPerturb;
+        N = normalize(geomN + perturb * 0.92);
 
-        // Тёмные минеральные трещины и чуть более яркие освещённые грани камня
-        vec3 creviceTint = mix(uWaterColorDeep * 0.55, vec3(1.0), crevice);
-        baseCol = clamp(baseCol * creviceTint * (0.68 + detailHeight * 0.60 + strata), 0.0, 1.25);
+        float detailHeight = hMacro * 0.44 + hMicro * 0.38 + hFine * 0.18;
+        float cavity       = cMacro * 0.50 + cMicro * 0.35 + cFine * 0.15;
+        float crevice      = smoothstep(0.10, 0.78, cavity * 0.62 + detailHeight * 0.38);
+        ao = crevice * 0.62 + 0.38;
+
+        // Попиксельное отделение крутой скалы от песка/мха строго от гладких нормалей (без квадратных пятен)
+        if (vParam.x < 0.5) {
+            float rockEdgeNoise = (detailHeight - 0.5) * 0.24 + (cavity - 0.5) * 0.16;
+            float smoothUp = min(min(geomN.y, N.y), mix(geomN.y, vertexFlatness, 0.55));
+            float wallMask = smoothstep(0.66, 0.34, smoothUp + rockEdgeNoise);
+            float abyssM   = smoothstep(-24.0, -52.0, vWorldPos.y);
+            vec3 mineralRock = mix(vec3(0.16, 0.22, 0.27), vec3(0.24, 0.30, 0.33), detailHeight);
+            mineralRock = mix(mineralRock, vec3(0.07, 0.10, 0.15), abyssM);
+            baseCol = mix(baseCol, mineralRock, wallMask * 0.82);
+
+            float edgeWear = smoothstep(0.68, 0.92, detailHeight) * wallMask * (1.0 - abyssM);
+            baseCol += vec3(0.055, 0.068, 0.072) * edgeWear;
+        }
+
+        vec3 creviceTint = mix(uWaterColorDeep * 0.46, vec3(1.0), crevice);
+        baseCol = clamp(baseCol * creviceTint * (0.70 + detailHeight * 0.54 + strataRidge), 0.0, 1.25);
     } else if (vParam.x < 4.5) {
+        const mat2 rotOrg = mat2(0.800, -0.600, 0.600, 0.800);
         vec3 pOrg;
-        float hOrg;
-        sampleTriplanarDetail(uRockTex, vWorldPos * 0.46, blend, pOrg, hOrg);
+        float hOrg, cOrg;
+        sampleTriplanarDetailRot(uRockTex, vWorldPos * 0.46, blend, rotOrg, vec2(0.2, 0.4), pOrg, hOrg, cOrg);
         float orgRelief = (vParam.x < 2.5) ? 0.34 : 0.24;
         N = normalize(geomN + pOrg * orgRelief);
         ao = 0.78 + hOrg * 0.22;
         baseCol *= (0.82 + hOrg * 0.36);
     }
 
-    float shadow = calcUnderwaterShadow(vLightSpacePos, geomN, trueFaceN, L);
+    float shadow = calcUnderwaterShadow(vLightSpacePos, geomN, L);
     float directShadow = mix(0.14, 1.0, shadow);
 
     float abyssDark = smoothstep(-22.0, -56.0, vWorldPos.y);
@@ -548,9 +578,8 @@ void main() {
     float caust = organicCaustics(caustProj, uTime);
     float depthAtten = clamp((vWorldPos.y + 34.0) / 58.0, 0.08, 1.0);
     float underwaterMask = 1.0 - smoothstep(26.4, 28.4, vWorldPos.y);
-    float vertexFlatness = (vParam.x < 0.5) ? clamp(1.0 - vParam.y, 0.0, 1.0) : 1.0;
     float slopeUp = min(max(geomN.y, 0.0), vertexFlatness);
-    float slopeCaustFade = smoothstep(0.36, 0.78, slopeUp);
+    float slopeCaustFade = smoothstep(0.42, 0.82, slopeUp);
     float sunFaceFade = smoothstep(0.08, 0.46, dot(geomN, L));
     float caustMask = slopeCaustFade * sunFaceFade * depthAtten * ao * shadow * underwaterMask * (1.0 - abyssDark);
 

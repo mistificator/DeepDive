@@ -4,8 +4,13 @@
 #include <QCursor>
 #include <QFocusEvent>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QProgressBar>
+#include <QResizeEvent>
+#include <QVBoxLayout>
 #include <QOpenGLContext>
 #include <QSurface>
 #include <algorithm>
@@ -13,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <thread>
 #include <utility>
 
@@ -139,13 +145,18 @@ DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget*
     m_rng.seed(rd() ^ timeSeed);
 
     m_audioEngine = new UnderwaterAudioEngine(this);
+    createLoadingOverlay();
 
     connect(&m_timer, &QTimer::timeout, this, QOverload<>::of(&DeepDiveWidget::update));
-    m_timer.start(0);
     m_clock.start();
 }
 
 DeepDiveWidget::~DeepDiveWidget() {
+    m_destroying.store(true);
+    if (m_loadThread.joinable()) {
+        m_loadThread.join();
+    }
+
     setMouseCapture(false);
     makeCurrent();
     destroyPostProcessBuffers();
@@ -188,6 +199,85 @@ DeepDiveWidget::~DeepDiveWidget() {
     if (m_particleVAO) glDeleteVertexArrays(1, &m_particleVAO);
     if (m_particleVBO) glDeleteBuffers(1, &m_particleVBO);
     doneCurrent();
+}
+
+void DeepDiveWidget::createLoadingOverlay() {
+    m_loadingOverlay = new QWidget(this);
+    m_loadingOverlay->setAttribute(Qt::WA_StyledBackground, true);
+    m_loadingOverlay->setStyleSheet(
+        "QWidget { background-color: rgb(4, 18, 28); }"
+        "QLabel { color: rgb(205, 242, 255); font-family: 'Segoe UI'; background: transparent; }"
+        "QProgressBar { border: 1px solid rgba(110, 215, 235, 110); border-radius: 6px; "
+        "               background-color: rgba(8, 36, 52, 220); height: 14px; }"
+        "QProgressBar::chunk { background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+        "                      stop:0 rgb(30, 175, 195), stop:1 rgb(115, 240, 225)); border-radius: 5px; }"
+        );
+
+    auto* layout = new QVBoxLayout(m_loadingOverlay);
+    layout->setAlignment(Qt::AlignCenter);
+    layout->setSpacing(14);
+
+    auto* title = new QLabel("Deep Dive", m_loadingOverlay);
+    title->setAlignment(Qt::AlignCenter);
+    title->setStyleSheet("font-size: 26px; font-weight: 600; letter-spacing: 2px;");
+
+    m_loadingLabel = new QLabel("Генерация подводного мира...", m_loadingOverlay);
+    m_loadingLabel->setAlignment(Qt::AlignCenter);
+    m_loadingLabel->setStyleSheet("font-size: 13px; color: rgba(190, 235, 248, 200);");
+
+    m_loadingBar = new QProgressBar(m_loadingOverlay);
+    m_loadingBar->setRange(0, 0); // бесконечная крутилка (indeterminate)
+    m_loadingBar->setTextVisible(false);
+    m_loadingBar->setFixedWidth(360);
+
+    layout->addWidget(title);
+    layout->addWidget(m_loadingLabel);
+    layout->addWidget(m_loadingBar, 0, Qt::AlignCenter);
+
+    m_loadingOverlay->setGeometry(rect());
+    m_loadingOverlay->show();
+}
+
+void DeepDiveWidget::setLoadingOverlayVisible(bool visible, const QString& text) {
+    if (!m_loadingOverlay) return;
+    if (!text.isEmpty() && m_loadingLabel) {
+        m_loadingLabel->setText(text);
+    }
+    m_loadingOverlay->setGeometry(rect());
+    m_loadingOverlay->setVisible(visible);
+    if (visible) {
+        m_loadingOverlay->raise();
+    }
+}
+
+void DeepDiveWidget::toggleFullscreen() {
+    QWidget* win = window();
+    if (!win) return;
+
+    const bool wasCaptured = m_mouseCaptured;
+    if (wasCaptured) {
+        m_skipNextMouseDelta = true;
+    }
+
+    if (win->isFullScreen()) {
+        if (m_wasMaximizedBeforeFullscreen) {
+            win->showMaximized();
+        } else {
+            win->showNormal();
+        }
+    } else {
+        m_wasMaximizedBeforeFullscreen = win->isMaximized();
+        win->showFullScreen();
+    }
+
+    if (wasCaptured) {
+        QTimer::singleShot(0, this, [this]() {
+            if (m_mouseCaptured && isActiveWindow()) {
+                m_skipNextMouseDelta = true;
+                QCursor::setPos(mapToGlobal(QPoint(width() / 2, height() / 2)));
+            }
+        });
+    }
 }
 
 void DeepDiveWidget::setMouseCapture(bool enable) {
@@ -309,9 +399,10 @@ void DeepDiveWidget::createWaterSurfaceMesh() {
     glBindVertexArray(0);
 }
 
-void DeepDiveWidget::createProceduralRockTexture() {
-    constexpr int N = 1024;
-    std::vector<float> heightMap(N * N);
+std::vector<uint8_t> DeepDiveWidget::generateRockTextureData(int size) {
+    const int N = size;
+    std::vector<float> heightMap(static_cast<size_t>(N) * N);
+    std::vector<float> cavityMap(static_cast<size_t>(N) * N);
 
     unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
     std::vector<std::thread> workers;
@@ -326,30 +417,52 @@ void DeepDiveWidget::createProceduralRockTexture() {
                 for (int x = 0; x < N; ++x) {
                     float u = static_cast<float>(x) / N;
 
+                    // Плавный бесшовный domain-warp, разрушающий регулярность ячеек Вороного
+                    float wU = (ProcMath::tileableNoise2D(u, v, 4, 113u) - 0.5f) * 0.14f
+                               + (ProcMath::tileableNoise2D(u, v, 8, 127u) - 0.5f) * 0.06f;
+                    float wV = (ProcMath::tileableNoise2D(u, v, 4, 131u) - 0.5f) * 0.14f
+                               + (ProcMath::tileableNoise2D(u, v, 8, 137u) - 0.5f) * 0.06f;
+                    float wu = ProcMath::fract(u + wU + 1.0f);
+                    float wv = ProcMath::fract(v + wV + 1.0f);
+
+                    // Многооктавная шероховатость камня
                     float fbmVal = 0.0f;
-                    fbmVal += 0.36f * ProcMath::tileableNoise2D(u, v, 8,   101u);
-                    fbmVal += 0.24f * ProcMath::tileableNoise2D(u, v, 16,  202u);
-                    fbmVal += 0.16f * ProcMath::tileableNoise2D(u, v, 32,  303u);
-                    fbmVal += 0.11f * ProcMath::tileableNoise2D(u, v, 64,  404u);
-                    fbmVal += 0.07f * ProcMath::tileableNoise2D(u, v, 128, 505u);
-                    fbmVal += 0.06f * ProcMath::tileableNoise2D(u, v, 256, 606u);
+                    fbmVal += 0.30f * ProcMath::tileableNoise2D(wu, wv, 8,   101u);
+                    fbmVal += 0.24f * ProcMath::tileableNoise2D(wu, wv, 16,  202u);
+                    fbmVal += 0.18f * ProcMath::tileableNoise2D(u,  v,  32,  303u);
+                    fbmVal += 0.13f * ProcMath::tileableNoise2D(u,  v,  64,  404u);
+                    fbmVal += 0.09f * ProcMath::tileableNoise2D(u,  v,  128, 505u);
+                    fbmVal += 0.06f * ProcMath::tileableNoise2D(u,  v,  256, 606u);
 
-                    float vor1 = ProcMath::tileableVoronoi2D(u, v, 8,  707u);
-                    float vor2 = ProcMath::tileableVoronoi2D(u, v, 24, 808u);
-                    float cracks = ProcMath::smoothstep(0.02f, 0.22f, vor1) * 0.7f
-                                   + ProcMath::smoothstep(0.02f, 0.18f, vor2) * 0.3f;
+                    // Слоистая текстура осадочных сколов
+                    float strata = 0.5f + 0.5f * std::sin((wv * 16.0f + fbmVal * 2.4f) * TWO_PI * 0.25f);
+                    strata = ProcMath::smoothstep(0.15f, 0.85f, strata);
 
-                    heightMap[y * N + x] = ProcMath::clamp(fbmVal * 0.65f + cracks * 0.35f, 0.0f, 1.0f);
+                    // Искажённые геологические трещины вместо равномерной «брусчатки»
+                    float vor1 = ProcMath::tileableVoronoi2D(wu, wv, 4,  707u);
+                    float vor2 = ProcMath::tileableVoronoi2D(wu, wv, 12, 808u);
+                    float vor3 = ProcMath::tileableVoronoi2D(u,  v,  32, 909u);
+                    float crackMain = ProcMath::smoothstep(0.015f, 0.14f, vor1);
+                    float crackMed  = ProcMath::smoothstep(0.015f, 0.16f, vor2);
+                    float crackFine = ProcMath::smoothstep(0.02f,  0.18f, vor3);
+
+                    float cavity = ProcMath::clamp(crackMain * 0.52f + crackMed * 0.30f + crackFine * 0.18f, 0.0f, 1.0f);
+                    float h = ProcMath::clamp(fbmVal * 0.54f + strata * 0.18f + cavity * 0.28f, 0.0f, 1.0f);
+
+                    size_t idx = static_cast<size_t>(y) * N + x;
+                    heightMap[idx] = h;
+                    cavityMap[idx] = cavity;
                 }
             }
         });
     }
     for (auto& th : workers) th.join();
 
-    std::vector<uint8_t> rgba(N * N * 4);
+    std::vector<uint8_t> rgba(static_cast<size_t>(N) * N * 4);
     const int mask = N - 1;
-    const float normalStrength = 7.4f;
+    const float normalStrength = 8.2f;
 
+    // 3x3 оператор Собеля даёт чистые и чёткие нормали без пиксельной ряби
     for (int y = 0; y < N; ++y) {
         int yU = (y - 1) & mask;
         int yD = (y + 1) & mask;
@@ -357,25 +470,39 @@ void DeepDiveWidget::createProceduralRockTexture() {
             int xL = (x - 1) & mask;
             int xR = (x + 1) & mask;
 
-            float hL = heightMap[y * N + xL];
-            float hR = heightMap[y * N + xR];
-            float hU = heightMap[yU * N + x];
-            float hD = heightMap[yD * N + x];
+            float hTL = heightMap[static_cast<size_t>(yU) * N + xL];
+            float hT  = heightMap[static_cast<size_t>(yU) * N + x ];
+            float hTR = heightMap[static_cast<size_t>(yU) * N + xR];
+            float hL  = heightMap[static_cast<size_t>(y ) * N + xL];
+            float hR  = heightMap[static_cast<size_t>(y ) * N + xR];
+            float hBL = heightMap[static_cast<size_t>(yD) * N + xL];
+            float hB  = heightMap[static_cast<size_t>(yD) * N + x ];
+            float hBR = heightMap[static_cast<size_t>(yD) * N + xR];
 
-            QVector3D norm((hL - hR) * normalStrength, (hU - hD) * normalStrength, 1.0f);
+            float dx = ((hTL + 2.0f * hL + hBL) - (hTR + 2.0f * hR + hBR)) * 0.25f;
+            float dy = ((hTL + 2.0f * hT + hTR) - (hBL + 2.0f * hB + hBR)) * 0.25f;
+
+            QVector3D norm(dx * normalStrength, dy * normalStrength, 1.0f);
             norm.normalize();
 
-            size_t idx = static_cast<size_t>(y * N + x) * 4;
+            size_t pIdx = static_cast<size_t>(y) * N + x;
+            size_t idx  = pIdx * 4;
             rgba[idx + 0] = static_cast<uint8_t>(ProcMath::clamp(norm.x() * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f);
             rgba[idx + 1] = static_cast<uint8_t>(ProcMath::clamp(norm.y() * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f);
-            rgba[idx + 2] = static_cast<uint8_t>(ProcMath::clamp(norm.z() * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f);
-            rgba[idx + 3] = static_cast<uint8_t>(heightMap[y * N + x] * 255.0f);
+            rgba[idx + 2] = static_cast<uint8_t>(cavityMap[pIdx] * 255.0f); // B = карта трещин / каверн
+            rgba[idx + 3] = static_cast<uint8_t>(heightMap[pIdx] * 255.0f); // A = высота рельефа
         }
     }
 
-    glGenTextures(1, &m_rockTex);
+    return rgba;
+}
+
+void DeepDiveWidget::uploadRockTextureData(const std::vector<uint8_t>& rgba, int size) {
+    if (m_rockTex == 0) {
+        glGenTextures(1, &m_rockTex);
+    }
     glBindTexture(GL_TEXTURE_2D, m_rockTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     glGenerateMipmap(GL_TEXTURE_2D);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -681,7 +808,6 @@ void DeepDiveWidget::initializeGL() {
     glEnable(GL_PROGRAM_POINT_SIZE);
 
     queryOpenGLCapabilities();
-    createProceduralRockTexture();
     createShadowMapBuffer();
 
     m_shadowEnvShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowEnvVert);
@@ -760,14 +886,67 @@ void DeepDiveWidget::initializeGL() {
     glGenVertexArrays(1, &m_particleVAO);
     glGenBuffers(1, &m_particleVBO);
 
-    rebuildWorld(m_seed);
-
     qreal dpr = devicePixelRatioF();
     resizePostProcessBuffers(int(width() * dpr), int(height() * dpr));
+
+    startAsyncWorldLoad(m_seed, true);
 }
 
-void DeepDiveWidget::rebuildWorld(uint32_t seed) {
-    m_world = WorldGenerator::generate(seed);
+void DeepDiveWidget::startAsyncWorldLoad(uint32_t seed, bool generateRockTex) {
+    if (m_isLoading) return;
+    if (m_loadThread.joinable()) {
+        m_loadThread.join();
+    }
+
+    m_isLoading = true;
+    m_timer.stop();
+    m_pressedKeys.clear();
+    setMouseCapture(false);
+    setLoadingOverlayVisible(true, generateRockTex
+                                       ? "Генерация подводного мира и текстур..."
+                                       : "Перегенерация подводного мира...");
+
+    m_loadThread = std::thread([this, seed, generateRockTex]() {
+        std::vector<uint8_t> rockRgba;
+        if (generateRockTex && !m_destroying.load()) {
+            rockRgba = generateRockTextureData(1024);
+        }
+        if (m_destroying.load()) return;
+
+        WorldData generated = WorldGenerator::generate(seed);
+        if (m_destroying.load()) return;
+
+        auto sharedWorld = std::make_shared<WorldData>(std::move(generated));
+        auto sharedRock  = std::make_shared<std::vector<uint8_t>>(std::move(rockRgba));
+
+        QMetaObject::invokeMethod(this, [this, sharedWorld, sharedRock, generateRockTex]() {
+            if (m_destroying.load()) return;
+
+            makeCurrent();
+            if (generateRockTex && !sharedRock->empty()) {
+                uploadRockTextureData(*sharedRock, 1024);
+            }
+            uploadWorldToGpu(std::move(*sharedWorld));
+            doneCurrent();
+
+            m_worldReady       = true;
+            m_isLoading        = false;
+            m_lastFrameNs      = 0;
+            m_fpsWindowStartNs = 0;
+            m_fpsFrameCount    = 0;
+
+            setLoadingOverlayVisible(false);
+            m_timer.start(0);
+            if (!m_userReleasedMouse && isActiveWindow()) {
+                setMouseCapture(true);
+            }
+            update();
+        }, Qt::QueuedConnection);
+    });
+}
+
+void DeepDiveWidget::uploadWorldToGpu(WorldData&& world) {
+    m_world = std::move(world);
     m_chunkLodStates.assign(m_world.chunks.size(), ChunkLodState{});
     m_fishLodState.assign(m_world.fishAgents.size(), 0);
     m_mantaLodState.assign(m_world.mantaAgents.size(), 0);
@@ -904,15 +1083,15 @@ float DeepDiveWidget::sampleWhaleClearance(float x, float z) const {
         return -50.0f - std::max(0.0f, r - safeOuterR) - wallF * 100.0f;
     }
 
+    const auto& col = m_world.collision;
     float maxObsY = std::max({
-        ProcMath::sampleTerrainHeight(x, z, m_seed),
-        ProcMath::sampleTerrainHeight(x + trunkR, z, m_seed),
-        ProcMath::sampleTerrainHeight(x - trunkR, z, m_seed),
-        ProcMath::sampleTerrainHeight(x, z + trunkR, m_seed),
-        ProcMath::sampleTerrainHeight(x, z - trunkR, m_seed)
+        col.sampleHeight(x, z),
+        col.sampleHeight(x + trunkR, z),
+        col.sampleHeight(x - trunkR, z),
+        col.sampleHeight(x, z + trunkR),
+        col.sampleHeight(x, z - trunkR)
     });
 
-    const auto& col = m_world.collision;
     if (!col.cellSpheres.empty()) {
         int cx = std::clamp(static_cast<int>(std::floor((x + col.worldHalfSize) / col.chunkSize)),
                             0, col.chunksPerSide - 1);
@@ -1011,7 +1190,7 @@ void DeepDiveWidget::spawnWhalePass(bool nearPlayer) {
     m_whale.phase          = phaseDist(m_rng);
 
     auto pickSafeY = [&](float x, float z) {
-        float floorY = ProcMath::sampleTerrainHeight(x, z, m_seed);
+        float floorY = m_world.collision.sampleHeight(x, z);
         return ProcMath::clamp(std::max(cruiseY, floorY + bodyBot + 1.2f), 10.0f, skimCeilingY);
     };
 
@@ -1299,12 +1478,13 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     const float rx =  fz;
     const float rz = -fx;
 
+    const auto& col = m_world.collision;
     float maxLocalFloor = std::max({
-        ProcMath::sampleTerrainHeight(m_whale.pos.x(), m_whale.pos.z(), m_seed),
-        ProcMath::sampleTerrainHeight(m_whale.pos.x() + fx * (halfLen * 0.85f), m_whale.pos.z() + fz * (halfLen * 0.85f), m_seed),
-        ProcMath::sampleTerrainHeight(m_whale.pos.x() + fx * (halfLen * 1.50f), m_whale.pos.z() + fz * (halfLen * 1.50f), m_seed),
-        ProcMath::sampleTerrainHeight(m_whale.pos.x() + rx * (1.25f * sc),      m_whale.pos.z() + rz * (1.25f * sc),      m_seed),
-        ProcMath::sampleTerrainHeight(m_whale.pos.x() - rx * (1.25f * sc),      m_whale.pos.z() - rz * (1.25f * sc),      m_seed)
+        col.sampleHeight(m_whale.pos.x(), m_whale.pos.z()),
+        col.sampleHeight(m_whale.pos.x() + fx * (halfLen * 0.85f), m_whale.pos.z() + fz * (halfLen * 0.85f)),
+        col.sampleHeight(m_whale.pos.x() + fx * (halfLen * 1.50f), m_whale.pos.z() + fz * (halfLen * 1.50f)),
+        col.sampleHeight(m_whale.pos.x() + rx * (1.25f * sc),      m_whale.pos.z() + rz * (1.25f * sc)),
+        col.sampleHeight(m_whale.pos.x() - rx * (1.25f * sc),      m_whale.pos.z() - rz * (1.25f * sc))
     });
 
     float desiredAlt = m_whaleSurfacing
@@ -1340,16 +1520,16 @@ void DeepDiveWidget::updateWhaleNavigation(float dt) {
     for (int i = 0; i < 3; ++i) {
         const auto& pt = checkPts[i];
         float reqClear = (i == 0) ? (bodyBot + 0.5f) : (0.65f * sc + 0.5f);
-        float h = ProcMath::sampleTerrainHeight(pt.x(), pt.z(), m_seed);
+        float h = col.sampleHeight(pt.x(), pt.z());
         float reqY = h + reqClear;
         if (reqY > m_whale.pos.y()) {
             neededMinY = std::max(neededMinY, std::min(reqY, activeCeilingY));
         }
         if (reqY > activeCeilingY) {
-            float hPx = ProcMath::sampleTerrainHeight(pt.x() + gradStep, pt.z(), m_seed);
-            float hNx = ProcMath::sampleTerrainHeight(pt.x() - gradStep, pt.z(), m_seed);
-            float hPz = ProcMath::sampleTerrainHeight(pt.x(), pt.z() + gradStep, m_seed);
-            float hNz = ProcMath::sampleTerrainHeight(pt.x(), pt.z() - gradStep, m_seed);
+            float hPx = col.sampleHeight(pt.x() + gradStep, pt.z());
+            float hNx = col.sampleHeight(pt.x() - gradStep, pt.z());
+            float hPz = col.sampleHeight(pt.x(), pt.z() + gradStep);
+            float hNz = col.sampleHeight(pt.x(), pt.z() - gradStep);
             QVector3D outDir(hNx - hPx, 0.0f, hNz - hPz);
             if (outDir.lengthSquared() < 0.25f) outDir = QVector3D(-pt.x(), 0.0f, -pt.z());
             if (outDir.lengthSquared() > 1e-4f) {
@@ -1526,7 +1706,7 @@ void DeepDiveWidget::updateAnglerAgents(float dt) {
         QVector3D horizToHome(toHome.x(), 0.0f, toHome.z());
         float homeDist = horizToHome.length();
 
-        float floorY = ProcMath::sampleTerrainHeight(a.pos.x(), a.pos.z(), m_seed);
+        float floorY = m_world.collision.sampleHeight(a.pos.x(), a.pos.z());
         float maxPitY = std::min(a.homeCenter.y() + 14.0f, -24.0f);
         bool stalking = (distToCam < DETECT_RADIUS);
 
@@ -1738,6 +1918,13 @@ void DeepDiveWidget::resizeGL(int w, int h) {
     resizePostProcessBuffers(int(w * dpr), int(h * dpr));
 }
 
+void DeepDiveWidget::resizeEvent(QResizeEvent* event) {
+    QOpenGLWidget::resizeEvent(event);
+    if (m_loadingOverlay) {
+        m_loadingOverlay->setGeometry(rect());
+    }
+}
+
 QVector3D DeepDiveWidget::cameraForward() const {
     return QVector3D(
                std::sin(m_yaw) * std::cos(m_pitch),
@@ -1760,10 +1947,11 @@ void DeepDiveWidget::updateSimulation(float dt) {
         m_pitch += gp.lookY * 1.65f * dt;
         m_pitch  = ProcMath::clamp(m_pitch, -1.48f, 1.48f);
 
-        if (gp.toggleBiome)   m_paletteIndex = (m_paletteIndex + 1) % 4;
-        if (gp.togglePostFx)  m_postProcessEnabled = !m_postProcessEnabled;
-        if (gp.toggleShadows) m_shadowsEnabled = !m_shadowsEnabled;
-        if (gp.toggleHud)     m_hudVisible = !m_hudVisible;
+        if (gp.toggleBiome)     m_paletteIndex = (m_paletteIndex + 1) % 4;
+        if (gp.togglePostFx)    m_postProcessEnabled = !m_postProcessEnabled;
+        if (gp.toggleShadows)   m_shadowsEnabled = !m_shadowsEnabled;
+        if (gp.toggleHud)       m_hudVisible = !m_hudVisible;
+        if (gp.toggleWireframe) m_wireframeMode = !m_wireframeMode;
         if (gp.toggleMute && m_audioEngine) m_audioEngine->toggleMute();
         if (gp.volumeUp   && m_audioEngine) m_audioEngine->adjustVolume(0.05f);
         if (gp.volumeDown && m_audioEngine) m_audioEngine->adjustVolume(-0.05f);
@@ -1774,7 +1962,8 @@ void DeepDiveWidget::updateSimulation(float dt) {
         }
         if (gp.regenWorld) {
             m_seed += 17u;
-            rebuildWorld(m_seed);
+            startAsyncWorldLoad(m_seed, false);
+            return;
         }
     }
 
@@ -1856,14 +2045,36 @@ void DeepDiveWidget::updateSimulation(float dt) {
 }
 
 void DeepDiveWidget::paintGL() {
-    qint64 nowNs = m_clock.nsecsElapsed();
-    float dt = (m_lastFrameNs == 0) ? 0.016f : (nowNs - m_lastFrameNs) * 1e-9f;
+    if (!m_worldReady || m_isLoading) {
+        glClearColor(0.015f, 0.07f, 0.11f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        return;
+    }
+
+    const qint64 nowNs = m_clock.nsecsElapsed();
+    const float rawDt = (m_lastFrameNs == 0) ? 0.016f : (nowNs - m_lastFrameNs) * 1e-9f;
     m_lastFrameNs = nowNs;
-    dt = std::min(dt, 0.05f);
+
+    if (m_fpsWindowStartNs == 0) {
+        m_fpsWindowStartNs = nowNs;
+    }
+    ++m_fpsFrameCount;
+    const double elapsedSec = (nowNs - m_fpsWindowStartNs) * 1e-9;
+    if (elapsedSec >= 0.5) {
+        m_fps = static_cast<float>(m_fpsFrameCount / elapsedSec);
+        m_fpsFrameCount = 0;
+        m_fpsWindowStartNs = nowNs;
+    }
+
+    const float dt = std::min(rawDt, 0.05f);
     m_time += dt;
-    m_fps = m_fps * 0.92f + (1.0f / std::max(dt, 0.0001f)) * 0.08f;
 
     updateSimulation(dt);
+    if (m_isLoading) {
+        glClearColor(0.015f, 0.07f, 0.11f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        return;
+    }
 
     qreal dpr = devicePixelRatioF();
     int physW = std::max(64, int(width() * dpr));
@@ -1991,7 +2202,7 @@ void DeepDiveWidget::paintGL() {
             shadowChunks.emplace_back(i, d);
 
             int sLod = (d < 85.0f) ? 0 : (d < 165.0f ? 1 : (d < 260.0f ? 2 : 3));
-            const auto& range = m_world.terrainLodRanges[sLod];
+            const auto& range = chunk.terrainLodRanges[sLod];
             const void* idxPtr = reinterpret_cast<const void*>(
                 static_cast<uintptr_t>(range.indexOffset) * sizeof(uint32_t));
             glDrawElementsBaseVertex(GL_TRIANGLES,
@@ -2113,7 +2324,7 @@ void DeepDiveWidget::paintGL() {
         m_stats.lodCounts[st.terrainLod]++;
         visibleChunks.emplace_back(i, d);
 
-        const auto& range = m_world.terrainLodRanges[st.terrainLod];
+        const auto& range = chunk.terrainLodRanges[st.terrainLod];
         const void* idxPtr = reinterpret_cast<const void*>(
             static_cast<uintptr_t>(range.indexOffset) * sizeof(uint32_t));
         glDrawElementsBaseVertex(GL_TRIANGLES,
@@ -2318,7 +2529,7 @@ void DeepDiveWidget::paintGL() {
     glBindVertexArray(0);
 
     // ========================================================================
-    // HUD (скрывается / показывается по клавише ` / ё или Back на геймпаде)
+    // HUD (скрыт по умолчанию, включается клавишей ` / ё или Back на геймпаде)
     // ========================================================================
     if (m_hudVisible) {
         QPainter painter(this);
@@ -2345,7 +2556,7 @@ void DeepDiveWidget::paintGL() {
         QString hud = QString(
                           "GPU: %1 | %2x MSAA | Shadows: %3 | PostFX: %4 | Audio: %5 | Pad: %6 | FPS: %7\n"
                           "Chunks: %8/%9 (LOD0:%10 LOD1:%11 LOD2:%12 LOD3:%13) | Props: %14 | Tris: %15k | Fish: %16+%17 | Mantas: %18+%19 | Anglers: %20\n"
-                          "Depth: %21m | R: %22m %23 | Seed: %24 | Biome: %25 | [Mouse/Pad] Look [Esc] Cursor/Exit [`] HUD [B] Biome [P] PostFX [K] Whale"
+                          "Depth: %21m | R: %22m %23 | Seed: %24 | Biome: %25 | [Alt+Enter] Fullscreen [Esc] Cursor [`] HUD [F/R3] Wire [B] Biome [K] Whale"
                           ).arg(m_glRendererInfo)
                           .arg(m_activeSamples)
                           .arg(m_shadowsEnabled ? "ON" : "OFF")
@@ -2378,6 +2589,28 @@ void DeepDiveWidget::paintGL() {
 }
 
 void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
+    if ((event->modifiers() & Qt::AltModifier) &&
+        (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
+        toggleFullscreen();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_Escape) {
+        if (m_mouseCaptured) {
+            m_userReleasedMouse = true;
+            setMouseCapture(false);
+        }
+        else {
+            close();
+        }
+        return;
+    }
+
+    if (!m_worldReady || m_isLoading) {
+        return;
+    }
+
     const QString txt = event->text();
     const bool isHudToggle = (event->key() == Qt::Key_QuoteLeft ||
                               event->key() == Qt::Key_AsciiTilde ||
@@ -2389,33 +2622,18 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
-    if (event->key() == Qt::Key_Escape) {
-        if (m_mouseCaptured) {
-            m_userReleasedMouse = true;
-            setMouseCapture(false);
-        } else {
-            close();
-        }
-        return;
-    }
-
     m_pressedKeys.insert(event->key());
     if (event->key() == Qt::Key_B) {
         m_paletteIndex = (m_paletteIndex + 1) % 4;
     } else if (event->key() == Qt::Key_R) {
         m_seed += 17u;
-        makeCurrent();
-        rebuildWorld(m_seed);
-        doneCurrent();
+        startAsyncWorldLoad(m_seed, false);
     } else if (event->key() == Qt::Key_P) {
         m_postProcessEnabled = !m_postProcessEnabled;
     } else if (event->key() == Qt::Key_L) {
         m_shadowsEnabled = !m_shadowsEnabled;
     } else if (event->key() == Qt::Key_F) {
         m_wireframeMode = !m_wireframeMode;
-    } else if (event->key() == Qt::Key_V) {
-        m_vsyncEnabled = !m_vsyncEnabled;
-        m_timer.setInterval(m_vsyncEnabled ? 0 : 1);
     } else if (event->key() == Qt::Key_M) {
         if (m_audioEngine) m_audioEngine->toggleMute();
     } else if (event->key() == Qt::Key_K) {
@@ -2433,6 +2651,7 @@ void DeepDiveWidget::keyReleaseEvent(QKeyEvent* event) {
 }
 
 void DeepDiveWidget::mousePressEvent(QMouseEvent* event) {
+    if (!m_worldReady || m_isLoading) return;
     if (event->button() == Qt::LeftButton && !m_mouseCaptured) {
         m_userReleasedMouse = false;
         setMouseCapture(true);
@@ -2440,6 +2659,7 @@ void DeepDiveWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void DeepDiveWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (!m_worldReady || m_isLoading) return;
     if (!m_mouseCaptured) {
         if (!m_userReleasedMouse && isActiveWindow()) {
             setMouseCapture(true);
@@ -2473,7 +2693,7 @@ void DeepDiveWidget::mouseReleaseEvent(QMouseEvent* event) {
 
 void DeepDiveWidget::focusInEvent(QFocusEvent* event) {
     QOpenGLWidget::focusInEvent(event);
-    if (!m_userReleasedMouse) {
+    if (m_worldReady && !m_isLoading && !m_userReleasedMouse) {
         setMouseCapture(true);
     }
 }
