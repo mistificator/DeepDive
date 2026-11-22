@@ -1804,13 +1804,23 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
         }
 
         auto addFinQuad = [&](const QVector3D& p0, const QVector3D& p1, const QVector3D& p2, const QVector3D& p3,
-                              const QVector3D& n, const QVector3D& col) {
+                              const QVector3D& refNormal, const QVector3D& col) {
+            QVector3D faceN = QVector3D::crossProduct(p1 - p0, p2 - p0)
+            + QVector3D::crossProduct(p2 - p0, p3 - p0);
+            const bool flip = QVector3D::dotProduct(faceN, refNormal) < 0.0f;
+            if (flip) faceN = -faceN;
+            const QVector3D n = (faceN.lengthSquared() > 1e-6f) ? faceN.normalized() : refNormal.normalized();
+
             uint32_t b = static_cast<uint32_t>(verts.size());
             verts.push_back({p0, n, col});
             verts.push_back({p1, n, col});
             verts.push_back({p2, n, col});
             verts.push_back({p3, n, col});
-            inds.insert(inds.end(), {b, b + 1, b + 2, b, b + 2, b + 3});
+            if (!flip) {
+                inds.insert(inds.end(), {b, b + 1, b + 2, b, b + 2, b + 3});
+            } else {
+                inds.insert(inds.end(), {b, b + 2, b + 1, b, b + 3, b + 2});
+            }
         };
 
         addFinQuad(QVector3D(0.0f,  0.14f, -1.28f),
