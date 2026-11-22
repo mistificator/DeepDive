@@ -138,6 +138,8 @@ add_executable(DeepDive WIN32 MACOSX_BUNDLE
     src/UnderwaterAudio.cpp
     src/DeepDiveWidget.h
     src/DeepDiveWidget.cpp
+    src/DeepDiveEngine.h
+    src/DeepDiveEngine.cpp
     src/GamepadInput.h
 
     .github/workflows/build-release.yml
