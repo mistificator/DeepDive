@@ -1,7 +1,8 @@
 #include "DeepDiveRender.h"
 #include "DeepDiveEngine.h"
 #include "Noise.h"
-#include "Shaders.h"
+#include "ShadersGeometry.h"
+#include "ShadersAtmosphere.h"
 #include <QOpenGLContext>
 #include <QOpenGLFunctions_4_0_Core>
 #include <QOpenGLVersionFunctionsFactory>

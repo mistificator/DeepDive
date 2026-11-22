@@ -130,7 +130,8 @@ add_executable(DeepDive WIN32 MACOSX_BUNDLE
     src/main.cpp
     src/GpuCapabilities.h
     src/Noise.h
-    src/Shaders.h
+    src/ShadersGeometry.h
+    src/ShadersAtmosphere.h
     src/WorldGenerator.h
     src/WorldGeneratorFlora.cpp
     src/WorldGeneratorFauna.cpp
