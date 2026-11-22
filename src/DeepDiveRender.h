@@ -13,6 +13,7 @@
 #include "WorldGenerator.h"
 
 class DeepDiveEngine;
+class QOpenGLFunctions_4_0_Core;
 
 struct FrustumPlanes {
     std::array<QVector4D, 6> planes; // xyz: inward normal, w: plane offset
@@ -64,14 +65,20 @@ public:
     void togglePostProcess();
     void toggleShadows();
     void toggleWireframe();
+    void toggleTessellation();
 
     // Telemetry & render state queries
     const FrameRenderStats& stats() const { return m_stats; }
     const QString& glRendererInfo() const { return m_glRendererInfo; }
+    int glMajorVersion() const { return m_glMajorVersion; }
+    int glMinorVersion() const { return m_glMinorVersion; }
+    int maxTessLevel() const { return m_maxTessLevel; }
     int activeSamples() const { return m_activeSamples; }
     bool shadowsEnabled() const { return m_shadowsEnabled; }
     bool postProcessEnabled() const { return m_postProcessEnabled; }
     bool wireframeMode() const { return m_wireframeMode; }
+    bool tessellationSupported() const { return m_tessSupported; }
+    bool tessellationEnabled() const { return m_tessSupported && m_tessEnabled; }
 
 private:
     struct FaunaLodBuffers {
@@ -98,6 +105,12 @@ private:
         bool detailVisible = true;
     };
 
+    bool linkTessProgram(QOpenGLShaderProgram& prog,
+                         const char* vertSrc,
+                         const char* tcsSrc,
+                         const char* tesSrc,
+                         const char* fragSrc);
+
     void queryOpenGLCapabilities(const std::vector<AdapterCapability>& adapters);
     void createShadowMapBuffer();
     void createWaterSurfaceMesh();
@@ -120,8 +133,21 @@ private:
     void gatherAndUploadInstProps(const WorldData& world,
                                   const std::vector<std::pair<int, float>>& chunks,
                                   bool forShadow);
-    void drawInstPropBatches(bool forShadow, bool countTris);
+    void drawInstPropOne(const PropLodBuffers& buf, size_t count, GLenum primitiveMode, bool countTris);
+    void drawInstPropBatches(bool forShadow, bool countTris, bool skipTessRocks = false);
     void cullAndUploadFauna(const DeepDiveEngine& engine, const FrustumPlanes& frustum);
+
+    // Optional OpenGL 4.0+ tessellation interface (owned by QOpenGLContext)
+    QOpenGLFunctions_4_0_Core* m_gl4 = nullptr;
+    int m_glMajorVersion = 3;
+    int m_glMinorVersion = 3;
+    int m_maxTessLevel = 0;
+    bool m_gl4Ready = false;
+    bool m_envTessReady = false;
+    bool m_instPropTessReady = false;
+    bool m_waterTessReady = false;
+    bool m_tessSupported = false;
+    bool m_tessEnabled = false;
 
     // GPU capabilities & settings
     QString m_glRendererInfo;
@@ -138,7 +164,7 @@ private:
     std::vector<uint8_t> m_anglerLodState;
     uint8_t m_whaleLodState = 0;
 
-    // Shader programs
+    // OpenGL 3.3 core shader programs
     QOpenGLShaderProgram m_shadowEnvShader;
     QOpenGLShaderProgram m_shadowInstPropShader;
     QOpenGLShaderProgram m_shadowFaunaShader;
@@ -151,6 +177,11 @@ private:
     QOpenGLShaderProgram m_particleShader;
     QOpenGLShaderProgram m_scatterBlurShader;
     QOpenGLShaderProgram m_postProcessShader;
+
+    // Optional OpenGL 4.0+ hardware tessellation programs
+    QOpenGLShaderProgram m_envTessShader;
+    QOpenGLShaderProgram m_instPropTessShader;
+    QOpenGLShaderProgram m_waterTessShader;
 
     // Textures & static/dynamic geometry buffers
     GLuint m_rockTex = 0;

@@ -1,4 +1,7 @@
 #include <QApplication>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QStringList>
 #include <QSurfaceFormat>
 #include "DeepDiveWidget.h"
 #include "version.h"
@@ -10,6 +13,37 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 #endif
 
+namespace {
+bool probeOpenGLCoreVersion(int major, int minor) {
+    QSurfaceFormat probeFmt;
+    probeFmt.setVersion(major, minor);
+    probeFmt.setProfile(QSurfaceFormat::CoreProfile);
+    probeFmt.setRenderableType(QSurfaceFormat::OpenGL);
+
+    QOpenGLContext ctx;
+    ctx.setFormat(probeFmt);
+    if (!ctx.create()) {
+        return false;
+    }
+
+    QOffscreenSurface surface;
+    surface.setFormat(ctx.format());
+    surface.create();
+    if (!surface.isValid()) {
+        return false;
+    }
+
+    const bool ok = ctx.makeCurrent(&surface);
+    const QSurfaceFormat actual = ctx.format();
+    if (ok) {
+        ctx.doneCurrent();
+    }
+
+    return ok && (actual.majorVersion() > major ||
+                  (actual.majorVersion() == major && actual.minorVersion() >= minor));
+}
+} // namespace
+
 int main(int argc, char* argv[]) {
     qputenv("QT_OPENGL", "desktop");
     qputenv("__NV_PRIME_RENDER_OFFLOAD", "1");
@@ -20,8 +54,22 @@ int main(int argc, char* argv[]) {
     app.setApplicationName("DeepDive");
     app.setApplicationVersion(DEEPDIVE_VERSION_STRING);
 
+    const bool forceGl33 = app.arguments().contains("--gl33");
+    int glMajor = 3;
+    int glMinor = 3;
+
+    if (!forceGl33) {
+        if (probeOpenGLCoreVersion(4, 1)) {
+            glMajor = 4;
+            glMinor = 1;
+        } else if (probeOpenGLCoreVersion(4, 0)) {
+            glMajor = 4;
+            glMinor = 0;
+        }
+    }
+
     QSurfaceFormat fmt;
-    fmt.setVersion(3, 3);
+    fmt.setVersion(glMajor, glMinor);
     fmt.setProfile(QSurfaceFormat::CoreProfile);
     fmt.setRenderableType(QSurfaceFormat::OpenGL);
     fmt.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
@@ -32,8 +80,10 @@ int main(int argc, char* argv[]) {
 
     DeepDiveWidget window;
     window.setWindowTitle(
-        QString("Deep Dive v%1 — Procedural Underwater World (Qt6 / OpenGL 3.3)")
+        QString("Deep Dive v%1 — Procedural Underwater World (Qt6 / OpenGL %2.%3)")
             .arg(DEEPDIVE_VERSION_STRING)
+            .arg(glMajor)
+            .arg(glMinor)
         );
     window.resize(1440, 810);
     window.showMaximized();

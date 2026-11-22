@@ -489,16 +489,22 @@ void DeepDiveWidget::drawHud() {
     const QString padStatus = m_gamepadConnected
                                   ? (m_gamepadIsXInput ? "XInput" : "HID")
                                   : "OFF";
+    const char* tessStatus = !m_render->tessellationSupported()
+                                 ? "N/A"
+                                 : (m_render->tessellationEnabled() ? "ON" : "OFF");
 
     const FrameRenderStats& st = m_render->stats();
 
     const QString hud = QString(
-                            "GPU: %1 | %2x MSAA | Shadows: %3 | PostFX: %4 | Audio: %5 | Pad: %6 | FPS: %7\n"
-                            "Chunks: %8/%9 (LOD0:%10 LOD1:%11 LOD2:%12 LOD3:%13) | Props: %14 | Tris: %15k | Fish: %16+%17 | Mantas: %18+%19 | Anglers: %20\n"
-                            "Depth: %21m | R: %22m %23 | Seed: %24 | Biome: %25 | [Alt+Enter] Fullscreen [Esc] Cursor [`] HUD [F/R3] Wire [B] Biome [K] Whale"
+                            "GPU: %1 | GL %2.%3 | %4x MSAA | Tess: %5 | Shadows: %6 | PostFX: %7 | Audio: %8 | Pad: %9 | FPS: %10\n"
+                            "Chunks: %11/%12 (LOD0:%13 LOD1:%14 LOD2:%15 LOD3:%16) | Props: %17 | Tris: %18k | Fish: %19+%20 | Mantas: %21+%22 | Anglers: %23\n"
+                            "Depth: %24m | R: %25m %26 | Seed: %27 | Biome: %28 | [Alt+Enter] Fullscreen [Esc] Cursor [`] HUD [F/R3] Wire [T] Tess [B] Biome [K] Whale"
                             )
                             .arg(m_render->glRendererInfo())
+                            .arg(m_render->glMajorVersion())
+                            .arg(m_render->glMinorVersion())
                             .arg(m_render->activeSamples())
+                            .arg(tessStatus)
                             .arg(m_render->shadowsEnabled() ? "ON" : "OFF")
                             .arg(m_render->postProcessEnabled() ? "ON" : "OFF")
                             .arg(audioStatus)
@@ -523,8 +529,9 @@ void DeepDiveWidget::drawHud() {
                             .arg(m_seed)
                             .arg(m_engine->biomeName());
 
-    painter.fillRect(QRect(14, 14, 1255, 68), QColor(5, 22, 32, 165));
-    painter.drawText(QRect(24, 18, 1235, 60), Qt::AlignLeft | Qt::AlignVCenter, hud);
+    const int hudW = std::max(600, width() - 28);
+    painter.fillRect(QRect(14, 14, hudW, 68), QColor(5, 22, 32, 165));
+    painter.drawText(QRect(24, 18, hudW - 20, 60), Qt::AlignLeft | Qt::AlignVCenter, hud);
 }
 
 void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
@@ -572,6 +579,8 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
         m_render->toggleShadows();
     } else if (event->key() == Qt::Key_F) {
         m_render->toggleWireframe();
+    } else if (event->key() == Qt::Key_T) {
+        m_render->toggleTessellation();
     } else if (event->key() == Qt::Key_M) {
         if (m_audioEngine) m_audioEngine->toggleMute();
     } else if (event->key() == Qt::Key_K) {

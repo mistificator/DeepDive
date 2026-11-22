@@ -3,7 +3,7 @@
 namespace Shaders {
 
 // ============================================================================
-// ШЕЙДЕРЫ ПРОХОДА КАРТЫ ТЕНЕЙ
+// ШЕЙДЕРЫ ПРОХОДА КАРТЫ ТЕНЕЙ (OpenGL 3.3 Core)
 // ============================================================================
 
 inline const char* ShadowEnvVert = R"(#version 330 core
@@ -314,7 +314,8 @@ void main() {
 }
 )";
 
-inline const char* EnvironmentFrag = R"(#version 330 core
+// Общее тело EnvironmentFrag для GLSL 330 и GLSL 400 (разбито на 2 части для лимита строк MSVC)
+#define DEEPDIVE_ENV_FRAG_PART1 R"(
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec3 vColor;
@@ -459,8 +460,9 @@ float calcUnderwaterShadow(vec4 lightSpacePos, vec3 geomN, vec3 L) {
 
     return mix(1.0, shadowSum / 16.0, cascadeFade);
 }
-)" // здесь слишком длинная строка, принудительно разрываем ее, чтобы компилятор не ругался
-R"(
+)"
+
+#define DEEPDIVE_ENV_FRAG_PART2 R"(
 void main() {
     vec3 safeN = length(vNormal) > 0.0001 ? normalize(vNormal) : vec3(0.0, 1.0, 0.0);
     vec3 geomN = gl_FrontFacing ? safeN : -safeN;
@@ -525,7 +527,6 @@ void main() {
         float crevice      = smoothstep(0.10, 0.78, cavity * 0.62 + detailHeight * 0.38);
         ao = crevice * 0.62 + 0.38;
 
-        // Попиксельное отделение крутой скалы от песка/мха строго от гладких нормалей (без квадратных пятен)
         if (vParam.x < 0.5) {
             float rockEdgeNoise = (detailHeight - 0.5) * 0.24 + (cavity - 0.5) * 0.16;
             float smoothUp = min(min(geomN.y, N.y), mix(geomN.y, vertexFlatness, 0.55));
@@ -594,7 +595,6 @@ void main() {
     litColor += sunColor * caust * caustMask * 0.94;
 
     if (vParam.x > 2.5 && vParam.x < 3.5) {
-        // Тёплое оливково-золотистое просвечивание широких листьев ламинарии
         vec3 kelpSssCol = mix(baseCol * 1.25, vec3(0.56, 0.94, 0.34), 0.45);
         litColor += kelpSssCol * sss * 0.95;
     } else if (vParam.x > 1.5 && vParam.x <= 2.5) {
@@ -639,7 +639,6 @@ void main() {
 
     float bioFogScale = 1.0;
     if (vParam.x > 4.5) {
-        // Яркие светящиеся биолюминесцентные пузырьки вдоль колонн ламинарии
         float pulse = 0.72 + 0.28 * sin(uTime * 3.0 + vWorldPos.y * 1.3 + vWorldPos.x * 0.8 + vWorldPos.z * 0.7);
         litColor = vColor * (1.35 + 0.75 * pulse);
         bioFogScale = 0.58;
@@ -664,6 +663,322 @@ void main() {
 
     vec3 outCol = litColor * transmittance + fogColor * (1.0 - transmittance);
     FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
+}
+)"
+
+inline const char* EnvironmentFrag =
+    "#version 330 core\n"
+    DEEPDIVE_ENV_FRAG_PART1
+        DEEPDIVE_ENV_FRAG_PART2;
+
+inline const char* EnvironmentFrag400 =
+    "#version 400 core\n"
+    DEEPDIVE_ENV_FRAG_PART1
+        DEEPDIVE_ENV_FRAG_PART2;
+
+// ============================================================================
+// АППАРАТНАЯ ТЕССЕЛЯЦИЯ ОКРУЖЕНИЯ (OpenGL 4.0 Core — рельеф LOD0 + скалы LOD0)
+// ============================================================================
+
+inline const char* EnvTessVert = R"(#version 400 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+layout(location = 3) in vec2 aParam;
+
+out vec3 vPos_TCS;
+out vec3 vNormal_TCS;
+out vec3 vColor_TCS;
+out vec2 vParam_TCS;
+
+void main() {
+    vPos_TCS    = aPos;
+    vNormal_TCS = aNormal;
+    vColor_TCS  = aColor;
+    vParam_TCS  = aParam;
+}
+)";
+
+inline const char* EnvTessControl = R"(#version 400 core
+layout(vertices = 3) out;
+
+in vec3 vPos_TCS[];
+in vec3 vNormal_TCS[];
+in vec3 vColor_TCS[];
+in vec2 vParam_TCS[];
+
+out vec3 vPos_TES[];
+out vec3 vNormal_TES[];
+out vec3 vColor_TES[];
+out vec2 vParam_TES[];
+
+uniform vec3 uCamPos;
+uniform float uMaxTessLevel;
+
+float calcEdgeTess(vec3 pA, vec3 pB) {
+    vec3 mid = 0.5 * (pA + pB);
+    float dist = length(uCamPos - mid);
+    // Сводим уровень разбиения к 1.0 на 135 м (задолго до границы LOD0->LOD1 на 202 м),
+    // чтобы между чанками разных LOD не возникало трещин
+    float t = 1.0 - smoothstep(16.0, 135.0, dist);
+    float maxL = min(uMaxTessLevel, 6.0);
+    return mix(1.0, maxL, t * t);
+}
+
+void main() {
+    vPos_TES[gl_InvocationID]    = vPos_TCS[gl_InvocationID];
+    vNormal_TES[gl_InvocationID] = vNormal_TCS[gl_InvocationID];
+    vColor_TES[gl_InvocationID]  = vColor_TCS[gl_InvocationID];
+    vParam_TES[gl_InvocationID]  = vParam_TCS[gl_InvocationID];
+
+    if (gl_InvocationID == 0) {
+        float e0 = calcEdgeTess(vPos_TCS[1], vPos_TCS[2]);
+        float e1 = calcEdgeTess(vPos_TCS[2], vPos_TCS[0]);
+        float e2 = calcEdgeTess(vPos_TCS[0], vPos_TCS[1]);
+
+        gl_TessLevelOuter[0] = e0;
+        gl_TessLevelOuter[1] = e1;
+        gl_TessLevelOuter[2] = e2;
+        gl_TessLevelInner[0] = max(1.0, (e0 + e1 + e2) * 0.3333333);
+    }
+}
+)";
+
+inline const char* EnvTessEval = R"(#version 400 core
+layout(triangles, fractional_even_spacing, ccw) in;
+
+in vec3 vPos_TES[];
+in vec3 vNormal_TES[];
+in vec3 vColor_TES[];
+in vec2 vParam_TES[];
+
+uniform sampler2D uRockTex;
+uniform mat4 uViewProj;
+uniform mat4 uLightSpaceMatrix;
+uniform vec3 uCamPos;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec3 vColor;
+out vec2 vParam;
+out vec4 vLightSpacePos;
+
+float sampleTriplanarHeightLod(vec3 p, vec3 blend, float lod) {
+    float hx = textureLod(uRockTex, p.yz, lod).a;
+    float hy = textureLod(uRockTex, p.xz, lod).a;
+    float hz = textureLod(uRockTex, p.xy, lod).a;
+    return hx * blend.x + hy * blend.y + hz * blend.z;
+}
+
+void main() {
+    vec3 b = gl_TessCoord;
+
+    vec3 pos = b.x * vPos_TES[0] + b.y * vPos_TES[1] + b.z * vPos_TES[2];
+    vec3 nSum = b.x * vNormal_TES[0] + b.y * vNormal_TES[1] + b.z * vNormal_TES[2];
+    vec3 norm = (length(nSum) > 0.0001) ? normalize(nSum) : vec3(0.0, 1.0, 0.0);
+    vec3 col = b.x * vColor_TES[0] + b.y * vColor_TES[1] + b.z * vColor_TES[2];
+    vec2 param = b.x * vParam_TES[0] + b.y * vParam_TES[1] + b.z * vParam_TES[2];
+
+    float dist = length(uCamPos - pos);
+    float dispFade = 1.0 - smoothstep(22.0, 120.0, dist);
+
+    if (dispFade > 0.001 && param.x < 0.5) {
+        vec3 blend = max(abs(norm), vec3(0.0001));
+        blend = blend * blend;
+        blend = blend * blend;
+        blend /= (blend.x + blend.y + blend.z);
+
+        float lod = clamp(dist * 0.025, 0.5, 3.0);
+        float hMacro = sampleTriplanarHeightLod(pos * 0.036, blend, lod);
+        float hMicro = sampleTriplanarHeightLod(pos * 0.19,  blend, lod + 0.5);
+        float h = hMacro * 0.62 + hMicro * 0.38;
+
+        // Усиленный рельеф на скальных стенках и мягкое смещение на песке
+        float amp = mix(0.22, 0.42, clamp(param.y, 0.0, 1.0));
+        pos += norm * ((h - 0.5) * amp * dispFade);
+    }
+
+    vWorldPos      = pos;
+    vNormal        = norm;
+    vColor         = col;
+    vParam         = param;
+    vLightSpacePos = uLightSpaceMatrix * vec4(pos, 1.0);
+    gl_Position    = uViewProj * vec4(pos, 1.0);
+}
+)";
+
+// Инстансированная тесселяция валунов и скальных уступов (Phong + displacement)
+inline const char* InstPropTessVert = R"(#version 400 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+layout(location = 3) in vec2 aParam;
+layout(location = 4) in vec4 aInstPosScaleXZ; // xyz: worldPos, w: scaleXZ
+layout(location = 5) in vec4 aInstRotScaleY;  // x: yaw, y: pitch, z: roll, w: scaleY
+layout(location = 6) in vec4 aInstTintFlags;  // rgb: tint, w: flags
+
+uniform vec3 uCarpetTint;
+uniform vec3 uKelpTint;
+
+out vec3 vPos_TCS;
+out vec3 vNormal_TCS;
+out vec3 vColor_TCS;
+out vec2 vParam_TCS;
+
+void main() {
+    float sx = max(aInstPosScaleXZ.w, 0.01);
+    float sy = max(aInstRotScaleY.w,  0.01);
+
+    vec3 localPos = vec3(aPos.x * sx, aPos.y * sy, aPos.z * sx);
+    vec3 localN   = normalize(vec3(aNormal.x * sy, aNormal.y * sx, aNormal.z * sy));
+
+    float yaw   = aInstRotScaleY.x;
+    float pitch = aInstRotScaleY.y;
+    float roll  = aInstRotScaleY.z;
+
+    float cy = cos(yaw),   syw = sin(yaw);
+    float cp = cos(pitch), sp  = sin(pitch);
+    float cr = cos(roll),  sr  = sin(roll);
+
+    mat3 rotY = mat3(cy, 0.0, -syw,  0.0, 1.0, 0.0,  syw, 0.0, cy);
+    mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,   0.0, sp, cp);
+    mat3 rotZ = mat3(cr, sr, 0.0,   -sr, cr, 0.0,    0.0, 0.0, 1.0);
+    mat3 rot  = rotY * rotX * rotZ;
+
+    vec3 col = aColor * aInstTintFlags.rgb;
+    if (aParam.x < 4.5) {
+        if (aInstTintFlags.w > 1.5) {
+            col = mix(col, col * uKelpTint, 0.58);
+        } else if (aInstTintFlags.w > 0.5) {
+            col = mix(col, col * uCarpetTint, 0.78);
+        }
+    }
+
+    vPos_TCS    = rot * localPos + aInstPosScaleXZ.xyz;
+    vNormal_TCS = normalize(rot * localN);
+    vColor_TCS  = col;
+    vParam_TCS  = aParam;
+}
+)";
+
+inline const char* InstPropTessControl = R"(#version 400 core
+layout(vertices = 3) out;
+
+in vec3 vPos_TCS[];
+in vec3 vNormal_TCS[];
+in vec3 vColor_TCS[];
+in vec2 vParam_TCS[];
+
+out vec3 vPos_TES[];
+out vec3 vNormal_TES[];
+out vec3 vColor_TES[];
+out vec2 vParam_TES[];
+
+uniform vec3 uCamPos;
+uniform float uMaxTessLevel;
+
+float calcEdgeTess(vec3 pA, vec3 pB) {
+    vec3 mid = 0.5 * (pA + pB);
+    float dist = length(uCamPos - mid);
+    float t = 1.0 - smoothstep(14.0, 115.0, dist);
+    float maxL = min(uMaxTessLevel, 5.0);
+    return mix(1.0, maxL, t * t);
+}
+
+void main() {
+    vPos_TES[gl_InvocationID]    = vPos_TCS[gl_InvocationID];
+    vNormal_TES[gl_InvocationID] = vNormal_TCS[gl_InvocationID];
+    vColor_TES[gl_InvocationID]  = vColor_TCS[gl_InvocationID];
+    vParam_TES[gl_InvocationID]  = vParam_TCS[gl_InvocationID];
+
+    if (gl_InvocationID == 0) {
+        float e0 = calcEdgeTess(vPos_TCS[1], vPos_TCS[2]);
+        float e1 = calcEdgeTess(vPos_TCS[2], vPos_TCS[0]);
+        float e2 = calcEdgeTess(vPos_TCS[0], vPos_TCS[1]);
+
+        gl_TessLevelOuter[0] = e0;
+        gl_TessLevelOuter[1] = e1;
+        gl_TessLevelOuter[2] = e2;
+        gl_TessLevelInner[0] = max(1.0, (e0 + e1 + e2) * 0.3333333);
+    }
+}
+)";
+
+inline const char* InstPropTessEval = R"(#version 400 core
+layout(triangles, fractional_even_spacing, ccw) in;
+
+in vec3 vPos_TES[];
+in vec3 vNormal_TES[];
+in vec3 vColor_TES[];
+in vec2 vParam_TES[];
+
+uniform sampler2D uRockTex;
+uniform mat4 uViewProj;
+uniform mat4 uLightSpaceMatrix;
+uniform vec3 uCamPos;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec3 vColor;
+out vec2 vParam;
+out vec4 vLightSpacePos;
+
+vec3 safeNorm(vec3 v) {
+    float l = length(v);
+    return (l > 0.0001) ? (v / l) : vec3(0.0, 1.0, 0.0);
+}
+
+float sampleTriplanarHeightLod(vec3 p, vec3 blend, float lod) {
+    float hx = textureLod(uRockTex, p.yz, lod).a;
+    float hy = textureLod(uRockTex, p.xz, lod).a;
+    float hz = textureLod(uRockTex, p.xy, lod).a;
+    return hx * blend.x + hy * blend.y + hz * blend.z;
+}
+
+void main() {
+    vec3 b = gl_TessCoord;
+
+    vec3 p0 = vPos_TES[0], p1 = vPos_TES[1], p2 = vPos_TES[2];
+    vec3 n0 = safeNorm(vNormal_TES[0]);
+    vec3 n1 = safeNorm(vNormal_TES[1]);
+    vec3 n2 = safeNorm(vNormal_TES[2]);
+
+    vec3 pLin  = b.x * p0 + b.y * p1 + b.z * p2;
+    vec3 norm  = safeNorm(b.x * n0 + b.y * n1 + b.z * n2);
+    vec3 col   = b.x * vColor_TES[0] + b.y * vColor_TES[1] + b.z * vColor_TES[2];
+    vec2 param = b.x * vParam_TES[0] + b.y * vParam_TES[1] + b.z * vParam_TES[2];
+
+    float dist = length(uCamPos - pLin);
+    float fade = 1.0 - smoothstep(18.0, 105.0, dist);
+
+    vec3 pos = pLin;
+    if (fade > 0.001) {
+        // Phong-тесселяция сглаживает силуэт валунов и карнизов без разрыва общих рёбер
+        vec3 q0 = pLin - dot(pLin - p0, n0) * n0;
+        vec3 q1 = pLin - dot(pLin - p1, n1) * n1;
+        vec3 q2 = pLin - dot(pLin - p2, n2) * n2;
+        vec3 pPhong = b.x * q0 + b.y * q1 + b.z * q2;
+        pos = mix(pLin, pPhong, 0.55 * fade);
+
+        // Каменное смещение вдоль нормали для объёмных сколов
+        vec3 blend = max(abs(norm), vec3(0.0001));
+        blend = blend * blend;
+        blend = blend * blend;
+        blend /= (blend.x + blend.y + blend.z);
+
+        float lod = clamp(dist * 0.025, 0.5, 3.0);
+        float hMacro = sampleTriplanarHeightLod(pos * 0.055, blend, lod);
+        float hMicro = sampleTriplanarHeightLod(pos * 0.24,  blend, lod + 0.5);
+        float h = hMacro * 0.60 + hMicro * 0.40;
+        pos += norm * ((h - 0.5) * 0.26 * fade);
+    }
+
+    vWorldPos      = pos;
+    vNormal        = norm;
+    vColor         = col;
+    vParam         = param;
+    vLightSpacePos = uLightSpaceMatrix * vec4(pos, 1.0);
+    gl_Position    = uViewProj * vec4(pos, 1.0);
 }
 )";
 
@@ -941,7 +1256,7 @@ void main() {
 )";
 
 // ============================================================================
-// 3D-ПОВЕРХНОСТЬ МОРЯ ИЗНУТРИ (Снеллиус + TIR + Пена, разводы и пузырьки на скалах)
+// 3D-ПОВЕРХНОСТЬ МОРЯ ИЗНУТРИ (GL 3.3 + аппаратная тесселяция GL 4.0)
 // ============================================================================
 
 inline const char* WaterSurfaceVert = R"(#version 330 core
@@ -1001,7 +1316,134 @@ void main() {
 }
 )";
 
-inline const char* WaterSurfaceFrag = R"(#version 330 core
+inline const char* WaterTessVert = R"(#version 400 core
+layout(location = 0) in vec2 aLocalXZ;
+
+out vec2 vLocalXZ_TCS;
+
+void main() {
+    vLocalXZ_TCS = aLocalXZ;
+}
+)";
+
+inline const char* WaterTessControl = R"(#version 400 core
+layout(vertices = 3) out;
+
+in vec2 vLocalXZ_TCS[];
+out vec2 vLocalXZ_TES[];
+
+uniform vec2 uWaterCenter;
+uniform float uWaterY;
+uniform vec3 uCamPos;
+uniform float uMaxTessLevel;
+
+float calcEdgeTess(vec2 aXZ, vec2 bXZ) {
+    vec2 midXZ = uWaterCenter + 0.5 * (aXZ + bXZ);
+    float dist = length(uCamPos - vec3(midXZ.x, uWaterY, midXZ.y));
+    float t = 1.0 - smoothstep(20.0, 150.0, dist);
+    float maxL = min(uMaxTessLevel, 6.0);
+    return mix(1.0, maxL, t * t);
+}
+
+void main() {
+    vLocalXZ_TES[gl_InvocationID] = vLocalXZ_TCS[gl_InvocationID];
+
+    if (gl_InvocationID == 0) {
+        float e0 = calcEdgeTess(vLocalXZ_TCS[1], vLocalXZ_TCS[2]);
+        float e1 = calcEdgeTess(vLocalXZ_TCS[2], vLocalXZ_TCS[0]);
+        float e2 = calcEdgeTess(vLocalXZ_TCS[0], vLocalXZ_TCS[1]);
+
+        gl_TessLevelOuter[0] = e0;
+        gl_TessLevelOuter[1] = e1;
+        gl_TessLevelOuter[2] = e2;
+        gl_TessLevelInner[0] = max(1.0, (e0 + e1 + e2) * 0.3333333);
+    }
+}
+)";
+
+inline const char* WaterTessEval = R"(#version 400 core
+layout(triangles, fractional_even_spacing, ccw) in;
+
+in vec2 vLocalXZ_TES[];
+
+uniform mat4 uViewProj;
+uniform vec2 uWaterCenter;
+uniform float uWaterY;
+uniform vec3 uCamPos;
+uniform float uTime;
+
+out vec3 vWorldPos;
+out vec2 vWaveGrad;
+out float vWaveH;
+
+void main() {
+    vec3 b = gl_TessCoord;
+    vec2 localXZ = b.x * vLocalXZ_TES[0] + b.y * vLocalXZ_TES[1] + b.z * vLocalXZ_TES[2];
+    vec2 wxz = uWaterCenter + localXZ;
+
+    float r = length(localXZ);
+    float edgeDamp = 1.0 - smoothstep(340.0, 445.0, r);
+    float camDist = length(uCamPos - vec3(wxz.x, uWaterY, wxz.y));
+    float nearChop = (1.0 - smoothstep(18.0, 120.0, camDist)) * edgeDamp;
+
+    float h = 0.0;
+    vec2 grad = vec2(0.0);
+
+    {
+        vec2 d = vec2(0.82, 0.57);
+        float k = 0.17, a = 0.17 * edgeDamp;
+        float ph = dot(wxz, d) * k + uTime * 1.15;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+    {
+        vec2 d = vec2(-0.64, 0.77);
+        float k = 0.27, a = 0.11 * edgeDamp;
+        float ph = dot(wxz, d) * k + uTime * 1.48;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+    {
+        vec2 d = vec2(0.31, -0.95);
+        float k = 0.44, a = 0.06 * edgeDamp;
+        float ph = dot(wxz, d) * k - uTime * 1.90;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+    {
+        vec2 d = vec2(-0.92, -0.39);
+        float k = 0.72, a = 0.035 * edgeDamp;
+        float ph = dot(wxz, d) * k + uTime * 2.35;
+        h += sin(ph) * a;
+        grad += d * (cos(ph) * a * k);
+    }
+    // Дополнительные короткие геометрические волны для тесселированной ближней глади
+    if (nearChop > 0.005) {
+        {
+            vec2 d = vec2(0.55, -0.83);
+            float k = 1.28, a = 0.022 * nearChop;
+            float ph = dot(wxz, d) * k + uTime * 2.95;
+            h += sin(ph) * a;
+            grad += d * (cos(ph) * a * k);
+        }
+        {
+            vec2 d = vec2(-0.78, -0.62);
+            float k = 1.85, a = 0.014 * nearChop;
+            float ph = dot(wxz, d) * k - uTime * 3.40;
+            h += sin(ph) * a;
+            grad += d * (cos(ph) * a * k);
+        }
+    }
+
+    vec3 worldPos = vec3(wxz.x, uWaterY + h, wxz.y);
+    vWorldPos = worldPos;
+    vWaveGrad = grad;
+    vWaveH = h;
+    gl_Position = uViewProj * vec4(worldPos, 1.0);
+}
+)";
+
+#define DEEPDIVE_WATER_FRAG_BODY R"(
 in vec3 vWorldPos;
 in vec2 vWaveGrad;
 in float vWaveH;
@@ -1229,7 +1671,19 @@ void main() {
     vec3 outCol = surfaceCol * transmittance + fogColor * (1.0 - transmittance);
     FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
 }
-)";
+)"
+
+inline const char* WaterSurfaceFrag =
+    "#version 330 core\n"
+    DEEPDIVE_WATER_FRAG_BODY;
+
+inline const char* WaterSurfaceFrag400 =
+    "#version 400 core\n"
+    DEEPDIVE_WATER_FRAG_BODY;
+
+#undef DEEPDIVE_ENV_FRAG_PART1
+#undef DEEPDIVE_ENV_FRAG_PART2
+#undef DEEPDIVE_WATER_FRAG_BODY
 
 // ============================================================================
 // SKYBOX
@@ -1303,13 +1757,10 @@ void main() {
     float len = max(length(axisVec), 0.001);
     vec3 A = axisVec / len;
 
-    // Правосторонний ортонормированный базис (U, A, W), где U x A = W
     vec3 ref = (abs(A.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     vec3 U = normalize(cross(A, ref));
     vec3 W = cross(U, A);
 
-    // Небольшой запас (+4% по радиусу и ±2% по торцам), чтобы 16-гранный прокси
-    // гарантированно целиком охватывал гладкий аналитический конус без гранёности
     float hNorm = mix(-0.02, 1.02, aLocalPos.y);
     float rProxy = mix(aInstTop.w, aInstBot.w, clamp(aLocalPos.y, 0.0, 1.0)) * 1.04;
 
@@ -1364,7 +1815,6 @@ void main() {
     if (fragDist < 0.001) discard;
     vec3 D = viewVec / fragDist;
 
-    // 1. Точная дистанция до ближайшей непрозрачной геометрии (скалы, дно, фауна)
     vec2 screenUV = clamp(gl_FragCoord.xy * uInvResolution, 0.001, 0.999);
     float rawSceneDepth = texture(uSceneDepthTex, screenUV).r;
     float tScene = 1e5;
@@ -1374,7 +1824,6 @@ void main() {
         tScene = fragDist * (sceneLin / max(fragLin, 0.0001));
     }
 
-    // 2. Пересечение луча со слоем между верхним и нижним торцами (0 <= h <= vLength)
     vec3 relO = uCamPos - vTopCenter;
     float h0 = dot(relO, vAxis);
     float da = dot(D, vAxis);
@@ -1391,7 +1840,6 @@ void main() {
     }
     if (s1 <= s0) discard;
 
-    // 3. Аналитическое пересечение с боковой поверхностью усечённого конуса R(h) = rTop + k * h
     float k  = (vRadii.y - vRadii.x) / max(vLength, 0.001);
     float r0 = vRadii.x + k * h0;
     float rd = k * da;
@@ -1413,7 +1861,6 @@ void main() {
         t0 = max(s0, (-B - sq) / A);
         t1 = min(s1, (-B + sq) / A);
     } else if (A < -1e-5) {
-        // Взгляд почти вдоль оси конуса
         float f0 = (A * s0 + 2.0 * B) * s0 + C;
         float f1 = (A * s1 + 2.0 * B) * s1 + C;
         if (f0 > 0.0 && f1 > 0.0) discard;
@@ -1436,7 +1883,6 @@ void main() {
     float segLen = t1 - t0;
     if (segLen <= 0.01) discard;
 
-    // 4. Объёмное интегрирование рассеянного света внутри столба (10 шагов + IGN-дизеринг)
     const int STEPS = 10;
     float dt = segLen / float(STEPS);
     float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
@@ -1459,27 +1905,22 @@ void main() {
         vec3 q = q0 + t * dp;
         float r2 = clamp(dot(q, q) / (radLocal * radLocal), 0.0, 1.0);
 
-        // Плавный туманный профиль от яркого ядра к нулю на границе цилиндра
         float oneMinusR2 = 1.0 - r2;
         float radial = oneMinusR2 * oneMinusR2;
 
-        // Выход из-под волн и естественное ослабление глубиной
         float topFade   = smoothstep(0.0, 0.08, v);
         float botFade   = 1.0 - smoothstep(0.72, 1.0, v);
         float depthExp  = exp(-v * 1.35);
         float abyssFade = 1.0 - smoothstep(-18.0, -44.0, p.y);
 
-        // Объёмные каустические нити вдоль направления солнца
         vec2 sunProj = p.xz - p.y * (L.xz / max(L.y, 0.35));
         float fScale = vParams.z;
         float n1 = texture(uRockTex, sunProj * (0.042 * fScale) + vec2(uTime * 0.018, -uTime * 0.013)).a;
         float n2 = texture(uRockTex, sunProj * (0.095 * fScale) + vec2(-uTime * 0.024, uTime * 0.020) + vec2(vParams.y)).a;
         float filaments = 0.50 + 0.82 * smoothstep(0.24, 0.80, n1 * 0.62 + n2 * 0.38);
 
-        // Медленное колыхание взвеси/тумана по высоте
         float mist = 0.80 + 0.20 * sin(h * 0.22 - uTime * 0.65 + vParams.y * 6.2831 + n1 * 3.0);
 
-        // Объёмное затенение луча от скал, кораблей и проплывающего кита
         float shadowVis = 1.0;
         if (uEnableShadows == 1) {
             vec4 lsPos = uLightSpaceMatrix * vec4(p, 1.0);
@@ -1503,7 +1944,6 @@ void main() {
     float density = accum * normScale * vParams.x * phase;
     if (density < 0.0005) discard;
 
-    // Мягкое оптическое насыщение вместо жёсткого clamp
     float alpha = 0.34 * (1.0 - exp(-density * 2.8));
     vec3 beamCol = mix(uWaterColorShallow * 1.15, uSunColor * 1.28, 0.72);
     FragColor = vec4(clamp(beamCol, 0.0, 3.0), alpha);

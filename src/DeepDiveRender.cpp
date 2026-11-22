@@ -2,6 +2,10 @@
 #include "DeepDiveEngine.h"
 #include "Noise.h"
 #include "Shaders.h"
+#include <QOpenGLContext>
+#include <QOpenGLFunctions_4_0_Core>
+#include <QOpenGLVersionFunctionsFactory>
+#include <QSurfaceFormat>
 #include <QVector2D>
 #include <algorithm>
 #include <cmath>
@@ -41,6 +45,10 @@ inline uint8_t updateBinaryLod(uint8_t currentLod, float dist, float threshold, 
     if (currentLod == 0 && dist > threshold + band) return 1;
     if (currentLod != 0 && dist < threshold - band) return 0;
     return currentLod;
+}
+
+inline bool isTessellatedRockArchetype(int archetype) {
+    return archetype == PROP_BOULDER_CHUNK || archetype == PROP_CLIFF_CRAG;
 }
 
 // LOD transition thresholds for each of the 8 instanced prop archetypes (LOD0 -> LOD1 -> Cull)
@@ -116,6 +124,52 @@ void DeepDiveRender::initializeGLContext() {
     initializeOpenGLFunctions();
     glEnable(GL_MULTISAMPLE);
     glEnable(GL_PROGRAM_POINT_SIZE);
+
+    m_gl4 = nullptr;
+    m_gl4Ready = false;
+    m_envTessReady = false;
+    m_instPropTessReady = false;
+    m_waterTessReady = false;
+    m_tessSupported = false;
+    m_tessEnabled = false;
+    m_maxTessLevel = 0;
+
+    if (QOpenGLContext* ctx = QOpenGLContext::currentContext()) {
+        const QSurfaceFormat fmt = ctx->format();
+        m_glMajorVersion = fmt.majorVersion();
+        m_glMinorVersion = fmt.minorVersion();
+
+        if (m_glMajorVersion >= 4) {
+            m_gl4 = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_4_0_Core>(ctx);
+            if (m_gl4 && m_gl4->initializeOpenGLFunctions()) {
+                GLint maxTess = 0;
+                glGetIntegerv(GL_MAX_TESS_GEN_LEVEL, &maxTess);
+                glGetError();
+                m_maxTessLevel = static_cast<int>(maxTess);
+                m_gl4Ready = (m_maxTessLevel >= 4);
+            } else {
+                m_gl4 = nullptr;
+            }
+        }
+    }
+}
+
+bool DeepDiveRender::linkTessProgram(QOpenGLShaderProgram& prog,
+                                     const char* vertSrc,
+                                     const char* tcsSrc,
+                                     const char* tesSrc,
+                                     const char* fragSrc) {
+    prog.removeAllShaders();
+    const bool ok =
+        prog.addShaderFromSourceCode(QOpenGLShader::Vertex, vertSrc) &&
+        prog.addShaderFromSourceCode(QOpenGLShader::TessellationControl, tcsSrc) &&
+        prog.addShaderFromSourceCode(QOpenGLShader::TessellationEvaluation, tesSrc) &&
+        prog.addShaderFromSourceCode(QOpenGLShader::Fragment, fragSrc) &&
+        prog.link();
+    if (!ok) {
+        prog.removeAllShaders();
+    }
+    return ok;
 }
 
 void DeepDiveRender::initBaseResources(const std::vector<AdapterCapability>& adapters) {
@@ -178,6 +232,22 @@ void DeepDiveRender::compileEnvironmentShaders() {
     m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::FaunaVert);
     m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::FaunaFrag);
     m_faunaShader.link();
+
+    if (m_gl4Ready) {
+        m_envTessReady = linkTessProgram(
+            m_envTessShader,
+            Shaders::EnvTessVert,
+            Shaders::EnvTessControl,
+            Shaders::EnvTessEval,
+            Shaders::EnvironmentFrag400);
+
+        m_instPropTessReady = linkTessProgram(
+            m_instPropTessShader,
+            Shaders::InstPropTessVert,
+            Shaders::InstPropTessControl,
+            Shaders::InstPropTessEval,
+            Shaders::EnvironmentFrag400);
+    }
 }
 
 void DeepDiveRender::compileWaterAndLightShaders() {
@@ -192,6 +262,19 @@ void DeepDiveRender::compileWaterAndLightShaders() {
     m_rayShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::TranslucentVert);
     m_rayShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::TranslucentFrag);
     m_rayShader.link();
+
+    if (m_gl4Ready) {
+        m_waterTessReady = linkTessProgram(
+            m_waterTessShader,
+            Shaders::WaterTessVert,
+            Shaders::WaterTessControl,
+            Shaders::WaterTessEval,
+            Shaders::WaterSurfaceFrag400);
+
+        // Enable hardware tessellation by default once all GL 4.0 tess stages link cleanly
+        m_tessSupported = m_envTessReady && m_instPropTessReady && m_waterTessReady;
+        m_tessEnabled = m_tessSupported;
+    }
 }
 
 void DeepDiveRender::compilePostProcessShaders() {
@@ -218,6 +301,11 @@ void DeepDiveRender::refreshGpuCapabilities(const std::vector<AdapterCapability>
 }
 
 void DeepDiveRender::cleanup() {
+    m_gl4 = nullptr;
+    m_gl4Ready = false;
+    m_tessSupported = false;
+    m_tessEnabled = false;
+
     destroyPostProcessBuffers();
 
     if (m_shadowFBO) { glDeleteFramebuffers(1, &m_shadowFBO); m_shadowFBO = 0; }
@@ -388,7 +476,6 @@ std::vector<uint8_t> DeepDiveRender::generateRockTextureData(int size) {
                 for (int x = 0; x < N; ++x) {
                     const float u = static_cast<float>(x) / N;
 
-                    // Smooth seamless domain-warp breaking Voronoi cell regularity
                     const float wU = (ProcMath::tileableNoise2D(u, v, 4, 113u) - 0.5f) * 0.14f
                                      + (ProcMath::tileableNoise2D(u, v, 8, 127u) - 0.5f) * 0.06f;
                     const float wV = (ProcMath::tileableNoise2D(u, v, 4, 131u) - 0.5f) * 0.14f
@@ -396,7 +483,6 @@ std::vector<uint8_t> DeepDiveRender::generateRockTextureData(int size) {
                     const float wu = ProcMath::fract(u + wU + 1.0f);
                     const float wv = ProcMath::fract(v + wV + 1.0f);
 
-                    // Multi-octave rock roughness
                     float fbmVal = 0.0f;
                     fbmVal += 0.30f * ProcMath::tileableNoise2D(wu, wv, 8,   101u);
                     fbmVal += 0.24f * ProcMath::tileableNoise2D(wu, wv, 16,  202u);
@@ -405,11 +491,9 @@ std::vector<uint8_t> DeepDiveRender::generateRockTextureData(int size) {
                     fbmVal += 0.09f * ProcMath::tileableNoise2D(u,  v,  128, 505u);
                     fbmVal += 0.06f * ProcMath::tileableNoise2D(u,  v,  256, 606u);
 
-                    // Sedimentary strata bands
                     float strata = 0.5f + 0.5f * std::sin((wv * 16.0f + fbmVal * 2.4f) * TWO_PI * 0.25f);
                     strata = ProcMath::smoothstep(0.15f, 0.85f, strata);
 
-                    // Warped geological cracks
                     const float vor1 = ProcMath::tileableVoronoi2D(wu, wv, 4,  707u);
                     const float vor2 = ProcMath::tileableVoronoi2D(wu, wv, 12, 808u);
                     const float vor3 = ProcMath::tileableVoronoi2D(u,  v,  32, 909u);
@@ -433,7 +517,6 @@ std::vector<uint8_t> DeepDiveRender::generateRockTextureData(int size) {
     const int mask = N - 1;
     const float normalStrength = 8.2f;
 
-    // 3x3 Sobel operator for crisp artifact-free normals
     for (int y = 0; y < N; ++y) {
         const int yU = (y - 1) & mask;
         const int yD = (y + 1) & mask;
@@ -858,6 +941,12 @@ void DeepDiveRender::toggleWireframe() {
     m_wireframeMode = !m_wireframeMode;
 }
 
+void DeepDiveRender::toggleTessellation() {
+    if (m_tessSupported) {
+        m_tessEnabled = !m_tessEnabled;
+    }
+}
+
 // ============================================================================
 // CULLING & INSTANCED BATCHING
 // ============================================================================
@@ -911,22 +1000,27 @@ void DeepDiveRender::gatherAndUploadInstProps(const WorldData& world,
     }
 }
 
-void DeepDiveRender::drawInstPropBatches(bool forShadow, bool countTris) {
-    auto drawOne = [&](const PropLodBuffers& buf, size_t count) {
-        if (count == 0 || buf.indexCount == 0) return;
-        const GLsizei clamped = static_cast<GLsizei>(std::min(count, static_cast<size_t>(buf.maxInstances)));
-        glBindVertexArray(buf.vao);
-        glDrawElementsInstanced(GL_TRIANGLES, buf.indexCount, GL_UNSIGNED_INT, nullptr, clamped);
-        if (countTris) {
-            m_stats.drawnTriangles += (buf.indexCount / 3) * clamped;
-            m_stats.visibleInstProps += clamped;
-        }
-    };
+void DeepDiveRender::drawInstPropOne(const PropLodBuffers& buf,
+                                     size_t count,
+                                     GLenum primitiveMode,
+                                     bool countTris) {
+    if (count == 0 || buf.indexCount == 0) return;
+    const GLsizei clamped = static_cast<GLsizei>(std::min(count, static_cast<size_t>(buf.maxInstances)));
+    glBindVertexArray(buf.vao);
+    glDrawElementsInstanced(primitiveMode, buf.indexCount, GL_UNSIGNED_INT, nullptr, clamped);
+    if (countTris) {
+        m_stats.drawnTriangles += (buf.indexCount / 3) * clamped;
+        m_stats.visibleInstProps += clamped;
+    }
+}
 
+void DeepDiveRender::drawInstPropBatches(bool forShadow, bool countTris, bool skipTessRocks) {
     for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
         if (forShadow && !PROP_LOD_CFG[a].castShadow) continue;
-        drawOne(m_propLod0[a], m_visPropsLod0[a].size());
-        drawOne(m_propLod1[a], m_visPropsLod1[a].size());
+        if (!(skipTessRocks && isTessellatedRockArchetype(a))) {
+            drawInstPropOne(m_propLod0[a], m_visPropsLod0[a].size(), GL_TRIANGLES, countTris);
+        }
+        drawInstPropOne(m_propLod1[a], m_visPropsLod1[a].size(), GL_TRIANGLES, countTris);
     }
 }
 
@@ -1030,14 +1124,17 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     physH = std::max(64, physH);
     resizePostProcessBuffers(physW, physH);
 
-    const WorldData& world       = engine.world();
-    const BiomeVisuals visuals   = engine.biomeVisuals();
-    const QVector3D camPos       = engine.cameraPosition();
-    const QVector3D camForward   = engine.cameraForward();
-    const FaunaAgent& whale      = engine.whale();
-    const float simTime          = engine.simulationTime();
-    const int lureCount          = engine.lureCount();
-    const auto& lurePositions    = engine.lurePositions();
+    const WorldData& world     = engine.world();
+    const BiomeVisuals visuals = engine.biomeVisuals();
+    const QVector3D camPos     = engine.cameraPosition();
+    const QVector3D camForward = engine.cameraForward();
+    const FaunaAgent& whale    = engine.whale();
+    const float simTime        = engine.simulationTime();
+    const int lureCount        = engine.lureCount();
+    const auto& lurePositions  = engine.lurePositions();
+
+    const bool useTess = (m_tessSupported && m_tessEnabled && m_gl4 != nullptr);
+    const float maxTessF = static_cast<float>(std::max(1, m_maxTessLevel));
 
     QMatrix4x4 proj;
     const float aspect = static_cast<float>(physW) / static_cast<float>(physH);
@@ -1072,7 +1169,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     };
 
     // ========================================================================
-    // PASS 0: Directional Shadow Map
+    // PASS 0: Directional Shadow Map (kept non-tessellated for speed)
     // ========================================================================
     const float orthoHalfSize = 110.0f;
     const float texelWorldStep = (orthoHalfSize * 2.0f) / SHADOW_MAP_RES;
@@ -1170,6 +1267,10 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     glDisable(GL_BLEND);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    if (useTess) {
+        m_gl4->glPatchParameteri(GL_PATCH_VERTICES, 3);
+    }
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_rockTex);
     glActiveTexture(GL_TEXTURE3);
@@ -1212,15 +1313,13 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     };
 
     glDepthFunc(GL_LESS);
-    bindCommonEnvUniforms(m_envShader);
 
     static constexpr float TERRAIN_LOD_THRESH[3] = {210.0f, 310.0f, 395.0f};
 
     std::vector<std::pair<int, float>> visibleChunks;
     visibleChunks.reserve(128);
 
-    // 1.1. Seafloor & cliff walls (4-tier LOD)
-    glBindVertexArray(m_terrainVAO);
+    // 1.1. Seafloor & cliff walls (4-tier LOD; LOD0 uses hardware tessellation when enabled)
     for (int i = 0; i < static_cast<int>(world.chunks.size()); ++i) {
         const auto& chunk = world.chunks[i];
         if (!camFrustum.intersectsSphere(chunk.center, chunk.boundingRadius)) continue;
@@ -1234,18 +1333,40 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         m_stats.visibleChunks++;
         m_stats.lodCounts[st.terrainLod]++;
         visibleChunks.emplace_back(i, d);
+    }
 
-        const auto& range = chunk.terrainLodRanges[st.terrainLod];
+    auto drawTerrainChunk = [&](int idx, GLenum primitiveMode) {
+        const auto& chunk = world.chunks[idx];
+        const int lod = m_chunkLodStates[idx].terrainLod;
+        const auto& range = chunk.terrainLodRanges[lod];
         const void* idxPtr = reinterpret_cast<const void*>(
             static_cast<uintptr_t>(range.indexOffset) * sizeof(uint32_t));
-        glDrawElementsBaseVertex(GL_TRIANGLES,
+        glDrawElementsBaseVertex(primitiveMode,
                                  static_cast<GLsizei>(range.indexCount),
                                  GL_UNSIGNED_INT, idxPtr,
                                  static_cast<GLint>(chunk.terrainBaseVertex));
         m_stats.drawnTriangles += static_cast<int>(range.indexCount / 3);
+    };
+
+    glBindVertexArray(m_terrainVAO);
+    if (useTess) {
+        bindCommonEnvUniforms(m_envTessShader);
+        m_envTessShader.setUniformValue("uMaxTessLevel", maxTessF);
+        for (const auto& [idx, d] : visibleChunks) {
+            if (m_chunkLodStates[idx].terrainLod == 0) {
+                drawTerrainChunk(idx, GL_PATCHES);
+            }
+        }
     }
 
-    // 1.2. Static unique props (shipwrecks & abyssal sea pens)
+    bindCommonEnvUniforms(m_envShader);
+    for (const auto& [idx, d] : visibleChunks) {
+        if (!useTess || m_chunkLodStates[idx].terrainLod > 0) {
+            drawTerrainChunk(idx, GL_TRIANGLES);
+        }
+    }
+
+    // 1.2. Static unique props (shipwrecks & abyssal sea pens) — m_envShader is already bound
     glBindVertexArray(m_propVAO);
     for (const auto& [idx, d] : visibleChunks) {
         const auto& chunk = world.chunks[idx];
@@ -1258,12 +1379,24 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         if (d < 430.0f) drawPropRange(chunk.shipwreckRange, true);
     }
 
-    // 1.3. Instanced environment props (boulders, crags, kelp, sponges, carpets, corals)
+    // 1.3. Instanced environment props (LOD0 boulders & crags tessellated when enabled)
     gatherAndUploadInstProps(world, visibleChunks, false);
+    if (useTess) {
+        bindCommonEnvUniforms(m_instPropTessShader);
+        m_instPropTessShader.setUniformValue("uCarpetTint", visuals.carpetTint);
+        m_instPropTessShader.setUniformValue("uKelpTint", visuals.kelpTint);
+        m_instPropTessShader.setUniformValue("uMaxTessLevel", maxTessF);
+
+        drawInstPropOne(m_propLod0[PROP_BOULDER_CHUNK],
+                        m_visPropsLod0[PROP_BOULDER_CHUNK].size(), GL_PATCHES, true);
+        drawInstPropOne(m_propLod0[PROP_CLIFF_CRAG],
+                        m_visPropsLod0[PROP_CLIFF_CRAG].size(), GL_PATCHES, true);
+    }
+
     bindCommonEnvUniforms(m_instPropShader);
     m_instPropShader.setUniformValue("uCarpetTint", visuals.carpetTint);
     m_instPropShader.setUniformValue("uKelpTint", visuals.kelpTint);
-    drawInstPropBatches(false, true);
+    drawInstPropBatches(false, true, useTess);
 
     // 1.4. Marine fauna (reef fish, manta rays, humpback whale, anglerfish)
     bindCommonEnvUniforms(m_faunaShader);
@@ -1289,27 +1422,31 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
 
     const QVector2D waterCenter(std::floor(camPos.x() * 2.0f) * 0.5f,
                                 std::floor(camPos.z() * 2.0f) * 0.5f);
-    m_waterShader.bind();
-    m_waterShader.setUniformValue("uRockTex", 0);
-    m_waterShader.setUniformValue("uSceneDepthTex", 1);
-    m_waterShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
-    m_waterShader.setUniformValue("uViewProj", viewProj);
-    m_waterShader.setUniformValue("uWaterCenter", waterCenter);
-    m_waterShader.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
-    m_waterShader.setUniformValue("uCamPos", camPos);
-    m_waterShader.setUniformValue("uSunDir", visuals.sunDir);
-    m_waterShader.setUniformValue("uSunColor", visuals.sunColor);
-    m_waterShader.setUniformValue("uWaterColorDeep", visuals.waterDeep);
-    m_waterShader.setUniformValue("uWaterColorShallow", visuals.waterShallow);
-    m_waterShader.setUniformValue("uFogScale", visuals.fogScale);
-    m_waterShader.setUniformValue("uTime", simTime);
-    m_waterShader.setUniformValue("uWhaleSurfA",
-                                  QVector4D(whale.pos.x(), whale.pos.y(), whale.pos.z(), whale.scale));
-    m_waterShader.setUniformValue("uWhaleSurfB",
-                                  QVector4D(std::sin(whale.yaw), std::cos(whale.yaw),
-                                            std::sin(whale.pitch), std::cos(whale.pitch)));
+    QOpenGLShaderProgram& activeWaterShader = useTess ? m_waterTessShader : m_waterShader;
+    activeWaterShader.bind();
+    activeWaterShader.setUniformValue("uRockTex", 0);
+    activeWaterShader.setUniformValue("uSceneDepthTex", 1);
+    activeWaterShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
+    activeWaterShader.setUniformValue("uViewProj", viewProj);
+    activeWaterShader.setUniformValue("uWaterCenter", waterCenter);
+    activeWaterShader.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
+    activeWaterShader.setUniformValue("uCamPos", camPos);
+    activeWaterShader.setUniformValue("uSunDir", visuals.sunDir);
+    activeWaterShader.setUniformValue("uSunColor", visuals.sunColor);
+    activeWaterShader.setUniformValue("uWaterColorDeep", visuals.waterDeep);
+    activeWaterShader.setUniformValue("uWaterColorShallow", visuals.waterShallow);
+    activeWaterShader.setUniformValue("uFogScale", visuals.fogScale);
+    activeWaterShader.setUniformValue("uTime", simTime);
+    activeWaterShader.setUniformValue("uWhaleSurfA",
+                                      QVector4D(whale.pos.x(), whale.pos.y(), whale.pos.z(), whale.scale));
+    activeWaterShader.setUniformValue("uWhaleSurfB",
+                                      QVector4D(std::sin(whale.yaw), std::cos(whale.yaw),
+                                                std::sin(whale.pitch), std::cos(whale.pitch)));
+    if (useTess) {
+        activeWaterShader.setUniformValue("uMaxTessLevel", maxTessF);
+    }
     glBindVertexArray(m_waterVAO);
-    glDrawElements(GL_TRIANGLES, m_waterIndexCount, GL_UNSIGNED_INT, nullptr);
+    glDrawElements(useTess ? GL_PATCHES : GL_TRIANGLES, m_waterIndexCount, GL_UNSIGNED_INT, nullptr);
     m_stats.drawnTriangles += static_cast<int>(m_waterIndexCount / 3);
 
     if (m_wireframeMode) {
