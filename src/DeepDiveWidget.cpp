@@ -64,10 +64,14 @@ DeepDiveWidget::~DeepDiveWidget() {
 }
 
 void DeepDiveWidget::applySystemColorSchemeBackground() {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
     const bool isDark = (scheme == Qt::ColorScheme::Dark) ||
                         (scheme == Qt::ColorScheme::Unknown &&
                          palette().color(QPalette::Window).lightness() < 128);
+#else
+    const bool isDark = palette().color(QPalette::Window).lightness() < 128;
+#endif
 
     m_windowBgColor = isDark ? QColor(18, 22, 28) : QColor(242, 244, 248);
 
