@@ -1,5 +1,6 @@
 #include "DeepDiveWidget.h"
 #include "DeepDiveEngine.h"
+#include "DeepDiveRender.h"
 #include "WorldGenerator.h"
 #include <QCursor>
 #include <QFocusEvent>
@@ -16,7 +17,6 @@
 #include <QStyleHints>
 #include <QVBoxLayout>
 #include <algorithm>
-#include <cmath>
 #include <utility>
 
 struct DeepDiveWidget::PendingWorldLoad {
@@ -30,6 +30,7 @@ struct DeepDiveWidget::PendingWorldLoad {
 DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget* parent)
     : QOpenGLWidget(parent),
     m_engine(std::make_unique<DeepDiveEngine>()),
+    m_render(std::make_unique<DeepDiveRender>()),
     m_adapters(std::move(adapters)) {
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
@@ -56,8 +57,8 @@ DeepDiveWidget::~DeepDiveWidget() {
     }
 
     makeCurrent();
-    if (m_engine) {
-        m_engine->cleanup();
+    if (m_render) {
+        m_render->cleanup();
     }
     doneCurrent();
 }
@@ -172,11 +173,11 @@ void DeepDiveWidget::setMouseCapture(bool enable) {
 }
 
 void DeepDiveWidget::initializeGL() {
-    m_engine->initializeGLContext();
+    m_render->initializeGLContext();
     m_glContextReady = true;
 
     // Release the first frame so the window and progress bar appear immediately,
-    // then proceed with stepped shader compilation and background world generation.
+    // then run stepped shader compilation and background world generation.
     if (!m_startupScheduled) {
         m_startupScheduled = true;
         QTimer::singleShot(30, this, &DeepDiveWidget::beginInitialStartup);
@@ -205,35 +206,35 @@ void DeepDiveWidget::runNextInitStep() {
     case 0:
         setStatus("Initializing OpenGL...");
         makeCurrent();
-        m_engine->initBaseResources(m_adapters);
+        m_render->initBaseResources(m_adapters);
         doneCurrent();
         break;
 
     case 1:
         setStatus("Compiling shadow shaders...");
         makeCurrent();
-        m_engine->compileShadowShaders();
+        m_render->compileShadowShaders();
         doneCurrent();
         break;
 
     case 2:
         setStatus("Compiling environment shaders...");
         makeCurrent();
-        m_engine->compileEnvironmentShaders();
+        m_render->compileEnvironmentShaders();
         doneCurrent();
         break;
 
     case 3:
         setStatus("Compiling water and lighting shaders...");
         makeCurrent();
-        m_engine->compileWaterAndLightShaders();
+        m_render->compileWaterAndLightShaders();
         doneCurrent();
         break;
 
     case 4:
         setStatus("Compiling post-processing shaders...");
         makeCurrent();
-        m_engine->compilePostProcessShaders();
+        m_render->compilePostProcessShaders();
         doneCurrent();
         break;
 
@@ -241,7 +242,7 @@ void DeepDiveWidget::runNextInitStep() {
         setStatus("Preparing render buffers...");
         makeCurrent();
         const qreal dpr = devicePixelRatioF();
-        m_engine->initRenderBuffers(int(width() * dpr), int(height() * dpr));
+        m_render->initRenderBuffers(int(width() * dpr), int(height() * dpr));
         doneCurrent();
         break;
     }
@@ -294,7 +295,7 @@ void DeepDiveWidget::startAsyncWorldLoad(uint32_t seed, bool generateRockTex, bo
         if (m_destroying.load()) return;
 
         if (generateRockTex && !m_destroying.load()) {
-            payload->rockRgba = DeepDiveEngine::generateRockTextureData(1024);
+            payload->rockRgba = DeepDiveRender::generateRockTextureData(1024);
         }
         if (m_destroying.load()) return;
 
@@ -319,14 +320,16 @@ void DeepDiveWidget::tryFinishLoading() {
         m_adapters = std::move(pending->adapters);
     }
 
+    m_engine->setWorld(std::move(pending->world), pending->seed);
+
     makeCurrent();
     if (!m_adapters.empty()) {
-        m_engine->refreshGpuCapabilities(m_adapters);
+        m_render->refreshGpuCapabilities(m_adapters);
     }
     if (pending->generateRockTex && !pending->rockRgba.empty()) {
-        m_engine->uploadRockTexture(pending->rockRgba, 1024);
+        m_render->uploadRockTexture(pending->rockRgba, 1024);
     }
-    m_engine->uploadWorld(std::move(pending->world), pending->seed);
+    m_render->uploadWorld(m_engine->world());
     doneCurrent();
 
     m_worldReady = true;
@@ -346,7 +349,7 @@ void DeepDiveWidget::tryFinishLoading() {
 void DeepDiveWidget::resizeGL(int w, int h) {
     if (!m_glInitComplete) return;
     const qreal dpr = devicePixelRatioF();
-    m_engine->resize(int(w * dpr), int(h * dpr));
+    m_render->resize(int(w * dpr), int(h * dpr));
 }
 
 void DeepDiveWidget::showEvent(QShowEvent* event) {
@@ -369,7 +372,7 @@ void DeepDiveWidget::resizeEvent(QResizeEvent* event) {
 void DeepDiveWidget::paintGL() {
     if (!m_worldReady || m_isLoading) {
         if (m_glContextReady) {
-            m_engine->clearScreen(static_cast<float>(m_windowBgColor.redF()),
+            m_render->clearScreen(static_cast<float>(m_windowBgColor.redF()),
                                   static_cast<float>(m_windowBgColor.greenF()),
                                   static_cast<float>(m_windowBgColor.blueF()));
         }
@@ -393,17 +396,17 @@ void DeepDiveWidget::paintGL() {
 
     const float dt = std::min(rawDt, 0.05f);
 
-    // Poll gamepad and handle discrete controller actions
+    // Poll gamepad and dispatch discrete controller actions
     const GamepadState gp = m_gamepad.poll(dt);
     m_gamepadConnected = gp.connected;
     m_gamepadIsXInput = gp.isXInput;
 
     if (gp.connected) {
         if (gp.toggleBiome)     m_engine->cycleBiome();
-        if (gp.togglePostFx)    m_engine->togglePostProcess();
-        if (gp.toggleShadows)   m_engine->toggleShadows();
+        if (gp.togglePostFx)    m_render->togglePostProcess();
+        if (gp.toggleShadows)   m_render->toggleShadows();
         if (gp.toggleHud)       m_hudVisible = !m_hudVisible;
-        if (gp.toggleWireframe) m_engine->toggleWireframe();
+        if (gp.toggleWireframe) m_render->toggleWireframe();
         if (gp.toggleMute && m_audioEngine) m_audioEngine->toggleMute();
         if (gp.volumeUp   && m_audioEngine) m_audioEngine->adjustVolume(0.05f);
         if (gp.volumeDown && m_audioEngine) m_audioEngine->adjustVolume(-0.05f);
@@ -415,14 +418,14 @@ void DeepDiveWidget::paintGL() {
         if (gp.regenWorld) {
             m_seed += 17u;
             startAsyncWorldLoad(m_seed, false);
-            m_engine->clearScreen(static_cast<float>(m_windowBgColor.redF()),
+            m_render->clearScreen(static_cast<float>(m_windowBgColor.redF()),
                                   static_cast<float>(m_windowBgColor.greenF()),
                                   static_cast<float>(m_windowBgColor.blueF()));
             return;
         }
     }
 
-    // Gather continuous movement and look inputs for the engine
+    // Gather continuous movement and look inputs for the simulation engine
     EngineInput input;
     input.yawDelta = m_pendingMouseYawDelta;
     input.pitchDelta = m_pendingMousePitchDelta;
@@ -446,7 +449,7 @@ void DeepDiveWidget::paintGL() {
         input.sprint       = input.sprint || gp.sprint;
     }
 
-    // Advance underwater world simulation
+    // Step underwater simulation
     const EngineStepEvents events = m_engine->update(dt, input);
 
     if (events.playerCollisionImpact && gp.connected && events.collisionImpactSpeed > 1.8f) {
@@ -463,11 +466,11 @@ void DeepDiveWidget::paintGL() {
         }
     }
 
-    // Render frame to widget framebuffer
+    // Render current engine state
     const qreal dpr = devicePixelRatioF();
     const int physW = std::max(64, int(width() * dpr));
     const int physH = std::max(64, int(height() * dpr));
-    m_engine->render(physW, physH, defaultFramebufferObject());
+    m_render->render(*m_engine, physW, physH, defaultFramebufferObject());
 
     if (m_hudVisible) {
         drawHud();
@@ -487,17 +490,17 @@ void DeepDiveWidget::drawHud() {
                                   ? (m_gamepadIsXInput ? "XInput" : "HID")
                                   : "OFF";
 
-    const FrameRenderStats& st = m_engine->stats();
+    const FrameRenderStats& st = m_render->stats();
 
     const QString hud = QString(
                             "GPU: %1 | %2x MSAA | Shadows: %3 | PostFX: %4 | Audio: %5 | Pad: %6 | FPS: %7\n"
                             "Chunks: %8/%9 (LOD0:%10 LOD1:%11 LOD2:%12 LOD3:%13) | Props: %14 | Tris: %15k | Fish: %16+%17 | Mantas: %18+%19 | Anglers: %20\n"
                             "Depth: %21m | R: %22m %23 | Seed: %24 | Biome: %25 | [Alt+Enter] Fullscreen [Esc] Cursor [`] HUD [F/R3] Wire [B] Biome [K] Whale"
                             )
-                            .arg(m_engine->glRendererInfo())
-                            .arg(m_engine->activeSamples())
-                            .arg(m_engine->shadowsEnabled() ? "ON" : "OFF")
-                            .arg(m_engine->postProcessEnabled() ? "ON" : "OFF")
+                            .arg(m_render->glRendererInfo())
+                            .arg(m_render->activeSamples())
+                            .arg(m_render->shadowsEnabled() ? "ON" : "OFF")
+                            .arg(m_render->postProcessEnabled() ? "ON" : "OFF")
                             .arg(audioStatus)
                             .arg(padStatus)
                             .arg(qRound(m_fps))
@@ -516,7 +519,7 @@ void DeepDiveWidget::drawHud() {
                             .arg(st.visibleAnglers)
                             .arg(qRound(m_engine->diveDepth()))
                             .arg(qRound(m_engine->radialDistance()))
-                            .arg(st.playerColliding ? "[COLLISION]" : "")
+                            .arg(m_engine->isPlayerColliding() ? "[COLLISION]" : "")
                             .arg(m_seed)
                             .arg(m_engine->biomeName());
 
@@ -564,11 +567,11 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
         m_seed += 17u;
         startAsyncWorldLoad(m_seed, false);
     } else if (event->key() == Qt::Key_P) {
-        m_engine->togglePostProcess();
+        m_render->togglePostProcess();
     } else if (event->key() == Qt::Key_L) {
-        m_engine->toggleShadows();
+        m_render->toggleShadows();
     } else if (event->key() == Qt::Key_F) {
-        m_engine->toggleWireframe();
+        m_render->toggleWireframe();
     } else if (event->key() == Qt::Key_M) {
         if (m_audioEngine) m_audioEngine->toggleMute();
     } else if (event->key() == Qt::Key_K) {

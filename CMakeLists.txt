@@ -140,6 +140,8 @@ add_executable(DeepDive WIN32 MACOSX_BUNDLE
     src/DeepDiveWidget.cpp
     src/DeepDiveEngine.h
     src/DeepDiveEngine.cpp
+    src/DeepDiveRender.h
+    src/DeepDiveRender.cpp
     src/GamepadInput.h
 
     .github/workflows/build-release.yml

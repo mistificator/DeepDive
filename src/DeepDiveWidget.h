@@ -14,6 +14,7 @@
 #include "UnderwaterAudio.h"
 
 class DeepDiveEngine;
+class DeepDiveRender;
 class QLabel;
 class QProgressBar;
 
@@ -53,6 +54,7 @@ private:
     void drawHud();
 
     std::unique_ptr<DeepDiveEngine> m_engine;
+    std::unique_ptr<DeepDiveRender> m_render;
     std::vector<AdapterCapability> m_adapters;
     uint32_t m_seed = 42u;
 
