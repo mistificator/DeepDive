@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <random>
 #include <thread>
 #include <utility>
@@ -111,11 +112,21 @@ private:
     void gatherAndUploadInstProps(const std::vector<std::pair<int, float>>& chunks, bool forShadow);
     void drawInstPropBatches(bool forShadow, bool countTris);
 
+    struct PendingWorldLoad {
+        std::vector<AdapterCapability> adapters;
+        std::vector<uint8_t> rockRgba;
+        WorldData world;
+        bool generateRockTex = false;
+    };
+
     void createLoadingOverlay();
     void setLoadingOverlayVisible(bool visible, const QString& text = {});
     void toggleFullscreen();
     void setMouseCapture(bool enable);
-    void startAsyncWorldLoad(uint32_t seed, bool generateRockTex);
+    void beginInitialStartup();
+    void runNextInitStep();
+    void startAsyncWorldLoad(uint32_t seed, bool generateRockTex, bool probeAdapters = false);
+    void tryFinishLoading();
     void uploadWorldToGpu(WorldData&& world);
 
     void spawnWhalePass(bool nearPlayer);
@@ -149,6 +160,11 @@ private:
     std::atomic<bool> m_destroying{false};
     bool m_isLoading = false;
     bool m_worldReady = false;
+    bool m_glContextReady = false;
+    bool m_startupScheduled = false;
+    bool m_glInitComplete = false;
+    int  m_initStep = 0;
+    std::unique_ptr<PendingWorldLoad> m_pendingLoad;
 
     WorldData m_world;
     uint32_t m_seed = 42u;

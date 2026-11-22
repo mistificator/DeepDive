@@ -144,7 +144,6 @@ DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget*
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
     m_rng.seed(rd() ^ timeSeed);
 
-    m_audioEngine = new UnderwaterAudioEngine(this);
     createLoadingOverlay();
 
     connect(&m_timer, &QTimer::timeout, this, QOverload<>::of(&DeepDiveWidget::update));
@@ -153,11 +152,17 @@ DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget*
 
 DeepDiveWidget::~DeepDiveWidget() {
     m_destroying.store(true);
+    m_timer.stop();
     if (m_loadThread.joinable()) {
         m_loadThread.join();
     }
+    m_pendingLoad.reset();
 
     setMouseCapture(false);
+    if (!m_glContextReady || !context()) {
+        return;
+    }
+
     makeCurrent();
     destroyPostProcessBuffers();
     if (m_shadowFBO) glDeleteFramebuffers(1, &m_shadowFBO);
@@ -236,6 +241,7 @@ void DeepDiveWidget::createLoadingOverlay() {
 
     m_loadingOverlay->setGeometry(rect());
     m_loadingOverlay->show();
+    m_loadingOverlay->raise();
 }
 
 void DeepDiveWidget::setLoadingOverlayVisible(bool visible, const QString& text) {
@@ -807,98 +813,177 @@ void DeepDiveWidget::initializeGL() {
     glEnable(GL_MULTISAMPLE);
     glEnable(GL_PROGRAM_POINT_SIZE);
 
-    queryOpenGLCapabilities();
-    createShadowMapBuffer();
+    m_glContextReady = true;
 
-    m_shadowEnvShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowEnvVert);
-    m_shadowEnvShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
-    m_shadowEnvShader.link();
-
-    m_shadowInstPropShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowInstPropVert);
-    m_shadowInstPropShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
-    m_shadowInstPropShader.link();
-
-    m_shadowFaunaShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowFaunaVert);
-    m_shadowFaunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
-    m_shadowFaunaShader.link();
-
-    m_envShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::EnvironmentVert);
-    m_envShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::EnvironmentFrag);
-    m_envShader.link();
-
-    m_instPropShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::InstPropVert);
-    m_instPropShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::EnvironmentFrag);
-    m_instPropShader.link();
-
-    m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::FaunaVert);
-    m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::FaunaFrag);
-    m_faunaShader.link();
-
-    m_waterShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::WaterSurfaceVert);
-    m_waterShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::WaterSurfaceFrag);
-    m_waterShader.link();
-
-    m_skyShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::SkyboxVert);
-    m_skyShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::SkyboxFrag);
-    m_skyShader.link();
-
-    m_rayShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::TranslucentVert);
-    m_rayShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::TranslucentFrag);
-    m_rayShader.link();
-
-    m_particleShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ParticleVert);
-    m_particleShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ParticleFrag);
-    m_particleShader.link();
-
-    m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
-    m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ScatterBlurFrag);
-    m_scatterBlurShader.link();
-
-    m_postProcessShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
-    m_postProcessShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::PostProcessFrag);
-    m_postProcessShader.link();
-
-    float skyQuad[] = {-1.0f, -1.0f,  1.0f, -1.0f,  1.0f,  1.0f,
-                       -1.0f, -1.0f,  1.0f,  1.0f, -1.0f,  1.0f};
-    glGenVertexArrays(1, &m_skyVAO);
-    glGenBuffers(1, &m_skyVBO);
-    glBindVertexArray(m_skyVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_skyVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(skyQuad), skyQuad, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
-
-    createWaterSurfaceMesh();
-
-    glGenVertexArrays(1, &m_terrainVAO);
-    glGenBuffers(1, &m_terrainVBO);
-    glGenBuffers(1, &m_terrainEBO);
-
-    glGenVertexArrays(1, &m_propVAO);
-    glGenBuffers(1, &m_propVBO);
-    glGenBuffers(1, &m_propEBO);
-
-    glGenVertexArrays(1, &m_rayVAO);
-    glGenBuffers(1, &m_rayVBO);
-    glGenBuffers(1, &m_rayEBO);
-    glGenBuffers(1, &m_rayInstVBO);
-
-    glGenVertexArrays(1, &m_particleVAO);
-    glGenBuffers(1, &m_particleVBO);
-
-    qreal dpr = devicePixelRatioF();
-    resizePostProcessBuffers(int(width() * dpr), int(height() * dpr));
-
-    startAsyncWorldLoad(m_seed, true);
+    // Отпускаем первый кадр, чтобы окно с прогрессбаром появилось сразу же,
+    // и только затем запускаем компиляцию шейдеров и генерацию мира.
+    if (!m_startupScheduled) {
+        m_startupScheduled = true;
+        QTimer::singleShot(30, this, &DeepDiveWidget::beginInitialStartup);
+    }
 }
 
-void DeepDiveWidget::startAsyncWorldLoad(uint32_t seed, bool generateRockTex) {
+void DeepDiveWidget::beginInitialStartup() {
+    if (m_destroying.load()) return;
+
+    // Запускаем фоновую CPU-генерацию сразу, параллельно с шагами GPU/аудио
+    startAsyncWorldLoad(m_seed, true, m_adapters.empty());
+
+    m_initStep = 0;
+    QTimer::singleShot(0, this, &DeepDiveWidget::runNextInitStep);
+}
+
+void DeepDiveWidget::runNextInitStep() {
+    if (m_destroying.load() || !m_glContextReady) return;
+
+    auto setStatus = [this](const QString& text) {
+        if (m_loadingLabel && m_isLoading) {
+            m_loadingLabel->setText(text);
+        }
+    };
+
+    switch (m_initStep) {
+    case 0: {
+        setStatus("Инициализация OpenGL...");
+        makeCurrent();
+        queryOpenGLCapabilities();
+        createShadowMapBuffer();
+
+        float skyQuad[] = {-1.0f, -1.0f,  1.0f, -1.0f,  1.0f,  1.0f,
+                           -1.0f, -1.0f,  1.0f,  1.0f, -1.0f,  1.0f};
+        glGenVertexArrays(1, &m_skyVAO);
+        glGenBuffers(1, &m_skyVBO);
+        glBindVertexArray(m_skyVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, m_skyVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(skyQuad), skyQuad, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+        glBindVertexArray(0);
+
+        glGenVertexArrays(1, &m_terrainVAO);
+        glGenBuffers(1, &m_terrainVBO);
+        glGenBuffers(1, &m_terrainEBO);
+
+        glGenVertexArrays(1, &m_propVAO);
+        glGenBuffers(1, &m_propVBO);
+        glGenBuffers(1, &m_propEBO);
+
+        glGenVertexArrays(1, &m_rayVAO);
+        glGenBuffers(1, &m_rayVBO);
+        glGenBuffers(1, &m_rayEBO);
+        glGenBuffers(1, &m_rayInstVBO);
+
+        glGenVertexArrays(1, &m_particleVAO);
+        glGenBuffers(1, &m_particleVBO);
+        doneCurrent();
+        break;
+    }
+    case 1:
+        setStatus("Компиляция шейдеров теней...");
+        makeCurrent();
+        m_shadowEnvShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowEnvVert);
+        m_shadowEnvShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
+        m_shadowEnvShader.link();
+
+        m_shadowInstPropShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowInstPropVert);
+        m_shadowInstPropShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
+        m_shadowInstPropShader.link();
+
+        m_shadowFaunaShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ShadowFaunaVert);
+        m_shadowFaunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ShadowDepthFrag);
+        m_shadowFaunaShader.link();
+        doneCurrent();
+        break;
+
+    case 2:
+        setStatus("Компиляция шейдеров окружения...");
+        makeCurrent();
+        m_envShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::EnvironmentVert);
+        m_envShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::EnvironmentFrag);
+        m_envShader.link();
+
+        m_instPropShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::InstPropVert);
+        m_instPropShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::EnvironmentFrag);
+        m_instPropShader.link();
+
+        m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::FaunaVert);
+        m_faunaShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::FaunaFrag);
+        m_faunaShader.link();
+        doneCurrent();
+        break;
+
+    case 3:
+        setStatus("Компиляция шейдеров воды и света...");
+        makeCurrent();
+        m_waterShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::WaterSurfaceVert);
+        m_waterShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::WaterSurfaceFrag);
+        m_waterShader.link();
+
+        m_skyShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::SkyboxVert);
+        m_skyShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::SkyboxFrag);
+        m_skyShader.link();
+
+        m_rayShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::TranslucentVert);
+        m_rayShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::TranslucentFrag);
+        m_rayShader.link();
+        doneCurrent();
+        break;
+
+    case 4:
+        setStatus("Компиляция шейдеров постобработки...");
+        makeCurrent();
+        m_particleShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::ParticleVert);
+        m_particleShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ParticleFrag);
+        m_particleShader.link();
+
+        m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
+        m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ScatterBlurFrag);
+        m_scatterBlurShader.link();
+
+        m_postProcessShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
+        m_postProcessShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::PostProcessFrag);
+        m_postProcessShader.link();
+        doneCurrent();
+        break;
+
+    case 5: {
+        setStatus("Подготовка буферов рендера...");
+        makeCurrent();
+        createWaterSurfaceMesh();
+        qreal dpr = devicePixelRatioF();
+        resizePostProcessBuffers(int(width() * dpr), int(height() * dpr));
+        doneCurrent();
+        break;
+    }
+    case 6:
+        setStatus("Инициализация аудиосистемы...");
+        if (!m_audioEngine) {
+            m_audioEngine = new UnderwaterAudioEngine(this);
+        }
+        break;
+
+    case 7:
+        m_glInitComplete = true;
+        if (!m_pendingLoad) {
+            setStatus("Генерация подводного мира и текстур...");
+        }
+        tryFinishLoading();
+        return;
+    }
+
+    ++m_initStep;
+    // Небольшая пауза даёт Qt перерисовывать анимацию QProgressBar между шагами
+    QTimer::singleShot(10, this, &DeepDiveWidget::runNextInitStep);
+}
+
+void DeepDiveWidget::startAsyncWorldLoad(uint32_t seed, bool generateRockTex, bool probeAdapters) {
     if (m_isLoading) return;
     if (m_loadThread.joinable()) {
         m_loadThread.join();
     }
 
     m_isLoading = true;
+    m_pendingLoad.reset();
     m_timer.stop();
     m_pressedKeys.clear();
     setMouseCapture(false);
@@ -906,43 +991,63 @@ void DeepDiveWidget::startAsyncWorldLoad(uint32_t seed, bool generateRockTex) {
                                        ? "Генерация подводного мира и текстур..."
                                        : "Перегенерация подводного мира...");
 
-    m_loadThread = std::thread([this, seed, generateRockTex]() {
-        std::vector<uint8_t> rockRgba;
-        if (generateRockTex && !m_destroying.load()) {
-            rockRgba = generateRockTextureData(1024);
+    m_loadThread = std::thread([this, seed, generateRockTex, probeAdapters]() {
+        auto payload = std::make_shared<PendingWorldLoad>();
+        payload->generateRockTex = generateRockTex;
+
+        if (probeAdapters && !m_destroying.load()) {
+            payload->adapters = GpuUtils::enumerateAndSelectBestGpu();
         }
         if (m_destroying.load()) return;
 
-        WorldData generated = WorldGenerator::generate(seed);
+        if (generateRockTex && !m_destroying.load()) {
+            payload->rockRgba = generateRockTextureData(1024);
+        }
         if (m_destroying.load()) return;
 
-        auto sharedWorld = std::make_shared<WorldData>(std::move(generated));
-        auto sharedRock  = std::make_shared<std::vector<uint8_t>>(std::move(rockRgba));
+        payload->world = WorldGenerator::generate(seed);
+        if (m_destroying.load()) return;
 
-        QMetaObject::invokeMethod(this, [this, sharedWorld, sharedRock, generateRockTex]() {
+        QMetaObject::invokeMethod(this, [this, payload]() {
             if (m_destroying.load()) return;
-
-            makeCurrent();
-            if (generateRockTex && !sharedRock->empty()) {
-                uploadRockTextureData(*sharedRock, 1024);
-            }
-            uploadWorldToGpu(std::move(*sharedWorld));
-            doneCurrent();
-
-            m_worldReady       = true;
-            m_isLoading        = false;
-            m_lastFrameNs      = 0;
-            m_fpsWindowStartNs = 0;
-            m_fpsFrameCount    = 0;
-
-            setLoadingOverlayVisible(false);
-            m_timer.start(0);
-            if (!m_userReleasedMouse && isActiveWindow()) {
-                setMouseCapture(true);
-            }
-            update();
+            m_pendingLoad = std::make_unique<PendingWorldLoad>(std::move(*payload));
+            tryFinishLoading();
         }, Qt::QueuedConnection);
     });
+}
+
+void DeepDiveWidget::tryFinishLoading() {
+    if (m_destroying.load() || !m_glInitComplete || !m_pendingLoad) {
+        return;
+    }
+
+    auto pending = std::move(m_pendingLoad);
+    if (!pending->adapters.empty()) {
+        m_adapters = std::move(pending->adapters);
+    }
+
+    makeCurrent();
+    if (!m_adapters.empty()) {
+        queryOpenGLCapabilities();
+    }
+    if (pending->generateRockTex && !pending->rockRgba.empty()) {
+        uploadRockTextureData(pending->rockRgba, 1024);
+    }
+    uploadWorldToGpu(std::move(pending->world));
+    doneCurrent();
+
+    m_worldReady       = true;
+    m_isLoading        = false;
+    m_lastFrameNs      = 0;
+    m_fpsWindowStartNs = 0;
+    m_fpsFrameCount    = 0;
+
+    setLoadingOverlayVisible(false);
+    m_timer.start(0);
+    if (!m_userReleasedMouse && isActiveWindow()) {
+        setMouseCapture(true);
+    }
+    update();
 }
 
 void DeepDiveWidget::uploadWorldToGpu(WorldData&& world) {
@@ -1914,6 +2019,7 @@ void DeepDiveWidget::cullAndUploadFauna(const FrustumPlanes& frustum) {
 }
 
 void DeepDiveWidget::resizeGL(int w, int h) {
+    if (!m_glInitComplete) return;
     qreal dpr = devicePixelRatioF();
     resizePostProcessBuffers(int(w * dpr), int(h * dpr));
 }
