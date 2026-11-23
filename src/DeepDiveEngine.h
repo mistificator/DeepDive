@@ -3,7 +3,14 @@
 #include <array>
 #include <cstdint>
 #include <random>
+#include <vector>
 #include "WorldGenerator.h"
+
+enum class CameraMode {
+    FirstPerson = 0,
+    ThirdPersonFish = 1,
+    ThirdPersonManta = 2
+};
 
 struct EngineInput {
     float yawDelta = 0.0f;
@@ -44,6 +51,7 @@ public:
 
     // World & gameplay actions
     void cycleBiome();
+    void cycleCameraMode();
     void summonWhaleNearPlayer();
 
     // Read-only state for renderer, HUD, and audio
@@ -56,10 +64,16 @@ public:
     float simulationTime() const { return m_time; }
     bool isPlayerColliding() const { return m_playerColliding; }
 
+    CameraMode cameraMode() const { return m_cameraMode; }
+    const char* cameraModeName() const;
+    bool hasPlayerAvatar() const { return m_cameraMode != CameraMode::FirstPerson; }
+    const FaunaAgent& playerAvatar() const { return m_playerAvatar; }
+
+    QVector3D playerPosition() const { return m_playerPos; }
     QVector3D cameraPosition() const { return m_camPos; }
     QVector3D cameraForward() const;
     QVector3D cameraRight() const;
-    float cameraSpeed() const { return m_camVel.length(); }
+    float cameraSpeed() const { return m_playerVel.length(); }
     float diveDepth() const;
     float radialDistance() const;
 
@@ -74,14 +88,31 @@ private:
         AvoidingTurn
     };
 
+    struct WhaleColliderSphere {
+        QVector3D center;
+        float radius = 1.0f;
+    };
+
+    static constexpr int WHALE_COLLIDER_COUNT = 7;
+
+    void configurePlayerAvatar(bool resetOrientation);
+    float playerCollisionRadius() const;
+    float playerFloorMargin() const;
+    float playerSurfaceMargin() const;
+    void updatePlayerAvatarAndCamera(float dt, const QVector3D& wishDir, bool moving);
+    bool isCameraPointClear(const QVector3D& pt, float radius) const;
+
     void spawnWhalePass(bool nearPlayer);
     float sampleWhaleClearance(float x, float z) const;
     float measureWhaleFreeDist(float x, float z, float yaw, float maxDist) const;
     QVector3D pickWhaleOpenWaypoint(const QVector3D& nearAnchor, float minDist, float maxDist) const;
     void updateWhaleNavigation(float dt, bool& whaleCalledOut);
+    void refreshWhaleColliders();
+    QVector3D computeWhaleAvoidanceForce(const QVector3D& pos, float agentRadius, float margin) const;
 
     void updateFaunaAgents(float dt);
     void updateAnglerAgents(float dt);
+    void resolveFaunaAndPlayerCollisions(float& maxPlayerImpactSpeed);
     void refreshLureLights();
     QVector3D computeAnglerLureWorldPos(const FaunaAgent& a) const;
     void updateParticles(float dt);
@@ -97,9 +128,12 @@ private:
     std::array<QVector3D, MAX_LURE_LIGHTS> m_lurePositions{};
     int m_lureCount = 0;
 
-    // Autonomous humpback whale state
+    // Autonomous humpback whale state & multi-sphere collider hull
     std::mt19937 m_rng;
     FaunaAgent m_whale;
+    std::array<WhaleColliderSphere, WHALE_COLLIDER_COUNT> m_whaleColliders{};
+    float m_whaleBroadRadius = 20.0f;
+
     QVector3D m_whaleWaypoint{0.0f, 20.5f, 0.0f};
     float m_whaleWaypointTimer = 0.0f;
     float m_whaleSongTimer = 7.0f;
@@ -118,9 +152,16 @@ private:
     float m_whaleSurfaceTimer = 0.0f;
     float m_whaleSurfaceBlend = 0.0f;
 
-    // Diver camera state
+    // Player body, third-person avatar, and camera rig
+    CameraMode m_cameraMode = CameraMode::FirstPerson;
+    FaunaAgent m_playerAvatar{};
+    QVector3D m_playerPos{0.0f, -6.0f, 20.0f};
+    QVector3D m_playerVel{0.0f, 0.0f, 0.0f};
     QVector3D m_camPos{0.0f, -6.0f, 20.0f};
-    QVector3D m_camVel{0.0f, 0.0f, 0.0f};
+    float m_camArmDist = 0.0f;
     float m_yaw = 0.0f;
     float m_pitch = 0.06f;
+
+    // Reusable scratch buffer for fish spatial hash (zero per-frame allocations)
+    std::vector<int> m_fishHashNext;
 };

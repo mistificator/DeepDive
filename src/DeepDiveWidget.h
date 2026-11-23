@@ -43,6 +43,10 @@ private:
     struct PendingWorldLoad;
 
     void applySystemColorSchemeBackground();
+    void createHudOverlay();
+    void updateHudGeometry();
+    void setHudVisible(bool visible);
+    void updateHudOverlay();
     void createLoadingOverlay();
     void setLoadingOverlayVisible(bool visible, const QString& text = {});
     void toggleFullscreen();
@@ -51,7 +55,6 @@ private:
     void runNextInitStep();
     void startAsyncWorldLoad(uint32_t seed, bool generateRockTex, bool probeAdapters = false);
     void tryFinishLoading();
-    void drawHud();
 
     std::unique_ptr<DeepDiveEngine> m_engine;
     std::unique_ptr<DeepDiveRender> m_render;
@@ -61,6 +64,10 @@ private:
     QColor m_windowBgColor{18, 22, 28};
     bool m_hudVisible = false;
     bool m_wasMaximizedBeforeFullscreen = false;
+
+    // HUD overlay widget (composited by Qt without invoking QPainter inside paintGL)
+    QLabel* m_hudLabel = nullptr;
+    qint64 m_lastHudUpdateNs = 0;
 
     // Loading overlay (indeterminate progress bar) and background generation thread
     QWidget* m_loadingOverlay = nullptr;

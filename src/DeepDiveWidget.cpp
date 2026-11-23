@@ -9,7 +9,6 @@
 #include <QLabel>
 #include <QMetaObject>
 #include <QMouseEvent>
-#include <QPainter>
 #include <QPalette>
 #include <QProgressBar>
 #include <QResizeEvent>
@@ -37,6 +36,7 @@ DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget*
     setMinimumSize(1280, 720);
 
     applySystemColorSchemeBackground();
+    createHudOverlay();
     createLoadingOverlay();
 
     connect(&m_timer, &QTimer::timeout, this, QOverload<>::of(&DeepDiveWidget::update));
@@ -64,14 +64,10 @@ DeepDiveWidget::~DeepDiveWidget() {
 }
 
 void DeepDiveWidget::applySystemColorSchemeBackground() {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
     const bool isDark = (scheme == Qt::ColorScheme::Dark) ||
                         (scheme == Qt::ColorScheme::Unknown &&
                          palette().color(QPalette::Window).lightness() < 128);
-#else
-    const bool isDark = palette().color(QPalette::Window).lightness() < 128;
-#endif
 
     m_windowBgColor = isDark ? QColor(18, 22, 28) : QColor(242, 244, 248);
 
@@ -80,6 +76,104 @@ void DeepDiveWidget::applySystemColorSchemeBackground() {
     pal.setColor(QPalette::Base, m_windowBgColor);
     setPalette(pal);
     setAutoFillBackground(true);
+}
+
+void DeepDiveWidget::createHudOverlay() {
+    m_hudLabel = new QLabel(this);
+    m_hudLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    m_hudLabel->setAttribute(Qt::WA_StyledBackground, true);
+    m_hudLabel->setFocusPolicy(Qt::NoFocus);
+    m_hudLabel->setTextFormat(Qt::PlainText);
+    m_hudLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_hudLabel->setStyleSheet(
+        "QLabel {"
+        "  background-color: rgba(5, 22, 32, 165);"
+        "  color: rgba(210, 245, 255, 230);"
+        "  font-family: 'Consolas', monospace;"
+        "  font-size: 10pt;"
+        "  font-weight: bold;"
+        "  padding: 4px 10px;"
+        "}"
+        );
+    updateHudGeometry();
+    m_hudLabel->hide();
+}
+
+void DeepDiveWidget::updateHudGeometry() {
+    if (!m_hudLabel) return;
+    const int hudW = std::max(600, width() - 28);
+    m_hudLabel->setGeometry(14, 14, hudW, 68);
+}
+
+void DeepDiveWidget::setHudVisible(bool visible) {
+    m_hudVisible = visible;
+    if (!m_hudLabel) return;
+
+    if (m_hudVisible && m_worldReady && !m_isLoading) {
+        updateHudGeometry();
+        m_lastHudUpdateNs = 0;
+        updateHudOverlay();
+        m_hudLabel->show();
+        m_hudLabel->raise();
+        if (m_loadingOverlay && m_loadingOverlay->isVisible()) {
+            m_loadingOverlay->raise();
+        }
+    } else {
+        m_hudLabel->hide();
+    }
+}
+
+void DeepDiveWidget::updateHudOverlay() {
+    if (!m_hudLabel) return;
+
+    const QString audioStatus = (m_audioEngine && !m_audioEngine->isMuted())
+                                    ? QString("ON (%1%)").arg(qRound(m_audioEngine->volume() * 100.0f))
+                                    : QString("MUTED");
+    const QString padStatus = m_gamepadConnected
+                                  ? (m_gamepadIsXInput ? "XInput" : "HID")
+                                  : "OFF";
+    const char* tessStatus = !m_render->tessellationSupported()
+                                 ? "N/A"
+                                 : (m_render->tessellationEnabled() ? "ON" : "OFF");
+
+    const FrameRenderStats& st = m_render->stats();
+
+    const QString hud = QString(
+                            "GPU: %1 | GL %2.%3 | %4x MSAA | Tess: %5 | Shadows: %6 | PostFX: %7 | Audio: %8 | Pad: %9 | FPS: %10\n"
+                            "Chunks: %11/%12 (LOD0:%13 LOD1:%14 LOD2:%15 LOD3:%16) | Props: %17 | Tris: %18k | Fish: %19+%20 | Mantas: %21+%22 | Anglers: %23\n"
+                            "Cam: %24 | Depth: %25m | R: %26m %27 | Seed: %28 | Biome: %29 | [C/L3] Cam [`] HUD [F/R3] Wire [T] Tess [B] Biome [K] Whale [Alt+Enter] FS"
+                            )
+                            .arg(m_render->glRendererInfo())
+                            .arg(m_render->glMajorVersion())
+                            .arg(m_render->glMinorVersion())
+                            .arg(m_render->activeSamples())
+                            .arg(tessStatus)
+                            .arg(m_render->shadowsEnabled() ? "ON" : "OFF")
+                            .arg(m_render->postProcessEnabled() ? "ON" : "OFF")
+                            .arg(audioStatus)
+                            .arg(padStatus)
+                            .arg(qRound(m_fps))
+                            .arg(st.visibleChunks)
+                            .arg(st.totalChunks)
+                            .arg(st.lodCounts[0])
+                            .arg(st.lodCounts[1])
+                            .arg(st.lodCounts[2])
+                            .arg(st.lodCounts[3])
+                            .arg(st.visibleInstProps)
+                            .arg(st.drawnTriangles / 1000.0, 0, 'f', 1)
+                            .arg(st.visibleFishLod0)
+                            .arg(st.visibleFishLod1)
+                            .arg(st.visibleMantaLod0)
+                            .arg(st.visibleMantaLod1)
+                            .arg(st.visibleAnglers)
+                            .arg(m_engine->cameraModeName())
+                            .arg(qRound(m_engine->diveDepth()))
+                            .arg(qRound(m_engine->radialDistance()))
+                            .arg(m_engine->isPlayerColliding() ? "[COLLISION]" : "")
+                            .arg(m_seed)
+                            .arg(m_engine->biomeName());
+
+    m_hudLabel->setText(hud);
 }
 
 void DeepDiveWidget::createLoadingOverlay() {
@@ -179,6 +273,7 @@ void DeepDiveWidget::setMouseCapture(bool enable) {
 void DeepDiveWidget::initializeGL() {
     m_render->initializeGLContext();
     m_glContextReady = true;
+    setAutoFillBackground(false);
 
     // Release the first frame so the window and progress bar appear immediately,
     // then run stepped shader compilation and background world generation.
@@ -284,6 +379,9 @@ void DeepDiveWidget::startAsyncWorldLoad(uint32_t seed, bool generateRockTex, bo
     m_pendingMouseYawDelta = 0.0f;
     m_pendingMousePitchDelta = 0.0f;
     setMouseCapture(false);
+    if (m_hudLabel) {
+        m_hudLabel->hide();
+    }
     setLoadingOverlayVisible(true, generateRockTex
                                        ? "Generating underwater world and textures..."
                                        : "Regenerating underwater world...");
@@ -341,8 +439,12 @@ void DeepDiveWidget::tryFinishLoading() {
     m_lastFrameNs = 0;
     m_fpsWindowStartNs = 0;
     m_fpsFrameCount = 0;
+    m_lastHudUpdateNs = 0;
 
     setLoadingOverlayVisible(false);
+    if (m_hudVisible) {
+        setHudVisible(true);
+    }
     m_timer.start(0);
     if (!m_userReleasedMouse && isActiveWindow()) {
         setMouseCapture(true);
@@ -358,6 +460,7 @@ void DeepDiveWidget::resizeGL(int w, int h) {
 
 void DeepDiveWidget::showEvent(QShowEvent* event) {
     QOpenGLWidget::showEvent(event);
+    updateHudGeometry();
     if (m_loadingOverlay) {
         m_loadingOverlay->setGeometry(rect());
         if (m_loadingOverlay->isVisible()) {
@@ -368,6 +471,7 @@ void DeepDiveWidget::showEvent(QShowEvent* event) {
 
 void DeepDiveWidget::resizeEvent(QResizeEvent* event) {
     QOpenGLWidget::resizeEvent(event);
+    updateHudGeometry();
     if (m_loadingOverlay) {
         m_loadingOverlay->setGeometry(rect());
     }
@@ -406,14 +510,15 @@ void DeepDiveWidget::paintGL() {
     m_gamepadIsXInput = gp.isXInput;
 
     if (gp.connected) {
-        if (gp.toggleBiome)     m_engine->cycleBiome();
-        if (gp.togglePostFx)    m_render->togglePostProcess();
-        if (gp.toggleShadows)   m_render->toggleShadows();
-        if (gp.toggleHud)       m_hudVisible = !m_hudVisible;
-        if (gp.toggleWireframe) m_render->toggleWireframe();
-        if (gp.toggleMute && m_audioEngine) m_audioEngine->toggleMute();
-        if (gp.volumeUp   && m_audioEngine) m_audioEngine->adjustVolume(0.05f);
-        if (gp.volumeDown && m_audioEngine) m_audioEngine->adjustVolume(-0.05f);
+        if (gp.cycleCamera)     { m_engine->cycleCameraMode();   m_lastHudUpdateNs = 0; }
+        if (gp.toggleBiome)     { m_engine->cycleBiome();        m_lastHudUpdateNs = 0; }
+        if (gp.togglePostFx)    { m_render->togglePostProcess(); m_lastHudUpdateNs = 0; }
+        if (gp.toggleShadows)   { m_render->toggleShadows();     m_lastHudUpdateNs = 0; }
+        if (gp.toggleHud)       { setHudVisible(!m_hudVisible); }
+        if (gp.toggleWireframe) { m_render->toggleWireframe();   m_lastHudUpdateNs = 0; }
+        if (gp.toggleMute && m_audioEngine) { m_audioEngine->toggleMute();         m_lastHudUpdateNs = 0; }
+        if (gp.volumeUp   && m_audioEngine) { m_audioEngine->adjustVolume(0.05f);  m_lastHudUpdateNs = 0; }
+        if (gp.volumeDown && m_audioEngine) { m_audioEngine->adjustVolume(-0.05f); m_lastHudUpdateNs = 0; }
         if (gp.summonWhale) {
             m_engine->summonWhaleNearPlayer();
             if (m_audioEngine) m_audioEngine->triggerWhaleCall();
@@ -462,7 +567,7 @@ void DeepDiveWidget::paintGL() {
     }
 
     if (m_audioEngine) {
-        m_audioEngine->updateState(m_engine->cameraPosition().y(),
+        m_audioEngine->updateState(m_engine->playerPosition().y(),
                                    m_engine->cameraSpeed(),
                                    m_engine->audioBiomeIndex());
         if (events.whaleCalled) {
@@ -476,66 +581,17 @@ void DeepDiveWidget::paintGL() {
     const int physH = std::max(64, int(height() * dpr));
     m_render->render(*m_engine, physW, physH, defaultFramebufferObject());
 
-    if (m_hudVisible) {
-        drawHud();
+    if (m_hudVisible && m_hudLabel) {
+        if (!m_hudLabel->isVisible()) {
+            updateHudGeometry();
+            m_hudLabel->show();
+            m_lastHudUpdateNs = 0;
+        }
+        if (m_lastHudUpdateNs == 0 || (nowNs - m_lastHudUpdateNs) >= 100'000'000LL) {
+            m_lastHudUpdateNs = nowNs;
+            updateHudOverlay();
+        }
     }
-}
-
-void DeepDiveWidget::drawHud() {
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::TextAntialiasing);
-    painter.setPen(QColor(210, 245, 255, 230));
-    painter.setFont(QFont("Consolas", 10, QFont::Bold));
-
-    const QString audioStatus = (m_audioEngine && !m_audioEngine->isMuted())
-                                    ? QString("ON (%1%)").arg(qRound(m_audioEngine->volume() * 100.0f))
-                                    : QString("MUTED");
-    const QString padStatus = m_gamepadConnected
-                                  ? (m_gamepadIsXInput ? "XInput" : "HID")
-                                  : "OFF";
-    const char* tessStatus = !m_render->tessellationSupported()
-                                 ? "N/A"
-                                 : (m_render->tessellationEnabled() ? "ON" : "OFF");
-
-    const FrameRenderStats& st = m_render->stats();
-
-    const QString hud = QString(
-                            "GPU: %1 | GL %2.%3 | %4x MSAA | Tess: %5 | Shadows: %6 | PostFX: %7 | Audio: %8 | Pad: %9 | FPS: %10\n"
-                            "Chunks: %11/%12 (LOD0:%13 LOD1:%14 LOD2:%15 LOD3:%16) | Props: %17 | Tris: %18k | Fish: %19+%20 | Mantas: %21+%22 | Anglers: %23\n"
-                            "Depth: %24m | R: %25m %26 | Seed: %27 | Biome: %28 | [Alt+Enter] Fullscreen [Esc] Cursor [`] HUD [F/R3] Wire [T] Tess [B] Biome [K] Whale"
-                            )
-                            .arg(m_render->glRendererInfo())
-                            .arg(m_render->glMajorVersion())
-                            .arg(m_render->glMinorVersion())
-                            .arg(m_render->activeSamples())
-                            .arg(tessStatus)
-                            .arg(m_render->shadowsEnabled() ? "ON" : "OFF")
-                            .arg(m_render->postProcessEnabled() ? "ON" : "OFF")
-                            .arg(audioStatus)
-                            .arg(padStatus)
-                            .arg(qRound(m_fps))
-                            .arg(st.visibleChunks)
-                            .arg(st.totalChunks)
-                            .arg(st.lodCounts[0])
-                            .arg(st.lodCounts[1])
-                            .arg(st.lodCounts[2])
-                            .arg(st.lodCounts[3])
-                            .arg(st.visibleInstProps)
-                            .arg(st.drawnTriangles / 1000.0, 0, 'f', 1)
-                            .arg(st.visibleFishLod0)
-                            .arg(st.visibleFishLod1)
-                            .arg(st.visibleMantaLod0)
-                            .arg(st.visibleMantaLod1)
-                            .arg(st.visibleAnglers)
-                            .arg(qRound(m_engine->diveDepth()))
-                            .arg(qRound(m_engine->radialDistance()))
-                            .arg(m_engine->isPlayerColliding() ? "[COLLISION]" : "")
-                            .arg(m_seed)
-                            .arg(m_engine->biomeName());
-
-    const int hudW = std::max(600, width() - 28);
-    painter.fillRect(QRect(14, 14, hudW, 68), QColor(5, 22, 32, 165));
-    painter.drawText(QRect(24, 18, hudW - 20, 60), Qt::AlignLeft | Qt::AlignVCenter, hud);
 }
 
 void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
@@ -567,33 +623,50 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
                               txt == QLatin1String("~") ||
                               (!txt.isEmpty() && (txt[0] == QChar(0x0451) || txt[0] == QChar(0x0401))));
     if (isHudToggle) {
-        m_hudVisible = !m_hudVisible;
+        setHudVisible(!m_hudVisible);
         return;
     }
 
     m_pressedKeys.insert(event->key());
-    if (event->key() == Qt::Key_B) {
+    if (event->key() == Qt::Key_C) {
+        m_engine->cycleCameraMode();
+        m_lastHudUpdateNs = 0;
+    } else if (event->key() == Qt::Key_B) {
         m_engine->cycleBiome();
+        m_lastHudUpdateNs = 0;
     } else if (event->key() == Qt::Key_R) {
         m_seed += 17u;
         startAsyncWorldLoad(m_seed, false);
     } else if (event->key() == Qt::Key_P) {
         m_render->togglePostProcess();
+        m_lastHudUpdateNs = 0;
     } else if (event->key() == Qt::Key_L) {
         m_render->toggleShadows();
+        m_lastHudUpdateNs = 0;
     } else if (event->key() == Qt::Key_F) {
         m_render->toggleWireframe();
+        m_lastHudUpdateNs = 0;
     } else if (event->key() == Qt::Key_T) {
         m_render->toggleTessellation();
+        m_lastHudUpdateNs = 0;
     } else if (event->key() == Qt::Key_M) {
-        if (m_audioEngine) m_audioEngine->toggleMute();
+        if (m_audioEngine) {
+            m_audioEngine->toggleMute();
+            m_lastHudUpdateNs = 0;
+        }
     } else if (event->key() == Qt::Key_K) {
         m_engine->summonWhaleNearPlayer();
         if (m_audioEngine) m_audioEngine->triggerWhaleCall();
     } else if (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal) {
-        if (m_audioEngine) m_audioEngine->adjustVolume(0.05f);
+        if (m_audioEngine) {
+            m_audioEngine->adjustVolume(0.05f);
+            m_lastHudUpdateNs = 0;
+        }
     } else if (event->key() == Qt::Key_Minus) {
-        if (m_audioEngine) m_audioEngine->adjustVolume(-0.05f);
+        if (m_audioEngine) {
+            m_audioEngine->adjustVolume(-0.05f);
+            m_lastHudUpdateNs = 0;
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 #include "DeepDiveEngine.h"
 #include "Noise.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <utility>
@@ -16,11 +17,94 @@ inline float wrapAngle(float a) {
     return a;
 }
 
+inline QVector3D faunaLocalToWorld(const FaunaAgent& a, const QVector3D& localPos) {
+    const QVector3D s = localPos * a.scale;
+    const float cy = std::cos(a.yaw),   sy = std::sin(a.yaw);
+    const float cp = std::cos(a.pitch), sp = std::sin(a.pitch);
+    const float cb = std::cos(a.bank),  sb = std::sin(a.bank);
+
+    const QVector3D v1(cb * s.x() - sb * s.y(),
+                       sb * s.x() + cb * s.y(),
+                       s.z());
+    const QVector3D v2(v1.x(),
+                       cp * v1.y() + sp * v1.z(),
+                       -sp * v1.y() + cp * v1.z());
+    const QVector3D v3(cy * v2.x() + sy * v2.z(),
+                       v2.y(),
+                       -sy * v2.x() + cy * v2.z());
+    return v3 + a.pos;
+}
+
+inline float effectiveFishRadius(const FaunaAgent& a) {
+    return std::max(a.boundingRadius * 0.70f, 0.42f * a.scale);
+}
+
+inline float effectiveMantaRadius(const FaunaAgent& a) {
+    return std::max(a.boundingRadius, 1.55f * a.scale);
+}
+
+inline float effectiveAnglerRadius(const FaunaAgent& a) {
+    return std::max(a.boundingRadius, 1.15f * a.scale);
+}
+
+// Push two spherical bodies apart and cancel inward relative velocity
+inline bool resolveSpherePair(QVector3D& posA, QVector3D& velA, float rA, float invMassA,
+                              QVector3D& posB, QVector3D& velB, float rB, float invMassB,
+                              float yAnisotropy = 1.0f, float restitution = 1.08f,
+                              float* outImpactSpeed = nullptr) {
+    const float invMassSum = invMassA + invMassB;
+    if (invMassSum <= 1e-6f) return false;
+
+    const QVector3D diff = posA - posB;
+    const QVector3D scaled(diff.x(), diff.y() * yAnisotropy, diff.z());
+    const float rSum = rA + rB;
+    const float distSq = scaled.lengthSquared();
+    if (distSq >= rSum * rSum) return false;
+
+    QVector3D normal;
+    float pen = 0.0f;
+    if (distSq > 1e-6f) {
+        const float dist = std::sqrt(distSq);
+        pen = rSum - dist;
+        normal = QVector3D(scaled.x(), scaled.y() / yAnisotropy, scaled.z());
+        if (normal.lengthSquared() > 1e-6f) {
+            normal.normalize();
+        } else {
+            normal = QVector3D(1.0f, 0.0f, 0.0f);
+        }
+    } else {
+        pen = rSum;
+        normal = QVector3D(1.0f, 0.0f, 0.0f);
+    }
+
+    const float wA = invMassA / invMassSum;
+    const float wB = invMassB / invMassSum;
+    posA += normal * (pen * wA);
+    posB -= normal * (pen * wB);
+
+    const float relVn = QVector3D::dotProduct(velA - velB, normal);
+    if (relVn < 0.0f) {
+        if (outImpactSpeed) {
+            *outImpactSpeed = std::max(*outImpactSpeed, -relVn);
+        }
+        const float impulse = -relVn * restitution;
+        velA += normal * (impulse * wA);
+        velB -= normal * (impulse * wB);
+    }
+    return true;
+}
+
 constexpr const char* BIOME_NAMES[4] = {
     "Tropical Reef (Vibrant)",
     "Kelp Reef (Emerald)",
     "Purple Grotto",
     "Abyssal Trench"
+};
+
+constexpr const char* CAMERA_MODE_NAMES[3] = {
+    "1st Person",
+    "3rd Person (Fish)",
+    "3rd Person (Manta)"
 };
 } // namespace
 
@@ -33,6 +117,8 @@ DeepDiveEngine::DeepDiveEngine() {
     const auto timeSeed = static_cast<uint32_t>(
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
     m_rng.seed(rd() ^ timeSeed);
+
+    configurePlayerAvatar(true);
 }
 
 void DeepDiveEngine::setWorld(WorldData&& world, uint32_t seed) {
@@ -40,22 +126,57 @@ void DeepDiveEngine::setWorld(WorldData&& world, uint32_t seed) {
     m_world = std::move(world);
     m_playerColliding = false;
     m_wasPlayerColliding = false;
+    m_fishHashNext.resize(m_world.fishAgents.size(), -1);
 
-    m_world.collision.resolveSphereCollision(m_camPos, &m_camVel, 1.45f, 0.5f, 1.8f);
+    m_world.collision.resolveSphereCollision(
+        m_playerPos, &m_playerVel,
+        playerCollisionRadius(), playerFloorMargin(), playerSurfaceMargin());
+
     spawnWhalePass(true);
+    refreshWhaleColliders();
+    configurePlayerAvatar(true);
+
+    const float targetArm = (m_cameraMode == CameraMode::ThirdPersonFish) ? 4.2f
+                                                                          : (m_cameraMode == CameraMode::ThirdPersonManta ? 9.2f : 0.0f);
+    m_camArmDist = targetArm;
+    updatePlayerAvatarAndCamera(0.016f, QVector3D(0.0f, 0.0f, 0.0f), false);
     refreshLureLights();
 }
 
 // ============================================================================
-// CONTROLS & STATE QUERIES
+// CONTROLS, CAMERA MODE & STATE QUERIES
 // ============================================================================
 
 void DeepDiveEngine::cycleBiome() {
     m_paletteIndex = (m_paletteIndex + 1) % 4;
 }
 
+void DeepDiveEngine::cycleCameraMode() {
+    const int next = (static_cast<int>(m_cameraMode) + 1) % 3;
+    m_cameraMode = static_cast<CameraMode>(next);
+
+    configurePlayerAvatar(true);
+
+    // Ensure the resized player hull (e.g. switching from small fish to manta) is clear of rocks
+    m_world.collision.resolveSphereCollision(
+        m_playerPos, &m_playerVel,
+        playerCollisionRadius(), playerFloorMargin(), playerSurfaceMargin());
+
+    float unusedImpact = 0.0f;
+    resolveFaunaAndPlayerCollisions(unusedImpact);
+
+    m_camArmDist = (m_cameraMode == CameraMode::ThirdPersonFish) ? 4.2f
+                                                                 : (m_cameraMode == CameraMode::ThirdPersonManta ? 9.2f : 0.0f);
+    updatePlayerAvatarAndCamera(0.016f, QVector3D(0.0f, 0.0f, 0.0f), false);
+}
+
 void DeepDiveEngine::summonWhaleNearPlayer() {
     spawnWhalePass(true);
+    refreshWhaleColliders();
+}
+
+const char* DeepDiveEngine::cameraModeName() const {
+    return CAMERA_MODE_NAMES[static_cast<int>(m_cameraMode)];
 }
 
 QVector3D DeepDiveEngine::cameraForward() const {
@@ -71,11 +192,11 @@ QVector3D DeepDiveEngine::cameraRight() const {
 }
 
 float DeepDiveEngine::diveDepth() const {
-    return std::max(0.0f, ProcMath::WATER_SURFACE_Y - m_camPos.y());
+    return std::max(0.0f, ProcMath::WATER_SURFACE_Y - m_playerPos.y());
 }
 
 float DeepDiveEngine::radialDistance() const {
-    return std::sqrt(m_camPos.x() * m_camPos.x() + m_camPos.z() * m_camPos.z());
+    return std::sqrt(m_playerPos.x() * m_playerPos.x() + m_playerPos.z() * m_playerPos.z());
 }
 
 const char* DeepDiveEngine::biomeName() const {
@@ -128,8 +249,236 @@ BiomeVisuals DeepDiveEngine::biomeVisuals() const {
 }
 
 // ============================================================================
-// HUMPBACK WHALE NAVIGATION
+// THIRD-PERSON AVATAR & SPRING-ARM CAMERA
 // ============================================================================
+
+void DeepDiveEngine::configurePlayerAvatar(bool resetOrientation) {
+    if (m_cameraMode == CameraMode::ThirdPersonFish) {
+        m_playerAvatar.type           = 0.0f;
+        m_playerAvatar.scale          = 0.85f;
+        m_playerAvatar.boundingRadius = 0.72f;
+        m_playerAvatar.cruiseSpeed    = 6.5f;
+        m_playerAvatar.tint           = QVector3D(1.18f, 0.94f, 0.54f);
+    } else if (m_cameraMode == CameraMode::ThirdPersonManta) {
+        m_playerAvatar.type           = 1.0f;
+        m_playerAvatar.scale          = 1.35f;
+        m_playerAvatar.boundingRadius = 2.05f;
+        m_playerAvatar.cruiseSpeed    = 8.0f;
+        m_playerAvatar.tint           = QVector3D(0.96f, 1.06f, 1.16f);
+    }
+
+    m_playerAvatar.pos = m_playerPos;
+    m_playerAvatar.vel = m_playerVel;
+
+    if (resetOrientation) {
+        const QVector3D fwd = cameraForward();
+        const float horiz = std::sqrt(fwd.x() * fwd.x() + fwd.z() * fwd.z());
+        m_playerAvatar.yaw   = std::atan2(fwd.x(), fwd.z());
+        m_playerAvatar.pitch = ProcMath::clamp(std::atan2(fwd.y(), std::max(horiz, 0.1f)), -0.55f, 0.55f);
+        m_playerAvatar.bank  = 0.0f;
+    }
+}
+
+float DeepDiveEngine::playerCollisionRadius() const {
+    if (m_cameraMode == CameraMode::ThirdPersonFish)  return 0.72f;
+    if (m_cameraMode == CameraMode::ThirdPersonManta) return 1.95f;
+    return 1.45f;
+}
+
+float DeepDiveEngine::playerFloorMargin() const {
+    if (m_cameraMode == CameraMode::ThirdPersonFish)  return 0.40f;
+    if (m_cameraMode == CameraMode::ThirdPersonManta) return 0.90f;
+    return 0.45f;
+}
+
+float DeepDiveEngine::playerSurfaceMargin() const {
+    if (m_cameraMode == CameraMode::ThirdPersonFish)  return 0.85f;
+    if (m_cameraMode == CameraMode::ThirdPersonManta) return 1.40f;
+    return 1.60f;
+}
+
+bool DeepDiveEngine::isCameraPointClear(const QVector3D& pt, float radius) const {
+    if (pt.y() > ProcMath::WATER_SURFACE_Y - radius) {
+        return false;
+    }
+
+    const float rHoriz = std::sqrt(pt.x() * pt.x() + pt.z() * pt.z());
+    if (rHoriz > ProcMath::BASIN_INNER_RADIUS - radius) {
+        return false;
+    }
+
+    const auto& col = m_world.collision;
+    if (pt.y() < col.sampleHeight(pt.x(), pt.z()) + radius) {
+        return false;
+    }
+
+    if (!col.cellSpheres.empty() && col.chunksPerSide > 0) {
+        const int minCx = std::clamp(static_cast<int>(std::floor((pt.x() - radius + col.worldHalfSize) / col.chunkSize)),
+                                     0, col.chunksPerSide - 1);
+        const int maxCx = std::clamp(static_cast<int>(std::floor((pt.x() + radius + col.worldHalfSize) / col.chunkSize)),
+                                     0, col.chunksPerSide - 1);
+        const int minCz = std::clamp(static_cast<int>(std::floor((pt.z() - radius + col.worldHalfSize) / col.chunkSize)),
+                                     0, col.chunksPerSide - 1);
+        const int maxCz = std::clamp(static_cast<int>(std::floor((pt.z() + radius + col.worldHalfSize) / col.chunkSize)),
+                                     0, col.chunksPerSide - 1);
+        for (int cz = minCz; cz <= maxCz; ++cz) {
+            for (int cx = minCx; cx <= maxCx; ++cx) {
+                for (uint32_t id : col.cellSpheres[cz * col.chunksPerSide + cx]) {
+                    const auto& sph = col.spheres[id];
+                    const float rSum = sph.radius + radius;
+                    if ((pt - sph.center).lengthSquared() < rSum * rSum) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    // Prevent the third-person camera from clipping inside the whale
+    if ((pt - m_whale.pos).lengthSquared() < (m_whaleBroadRadius + radius) * (m_whaleBroadRadius + radius)) {
+        for (const auto& ws : m_whaleColliders) {
+            const float rSum = ws.radius + radius;
+            if ((pt - ws.center).lengthSquared() < rSum * rSum) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+void DeepDiveEngine::updatePlayerAvatarAndCamera(float dt, const QVector3D& wishDir, bool moving) {
+    if (m_cameraMode == CameraMode::FirstPerson) {
+        m_camPos = m_playerPos;
+        m_camArmDist = 0.0f;
+        return;
+    }
+
+    const bool isManta = (m_cameraMode == CameraMode::ThirdPersonManta);
+    const float speed  = m_playerVel.length();
+
+    // Update avatar transform and swim cycle phase
+    m_playerAvatar.pos = m_playerPos;
+    m_playerAvatar.vel = m_playerVel;
+
+    const float phaseRate = isManta
+                                ? (0.10f + speed * 0.085f)
+                                : (0.30f + speed * 0.24f);
+    m_playerAvatar.phase = std::fmod(m_playerAvatar.phase + dt * phaseRate, TWO_PI * 16.0f);
+
+    const float turnSmooth = isManta ? 5.2f : 9.5f;
+    const float maxPitch   = isManta ? 0.55f : 0.72f;
+    const float maxBank    = isManta ? 0.42f : 0.48f;
+
+    QVector3D steerDir(0.0f, 0.0f, 0.0f);
+    if (moving && wishDir.lengthSquared() > 1e-4f) {
+        steerDir = wishDir.normalized();
+    } else if (speed > 0.65f) {
+        steerDir = m_playerVel / speed;
+    }
+
+    if (steerDir.lengthSquared() > 1e-4f) {
+        const float horiz = std::sqrt(steerDir.x() * steerDir.x() + steerDir.z() * steerDir.z());
+        float targetYaw = m_playerAvatar.yaw;
+        if (horiz > 0.08f) {
+            targetYaw = std::atan2(steerDir.x(), steerDir.z());
+        }
+        const float dYaw = wrapAngle(targetYaw - m_playerAvatar.yaw);
+        const float k = ProcMath::clamp(dt * turnSmooth, 0.0f, 1.0f);
+        m_playerAvatar.yaw = wrapAngle(m_playerAvatar.yaw + dYaw * k);
+
+        const float targetPitch = ProcMath::clamp(
+            std::atan2(steerDir.y(), std::max(horiz, 0.2f)), -maxPitch, maxPitch);
+        m_playerAvatar.pitch = ProcMath::mix(m_playerAvatar.pitch, targetPitch, k);
+
+        const float targetBank = ProcMath::clamp(-dYaw * (isManta ? 0.85f : 1.05f), -maxBank, maxBank);
+        m_playerAvatar.bank = ProcMath::mix(m_playerAvatar.bank, targetBank, ProcMath::clamp(dt * 5.0f, 0.0f, 1.0f));
+    } else {
+        // Gently level out when hovering so the user can orbit and inspect the fish/manta
+        const float relax = ProcMath::clamp(dt * 3.0f, 0.0f, 1.0f);
+        m_playerAvatar.pitch = ProcMath::mix(m_playerAvatar.pitch, 0.0f, relax);
+        m_playerAvatar.bank  = ProcMath::mix(m_playerAvatar.bank,  0.0f, relax);
+    }
+
+    // Spring-arm camera behind and slightly above the avatar
+    const QVector3D lookFwd = cameraForward();
+    const float desiredDist = isManta ? 9.2f : 4.2f;
+    const float minDist     = isManta ? 2.6f : 1.35f;
+    const float liftY       = isManta ? 1.15f : 0.45f;
+    const float camProbeR   = 0.55f;
+
+    QVector3D anchor = m_playerPos + QVector3D(0.0f, liftY, 0.0f);
+    anchor.setY(std::min(anchor.y(), ProcMath::WATER_SURFACE_Y - 0.65f));
+
+    constexpr int TRACE_STEPS = 14;
+    float clearDist = desiredDist;
+    for (int i = 1; i <= TRACE_STEPS; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(TRACE_STEPS);
+        const float d = desiredDist * t;
+        const QVector3D probe = anchor - lookFwd * d;
+        if (!isCameraPointClear(probe, camProbeR)) {
+            clearDist = std::max(minDist, desiredDist * (static_cast<float>(i - 1) / static_cast<float>(TRACE_STEPS)));
+            break;
+        }
+    }
+
+    // Pull in rapidly on obstacles, extend smoothly when water opens up
+    const float armRate = (clearDist < m_camArmDist) ? 18.0f : 5.5f;
+    m_camArmDist = ProcMath::mix(m_camArmDist, clearDist, ProcMath::clamp(dt * armRate, 0.0f, 1.0f));
+    m_camPos = anchor - lookFwd * m_camArmDist;
+
+    // Final safety clamp for camera against seafloor/surface
+    m_world.collision.resolveSphereCollision(m_camPos, nullptr, 0.45f, 0.35f, 0.55f);
+}
+
+// ============================================================================
+// HUMPBACK WHALE NAVIGATION & MULTI-SPHERE HULL
+// ============================================================================
+
+void DeepDiveEngine::refreshWhaleColliders() {
+    const float sc = std::max(m_whale.scale, 2.65f);
+    m_whaleBroadRadius = 5.8f * sc;
+
+    // 5 spine spheres + 2 pectoral fin spheres in local whale coordinates
+    constexpr std::array<QVector3D, WHALE_COLLIDER_COUNT> LOCAL_OFFSETS = {{
+        { 0.0f,  0.00f,  0.00f}, // mid torso
+        { 0.0f,  0.05f,  2.75f}, // head / jaw
+        { 0.0f,  0.02f,  4.45f}, // snout tip
+        { 0.0f, -0.04f, -2.65f}, // rear torso
+        { 0.0f, -0.06f, -4.55f}, // tail peduncle / flukes
+        { 2.15f, -0.35f, 1.05f}, // left pectoral fin
+        {-2.15f, -0.35f, 1.05f}  // right pectoral fin
+    }};
+
+    constexpr std::array<float, WHALE_COLLIDER_COUNT> LOCAL_RADII = {{
+        1.32f, 1.12f, 0.78f, 0.96f, 0.72f, 0.78f, 0.78f
+    }};
+
+    for (int i = 0; i < WHALE_COLLIDER_COUNT; ++i) {
+        m_whaleColliders[i].center = faunaLocalToWorld(m_whale, LOCAL_OFFSETS[i]);
+        m_whaleColliders[i].radius = LOCAL_RADII[i] * sc;
+    }
+}
+
+QVector3D DeepDiveEngine::computeWhaleAvoidanceForce(const QVector3D& pos, float agentRadius, float margin) const {
+    const float broad = m_whaleBroadRadius + agentRadius + margin;
+    if ((pos - m_whale.pos).lengthSquared() >= broad * broad) {
+        return QVector3D(0.0f, 0.0f, 0.0f);
+    }
+
+    QVector3D force(0.0f, 0.0f, 0.0f);
+    for (const auto& ws : m_whaleColliders) {
+        const QVector3D diff = pos - ws.center;
+        const float triggerR = ws.radius + agentRadius + margin;
+        const float distSq = diff.lengthSquared();
+        if (distSq < triggerR * triggerR && distSq > 1e-5f) {
+            const float dist = std::sqrt(distSq);
+            const float penRatio = (triggerR - dist) / std::max(margin, 0.5f);
+            force += (diff / dist) * (penRatio * penRatio * 14.0f + penRatio * 4.5f);
+        }
+    }
+    return force;
+}
 
 float DeepDiveEngine::sampleWhaleClearance(float x, float z) const {
     const float sc           = std::max(m_whale.scale, 2.65f);
@@ -287,8 +636,8 @@ void DeepDiveEngine::spawnWhalePass(bool nearPlayer) {
 
         for (float fd : fwdDists) {
             for (float so : sideOffs) {
-                const float cx = m_camPos.x() + camFwd.x() * fd + camRgt.x() * so;
-                const float cz = m_camPos.z() + camFwd.z() * fd + camRgt.z() * so;
+                const float cx = m_playerPos.x() + camFwd.x() * fd + camRgt.x() * so;
+                const float cz = m_playerPos.z() + camFwd.z() * fd + camRgt.z() * so;
                 for (float yr : yawRel) {
                     evalCandidate(cx, cz, wrapAngle(camHeading + yr), fd * 0.25f);
                 }
@@ -299,8 +648,8 @@ void DeepDiveEngine::spawnWhalePass(bool nearPlayer) {
             for (int i = 0; i < 24; ++i) {
                 const float ang = (TWO_PI * static_cast<float>(i)) / 24.0f;
                 const float rad = 45.0f + 4.0f * sc;
-                const float cx = m_camPos.x() + std::cos(ang) * rad;
-                const float cz = m_camPos.z() + std::sin(ang) * rad;
+                const float cx = m_playerPos.x() + std::cos(ang) * rad;
+                const float cz = m_playerPos.z() + std::sin(ang) * rad;
                 const float tangYaw = std::atan2(-std::sin(ang), std::cos(ang));
                 evalCandidate(cx, cz, tangYaw, 15.0f);
                 evalCandidate(cx, cz, wrapAngle(tangYaw + PI), 15.0f);
@@ -436,7 +785,7 @@ void DeepDiveEngine::updateWhaleNavigation(float dt, bool& whaleCalledOut) {
             m_whaleSurfacing = true;
             std::uniform_real_distribution<float> durDist(12.0f, 18.0f);
             m_whaleSurfaceTimer = durDist(m_rng);
-            if ((m_whale.pos - m_camPos).length() < 360.0f) {
+            if ((m_whale.pos - m_playerPos).length() < 360.0f) {
                 whaleCalledOut = true;
             }
         }
@@ -632,22 +981,27 @@ void DeepDiveEngine::updateWhaleNavigation(float dt, bool& whaleCalledOut) {
     m_whaleSongTimer -= dt;
     if (m_whaleSongTimer <= 0.0f) {
         m_whaleSongTimer = 24.0f + std::fmod(m_time * 3.7f, 14.0f);
-        if ((m_whale.pos - m_camPos).length() < 340.0f) {
+        if ((m_whale.pos - m_playerPos).length() < 340.0f) {
             whaleCalledOut = true;
         }
     }
 }
 
 // ============================================================================
-// FAUNA, ANGLERFISH & PARTICLES SIMULATION
+// FAUNA, ANGLERFISH & INTER-ENTITY COLLISIONS
 // ============================================================================
 
 void DeepDiveEngine::updateFaunaAgents(float dt) {
+    const bool playerIsSmallFish = (m_cameraMode == CameraMode::ThirdPersonFish);
+
     auto stepGroup = [&](std::vector<FaunaAgent>& agents,
+                         bool isMantaGroup,
                          float lookAhead, float avoidMargin,
                          float floorMargin, float surfaceMargin,
                          float verticalAmp, float turnSmooth, float maxBank, bool fleePlayer) {
-        for (auto& a : agents) {
+        const size_t count = agents.size();
+        for (size_t i = 0; i < count; ++i) {
+            auto& a = agents[i];
             const QVector3D fwd = a.vel.lengthSquared() > 1e-4f
                                       ? a.vel.normalized()
                                       : QVector3D(std::sin(a.yaw), 0.0f, std::cos(a.yaw));
@@ -674,15 +1028,65 @@ void DeepDiveEngine::updateFaunaAgents(float dt) {
             const float targetY = a.preferredDepth + std::sin(m_time * 0.9f + a.phase) * verticalAmp;
             steer.setY(steer.y() + (targetY - a.pos.y()) * 1.3f);
 
-            if (fleePlayer) {
-                const QVector3D fromCam = a.pos - m_camPos;
-                const float camDistSq = fromCam.lengthSquared();
-                if (camDistSq < 49.0f && camDistSq > 1e-4f) {
-                    const float d = std::sqrt(camDistSq);
-                    steer += (fromCam / d) * ((7.0f - d) * 3.8f);
+            // Reef fish gently scatter from diver or manta, but swim comfortably alongside another small fish
+            if (fleePlayer && !playerIsSmallFish) {
+                const QVector3D fromPlayer = a.pos - m_playerPos;
+                const float dSq = fromPlayer.lengthSquared();
+                if (dSq < 49.0f && dSq > 1e-4f) {
+                    const float d = std::sqrt(dSq);
+                    steer += (fromPlayer / d) * ((7.0f - d) * 3.8f);
                 }
             }
 
+            // Predictive manta-to-manta avoidance so rays gracefully bank around each other
+            if (isMantaGroup) {
+                const float rA = effectiveMantaRadius(a);
+                for (size_t j = 0; j < count; ++j) {
+                    if (i == j) continue;
+                    const auto& b = agents[j];
+                    const float rB = effectiveMantaRadius(b);
+                    const QVector3D diff = a.pos - b.pos;
+                    const QVector3D scaled(diff.x(), diff.y() * 1.65f, diff.z());
+                    const float avoidR = rA + rB + 7.5f;
+                    const float dSq = scaled.lengthSquared();
+                    if (dSq < avoidR * avoidR && dSq > 1e-5f) {
+                        const float d = std::sqrt(dSq);
+                        const float t = (avoidR - d) / avoidR;
+                        QVector3D push(diff.x(), diff.y() * 0.75f, diff.z());
+                        if (push.lengthSquared() > 1e-5f) push.normalize();
+                        steer += push * (t * t * 18.0f + t * 5.0f);
+                    }
+                }
+
+                // Mantas also smoothly steer around the player
+                const QVector3D fromPlayer = a.pos - m_playerPos;
+                const float pAvoidR = rA + playerCollisionRadius() + 4.5f;
+                const float pDistSq = fromPlayer.lengthSquared();
+                if (pDistSq < pAvoidR * pAvoidR && pDistSq > 1e-4f) {
+                    const float d = std::sqrt(pDistSq);
+                    const float t = (pAvoidR - d) / pAvoidR;
+                    steer += (fromPlayer / d) * (t * 9.5f);
+                }
+            } else {
+                // Reef fish steer around nearby mantas
+                const float rF = effectiveFishRadius(a);
+                for (const auto& m : m_world.mantaAgents) {
+                    const QVector3D diff = a.pos - m.pos;
+                    const float avoidR = rF + effectiveMantaRadius(m) + 2.8f;
+                    const float dSq = diff.lengthSquared();
+                    if (dSq < avoidR * avoidR && dSq > 1e-4f) {
+                        const float d = std::sqrt(dSq);
+                        steer += (diff / d) * (((avoidR - d) / avoidR) * 11.0f);
+                    }
+                }
+            }
+
+            // Predictive avoidance of the whale hull
+            const float whaleMargin = isMantaGroup ? 7.5f : 4.2f;
+            steer += computeWhaleAvoidanceForce(a.pos, a.boundingRadius, whaleMargin);
+            steer += computeWhaleAvoidanceForce(a.pos + fwd * lookAhead, a.boundingRadius, whaleMargin) * 0.65f;
+
+            // Static environment avoidance
             steer += m_world.collision.computeAvoidanceForce(a.pos, a.boundingRadius, avoidMargin);
             steer += m_world.collision.computeAvoidanceForce(a.pos + fwd * lookAhead, a.boundingRadius, avoidMargin) * 0.85f;
 
@@ -724,8 +1128,8 @@ void DeepDiveEngine::updateFaunaAgents(float dt) {
         }
     };
 
-    stepGroup(m_world.fishAgents,  4.8f, 3.2f, 1.1f, 2.5f, 0.75f, 7.5f, 0.40f, true);
-    stepGroup(m_world.mantaAgents, 11.5f, 6.5f, 2.4f, 4.0f, 1.35f, 4.2f, 0.34f, false);
+    stepGroup(m_world.fishAgents,  false, 4.8f,  3.2f, 1.1f, 2.5f, 0.75f, 7.5f, 0.40f, true);
+    stepGroup(m_world.mantaAgents, true,  11.5f, 6.5f, 2.4f, 4.0f, 1.35f, 4.2f, 0.34f, false);
 }
 
 QVector3D DeepDiveEngine::computeAnglerLureWorldPos(const FaunaAgent& a) const {
@@ -735,23 +1139,7 @@ QVector3D DeepDiveEngine::computeAnglerLureWorldPos(const FaunaAgent& a) const {
                         * ProcMath::smoothstep(0.15f, 0.85f, localPos.y());
     localPos.setX(localPos.x() + std::sin(m_time * 2.1f + a.phase) * 0.09f * lureW);
     localPos.setY(localPos.y() + std::cos(m_time * 1.7f + a.phase) * 0.07f * lureW);
-    localPos *= a.scale;
-
-    const float cy = std::cos(a.yaw),   sy = std::sin(a.yaw);
-    const float cp = std::cos(a.pitch), sp = std::sin(a.pitch);
-    const float cb = std::cos(a.bank),  sb = std::sin(a.bank);
-
-    const QVector3D v1(cb * localPos.x() - sb * localPos.y(),
-                       sb * localPos.x() + cb * localPos.y(),
-                       localPos.z());
-    const QVector3D v2(v1.x(),
-                       cp * v1.y() + sp * v1.z(),
-                       -sp * v1.y() + cp * v1.z());
-    const QVector3D v3(cy * v2.x() + sy * v2.z(),
-                       v2.y(),
-                       -sy * v2.x() + cy * v2.z());
-
-    return v3 + a.pos;
+    return faunaLocalToWorld(a, localPos);
 }
 
 void DeepDiveEngine::refreshLureLights() {
@@ -783,31 +1171,31 @@ void DeepDiveEngine::updateAnglerAgents(float dt) {
         if (fwd.lengthSquared() > 1e-4f) fwd.normalize();
         else fwd = QVector3D(0.0f, 0.0f, 1.0f);
 
-        const QVector3D toCam = m_camPos - a.pos;
-        const float distToCam = toCam.length();
+        const QVector3D toPlayer = m_playerPos - a.pos;
+        const float distToPlayer = toPlayer.length();
         const QVector3D toHome = a.homeCenter - a.pos;
         const QVector3D horizToHome(toHome.x(), 0.0f, toHome.z());
         const float homeDist = horizToHome.length();
 
         const float floorY = m_world.collision.sampleHeight(a.pos.x(), a.pos.z());
         const float maxPitY = std::min(a.homeCenter.y() + 14.0f, -24.0f);
-        const bool stalking = (distToCam < DETECT_RADIUS);
+        const bool stalking = (distToPlayer < DETECT_RADIUS);
 
         QVector3D steer(0.0f, 0.0f, 0.0f);
         float targetSpeed = a.cruiseSpeed;
 
         if (stalking) {
-            const QVector3D dirToCam = toCam / std::max(distToCam, 0.001f);
-            QVector3D side(-dirToCam.z(), 0.0f, dirToCam.x());
+            const QVector3D dirToPlayer = toPlayer / std::max(distToPlayer, 0.001f);
+            QVector3D side(-dirToPlayer.z(), 0.0f, dirToPlayer.x());
             if (side.lengthSquared() > 1e-4f) side.normalize();
 
-            if (distToCam > AMBUSH_MAX_DIST) {
-                const float pull = ProcMath::clamp((distToCam - AMBUSH_MAX_DIST) / 14.0f, 0.25f, 1.0f);
-                steer += dirToCam * (2.8f * pull);
+            if (distToPlayer > AMBUSH_MAX_DIST) {
+                const float pull = ProcMath::clamp((distToPlayer - AMBUSH_MAX_DIST) / 14.0f, 0.25f, 1.0f);
+                steer += dirToPlayer * (2.8f * pull);
                 targetSpeed = a.cruiseSpeed * (0.75f + 0.55f * pull);
-            } else if (distToCam < AMBUSH_MIN_DIST) {
-                const float push = ProcMath::clamp((AMBUSH_MIN_DIST - distToCam) / 5.0f, 0.2f, 1.2f);
-                steer -= dirToCam * (3.6f * push);
+            } else if (distToPlayer < AMBUSH_MIN_DIST) {
+                const float push = ProcMath::clamp((AMBUSH_MIN_DIST - distToPlayer) / 5.0f, 0.2f, 1.2f);
+                steer -= dirToPlayer * (3.6f * push);
                 steer += side * (std::sin(m_time * 0.6f + a.phase) * 1.1f);
                 targetSpeed = a.cruiseSpeed * 0.65f;
             } else {
@@ -822,7 +1210,7 @@ void DeepDiveEngine::updateAnglerAgents(float dt) {
                 steer += radial * (excess * 14.0f + 3.0f);
             }
 
-            const float hoverY = ProcMath::clamp(m_camPos.y() - 0.8f, floorY + 4.4f, maxPitY);
+            const float hoverY = ProcMath::clamp(m_playerPos.y() - 0.8f, floorY + 4.4f, maxPitY);
             steer.setY(steer.y() + (hoverY - a.pos.y()) * 0.85f);
         } else {
             if (homeDist > 0.5f) {
@@ -846,6 +1234,7 @@ void DeepDiveEngine::updateAnglerAgents(float dt) {
             steer.setY(steer.y() + (patrolY - a.pos.y()) * 0.95f);
         }
 
+        steer += computeWhaleAvoidanceForce(a.pos, a.boundingRadius, 6.0f);
         steer += m_world.collision.computeAvoidanceForce(a.pos, a.boundingRadius, 4.8f) * 1.15f;
         steer += m_world.collision.computeAvoidanceForce(a.pos + fwd * 6.5f, a.boundingRadius, 5.2f) * 0.75f;
 
@@ -875,10 +1264,10 @@ void DeepDiveEngine::updateAnglerAgents(float dt) {
 
         float targetYaw = a.yaw;
         float targetPitch = 0.0f;
-        if (stalking && distToCam > 0.1f) {
-            const float hDist = std::sqrt(toCam.x() * toCam.x() + toCam.z() * toCam.z());
-            targetYaw   = std::atan2(toCam.x(), toCam.z());
-            targetPitch = ProcMath::clamp(std::atan2(toCam.y(), std::max(hDist, 0.3f)), -0.45f, 0.45f);
+        if (stalking && distToPlayer > 0.1f) {
+            const float hDist = std::sqrt(toPlayer.x() * toPlayer.x() + toPlayer.z() * toPlayer.z());
+            targetYaw   = std::atan2(toPlayer.x(), toPlayer.z());
+            targetPitch = ProcMath::clamp(std::atan2(toPlayer.y(), std::max(hDist, 0.3f)), -0.45f, 0.45f);
         } else if (a.vel.lengthSquared() > 0.04f) {
             const float hSpd  = std::sqrt(a.vel.x() * a.vel.x() + a.vel.z() * a.vel.z());
             targetYaw   = std::atan2(a.vel.x(), a.vel.z());
@@ -892,8 +1281,209 @@ void DeepDiveEngine::updateAnglerAgents(float dt) {
         const float targetBank = ProcMath::clamp(-dYaw * 0.45f, -0.18f, 0.18f);
         a.bank  = ProcMath::mix(a.bank, targetBank, ProcMath::clamp(dt * 2.2f, 0.0f, 1.0f));
     }
+}
 
-    refreshLureLights();
+void DeepDiveEngine::resolveFaunaAndPlayerCollisions(float& maxPlayerImpactSpeed) {
+    auto& fishes  = m_world.fishAgents;
+    auto& mantas  = m_world.mantaAgents;
+    auto& anglers = m_world.anglerAgents;
+
+    const float pRadius = playerCollisionRadius();
+    const float pInvMass = (m_cameraMode == CameraMode::ThirdPersonFish) ? 1.0f
+                                                                         : (m_cameraMode == CameraMode::ThirdPersonManta ? 0.22f : 0.35f);
+
+    // Helper: resolve any dynamic sphere against the 7-sphere whale hull (infinite whale mass)
+    auto resolveAgainstWhale = [&](QVector3D& pos, QVector3D& vel, float r, float* impactOut) -> bool {
+        const float broad = m_whaleBroadRadius + r;
+        if ((pos - m_whale.pos).lengthSquared() >= broad * broad) return false;
+
+        bool hit = false;
+        QVector3D whaleVelCopy = m_whale.vel;
+        for (const auto& ws : m_whaleColliders) {
+            QVector3D wsCenter = ws.center;
+            if (resolveSpherePair(pos, vel, r, 1.0f,
+                                  wsCenter, whaleVelCopy, ws.radius, 0.0f,
+                                  1.0f, 1.08f, impactOut)) {
+                hit = true;
+            }
+        }
+        return hit;
+    };
+
+    // 1. Manta <-> Manta (2 relaxation passes, anisotropic to protect wide wingspan)
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i < mantas.size(); ++i) {
+            const float rA = effectiveMantaRadius(mantas[i]);
+            for (size_t j = i + 1; j < mantas.size(); ++j) {
+                const float rB = effectiveMantaRadius(mantas[j]);
+                resolveSpherePair(mantas[i].pos, mantas[i].vel, rA, 1.0f,
+                                  mantas[j].pos, mantas[j].vel, rB, 1.0f,
+                                  1.65f, 1.12f);
+            }
+        }
+    }
+
+    // 2. Angler <-> Angler & Manta <-> Angler
+    for (size_t i = 0; i < anglers.size(); ++i) {
+        const float rA = effectiveAnglerRadius(anglers[i]);
+        for (size_t j = i + 1; j < anglers.size(); ++j) {
+            resolveSpherePair(anglers[i].pos, anglers[i].vel, rA, 1.0f,
+                              anglers[j].pos, anglers[j].vel, effectiveAnglerRadius(anglers[j]), 1.0f,
+                              1.0f, 1.10f);
+        }
+        for (auto& m : mantas) {
+            resolveSpherePair(m.pos, m.vel, effectiveMantaRadius(m), 0.6f,
+                              anglers[i].pos, anglers[i].vel, rA, 0.4f,
+                              1.25f, 1.10f);
+        }
+    }
+
+    // 3. Fish <-> Fish via flat 3D spatial hash (zero heap allocations)
+    if (fishes.size() > 1) {
+        constexpr uint32_t BUCKET_COUNT = 2048u;
+        constexpr uint32_t BUCKET_MASK  = BUCKET_COUNT - 1u;
+        constexpr float CELL_SIZE = 3.2f;
+
+        auto cellHash = [](int cx, int cy, int cz) -> uint32_t {
+            return ((static_cast<uint32_t>(cx) * 73856093u)
+                    ^ (static_cast<uint32_t>(cy) * 19349663u)
+                    ^ (static_cast<uint32_t>(cz) * 83492791u)) & BUCKET_MASK;
+        };
+
+        std::array<int, BUCKET_COUNT> head;
+        head.fill(-1);
+        if (m_fishHashNext.size() != fishes.size()) {
+            m_fishHashNext.resize(fishes.size(), -1);
+        }
+
+        for (int i = 0; i < static_cast<int>(fishes.size()); ++i) {
+            const auto& p = fishes[i].pos;
+            const uint32_t h = cellHash(static_cast<int>(std::floor(p.x() / CELL_SIZE)),
+                                        static_cast<int>(std::floor(p.y() / CELL_SIZE)),
+                                        static_cast<int>(std::floor(p.z() / CELL_SIZE)));
+            m_fishHashNext[i] = head[h];
+            head[h] = i;
+        }
+
+        for (int i = 0; i < static_cast<int>(fishes.size()); ++i) {
+            const auto& p = fishes[i].pos;
+            const int bx = static_cast<int>(std::floor(p.x() / CELL_SIZE));
+            const int by = static_cast<int>(std::floor(p.y() / CELL_SIZE));
+            const int bz = static_cast<int>(std::floor(p.z() / CELL_SIZE));
+            const float rA = effectiveFishRadius(fishes[i]);
+
+            uint32_t visited[27];
+            int visitedCount = 0;
+
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const uint32_t h = cellHash(bx + dx, by + dy, bz + dz);
+                        bool seen = false;
+                        for (int k = 0; k < visitedCount; ++k) {
+                            if (visited[k] == h) { seen = true; break; }
+                        }
+                        if (seen) continue;
+                        visited[visitedCount++] = h;
+
+                        for (int j = head[h]; j != -1; j = m_fishHashNext[j]) {
+                            if (j <= i) continue;
+                            resolveSpherePair(fishes[i].pos, fishes[i].vel, rA, 1.0f,
+                                              fishes[j].pos, fishes[j].vel, effectiveFishRadius(fishes[j]), 1.0f,
+                                              1.0f, 1.05f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Fish <-> Mantas & Anglers, and All Fauna <-> Whale
+    for (auto& f : fishes) {
+        const float rF = effectiveFishRadius(f);
+        bool moved = resolveAgainstWhale(f.pos, f.vel, rF, nullptr);
+
+        for (auto& m : mantas) {
+            if (resolveSpherePair(f.pos, f.vel, rF, 0.95f,
+                                  m.pos, m.vel, effectiveMantaRadius(m), 0.05f,
+                                  1.35f, 1.08f)) {
+                moved = true;
+            }
+        }
+        for (auto& ang : anglers) {
+            if (resolveSpherePair(f.pos, f.vel, rF, 0.95f,
+                                  ang.pos, ang.vel, effectiveAnglerRadius(ang), 0.05f,
+                                  1.0f, 1.08f)) {
+                moved = true;
+            }
+        }
+        if (moved) {
+            m_world.collision.resolveSphereCollision(f.pos, &f.vel, f.boundingRadius, 1.1f, 2.5f);
+        }
+    }
+
+    for (auto& m : mantas) {
+        if (resolveAgainstWhale(m.pos, m.vel, effectiveMantaRadius(m), nullptr)) {
+            m_world.collision.resolveSphereCollision(m.pos, &m.vel, m.boundingRadius, 2.4f, 4.0f);
+        }
+    }
+
+    for (auto& ang : anglers) {
+        if (resolveAgainstWhale(ang.pos, ang.vel, effectiveAnglerRadius(ang), nullptr)) {
+            m_world.collision.resolveSphereCollision(ang.pos, &ang.vel, ang.boundingRadius, 1.8f, 14.0f);
+        }
+    }
+
+    // 5. Player <-> Whale (2 passes so player never clips inside the moving whale)
+    bool playerHitFauna = false;
+    for (int pass = 0; pass < 2; ++pass) {
+        if (resolveAgainstWhale(m_playerPos, m_playerVel, pRadius, &maxPlayerImpactSpeed)) {
+            playerHitFauna = true;
+        }
+    }
+
+    // 6. Player <-> Mantas
+    for (auto& m : mantas) {
+        const float yAniso = (m_cameraMode == CameraMode::ThirdPersonManta) ? 1.55f : 1.25f;
+        if (resolveSpherePair(m_playerPos, m_playerVel, pRadius, pInvMass,
+                              m.pos, m.vel, effectiveMantaRadius(m), 0.25f,
+                              yAniso, 1.08f, &maxPlayerImpactSpeed)) {
+            playerHitFauna = true;
+            m_world.collision.resolveSphereCollision(m.pos, &m.vel, m.boundingRadius, 2.4f, 4.0f);
+        }
+    }
+
+    // 7. Player <-> Anglers
+    for (auto& ang : anglers) {
+        if (resolveSpherePair(m_playerPos, m_playerVel, pRadius, pInvMass,
+                              ang.pos, ang.vel, effectiveAnglerRadius(ang), 0.30f,
+                              1.0f, 1.08f, &maxPlayerImpactSpeed)) {
+            playerHitFauna = true;
+            m_world.collision.resolveSphereCollision(ang.pos, &ang.vel, ang.boundingRadius, 1.8f, 14.0f);
+        }
+    }
+
+    // 8. Player <-> Fish
+    const float fishInvMass = 1.0f;
+    const float playerVsFishInvMass = (m_cameraMode == CameraMode::ThirdPersonFish) ? 0.65f : 0.08f;
+    for (auto& f : fishes) {
+        if (resolveSpherePair(m_playerPos, m_playerVel, pRadius, playerVsFishInvMass,
+                              f.pos, f.vel, effectiveFishRadius(f), fishInvMass,
+                              1.0f, 1.06f)) {
+            if (m_cameraMode == CameraMode::ThirdPersonFish) {
+                playerHitFauna = true;
+            }
+            m_world.collision.resolveSphereCollision(f.pos, &f.vel, f.boundingRadius, 1.1f, 2.5f);
+        }
+    }
+
+    // Re-clamp player against terrain/rocks if fauna pushed the player near geometry
+    if (playerHitFauna) {
+        m_playerColliding = true;
+        m_world.collision.resolveSphereCollision(
+            m_playerPos, &m_playerVel,
+            pRadius, playerFloorMargin(), playerSurfaceMargin());
+    }
 }
 
 void DeepDiveEngine::updateParticles(float dt) {
@@ -934,6 +1524,11 @@ EngineStepEvents DeepDiveEngine::update(float dt, const EngineInput& input) {
     m_yaw += input.yawDelta;
     m_pitch = ProcMath::clamp(m_pitch + input.pitchDelta, -1.48f, 1.48f);
 
+    // 1. Update whale first so its multi-sphere hull is fresh for player & fauna avoidance
+    updateWhaleNavigation(dt, events.whaleCalled);
+    refreshWhaleColliders();
+
+    // 2. Integrate player body movement
     const QVector3D fwd = cameraForward();
     const QVector3D rgt = cameraRight();
     QVector3D wishDir = fwd * input.moveForward
@@ -941,30 +1536,52 @@ EngineStepEvents DeepDiveEngine::update(float dt, const EngineInput& input) {
                         + QVector3D(0.0f, input.moveUp, 0.0f);
 
     const float wishLenSq = wishDir.lengthSquared();
+    const bool isMoving = (wishLenSq > 1e-4f);
     if (wishLenSq > 1.0f) {
         wishDir /= std::sqrt(wishLenSq);
     }
 
-    const float accel = input.sprint ? 58.0f : 18.0f;
-    const float preCollisionSpeed = m_camVel.length();
+    float accel = 18.0f;
+    float drag  = 3.0f;
+    if (m_cameraMode == CameraMode::ThirdPersonFish) {
+        accel = input.sprint ? 48.0f : 19.0f;
+        drag  = 3.4f;
+    } else if (m_cameraMode == CameraMode::ThirdPersonManta) {
+        accel = input.sprint ? 54.0f : 21.0f;
+        drag  = 2.35f;
+    } else {
+        accel = input.sprint ? 58.0f : 18.0f;
+        drag  = 3.0f;
+    }
 
-    m_camVel += wishDir * (accel * dt);
-    m_camVel *= std::exp(-3.0f * dt);
-    m_camPos += m_camVel * dt;
-    m_camPos.setY(m_camPos.y() + std::sin(m_time * 1.4f) * 0.006f);
+    const float preCollisionSpeed = m_playerVel.length();
 
-    m_playerColliding = m_world.collision.resolveSphereCollision(
-        m_camPos, &m_camVel, 1.45f, 0.45f, 1.6f);
+    m_playerVel += wishDir * (accel * dt);
+    m_playerVel *= std::exp(-drag * dt);
+    m_playerPos += m_playerVel * dt;
+    m_playerPos.setY(m_playerPos.y() + std::sin(m_time * 1.4f) * 0.006f);
+
+    const bool hitEnv = m_world.collision.resolveSphereCollision(
+        m_playerPos, &m_playerVel,
+        playerCollisionRadius(), playerFloorMargin(), playerSurfaceMargin());
+    m_playerColliding = hitEnv;
+
+    // 3. Step fish, mantas & anglers, then resolve all mutual fauna & player collisions
+    updateFaunaAgents(dt);
+    updateAnglerAgents(dt);
+
+    float maxImpactSpeed = hitEnv ? preCollisionSpeed : 0.0f;
+    resolveFaunaAndPlayerCollisions(maxImpactSpeed);
 
     if (m_playerColliding && !m_wasPlayerColliding) {
         events.playerCollisionImpact = true;
-        events.collisionImpactSpeed = preCollisionSpeed;
+        events.collisionImpactSpeed = maxImpactSpeed;
     }
     m_wasPlayerColliding = m_playerColliding;
 
-    updateFaunaAgents(dt);
-    updateWhaleNavigation(dt, events.whaleCalled);
-    updateAnglerAgents(dt);
+    // 4. Sync third-person avatar orientation and compute collision-aware camera position
+    updatePlayerAvatarAndCamera(dt, wishDir, isMoving);
+    refreshLureLights();
     updateParticles(dt);
 
     return events;

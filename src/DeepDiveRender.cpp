@@ -877,18 +877,19 @@ void DeepDiveRender::uploadWorld(const WorldData& world) {
         m_visPropsLod1[a].reserve(4096);
     }
 
-    setupFaunaLodBuffers(m_fishLod0,   world.fishLod0Verts,   world.fishLod0Inds,   world.fishAgents.size());
+    // Reserve +1 slot in fish & manta LOD0 buffers for the third-person player avatar
+    setupFaunaLodBuffers(m_fishLod0,   world.fishLod0Verts,   world.fishLod0Inds,   world.fishAgents.size() + 1);
     setupFaunaLodBuffers(m_fishLod1,   world.fishLod1Verts,   world.fishLod1Inds,   world.fishAgents.size());
-    setupFaunaLodBuffers(m_mantaLod0,  world.mantaLod0Verts,  world.mantaLod0Inds,  world.mantaAgents.size());
+    setupFaunaLodBuffers(m_mantaLod0,  world.mantaLod0Verts,  world.mantaLod0Inds,  world.mantaAgents.size() + 1);
     setupFaunaLodBuffers(m_mantaLod1,  world.mantaLod1Verts,  world.mantaLod1Inds,  world.mantaAgents.size());
     setupFaunaLodBuffers(m_whaleLod0,  world.whaleLod0Verts,  world.whaleLod0Inds,  1);
     setupFaunaLodBuffers(m_whaleLod1,  world.whaleLod1Verts,  world.whaleLod1Inds,  1);
     setupFaunaLodBuffers(m_anglerLod0, world.anglerLod0Verts, world.anglerLod0Inds, world.anglerAgents.size());
     setupFaunaLodBuffers(m_anglerLod1, world.anglerLod1Verts, world.anglerLod1Inds, world.anglerAgents.size());
 
-    m_visFishLod0.reserve(world.fishAgents.size());
+    m_visFishLod0.reserve(world.fishAgents.size() + 1);
     m_visFishLod1.reserve(world.fishAgents.size());
-    m_visMantaLod0.reserve(world.mantaAgents.size());
+    m_visMantaLod0.reserve(world.mantaAgents.size() + 1);
     m_visMantaLod1.reserve(world.mantaAgents.size());
     m_visWhaleLod0.reserve(1);
     m_visWhaleLod1.reserve(1);
@@ -1115,6 +1116,18 @@ void DeepDiveRender::cullAndUploadFauna(const DeepDiveEngine& engine, const Frus
         st = updateBinaryLod(st, dist, ANGLER_LOD0_DIST, 8.0f);
         if (st == 0) m_visAnglerLod0.push_back(packFaunaInstance(a));
         else         m_visAnglerLod1.push_back(packFaunaInstance(a));
+    }
+
+    // Append third-person player avatar at full LOD0 (rendered in both shadow and main passes)
+    if (engine.hasPlayerAvatar()) {
+        const FaunaAgent& av = engine.playerAvatar();
+        if (frustum.intersectsSphere(av.pos, av.boundingRadius * 1.6f)) {
+            if (engine.cameraMode() == CameraMode::ThirdPersonFish) {
+                m_visFishLod0.push_back(packFaunaInstance(av));
+            } else if (engine.cameraMode() == CameraMode::ThirdPersonManta) {
+                m_visMantaLod0.push_back(packFaunaInstance(av));
+            }
+        }
     }
 
     auto upload = [&](FaunaLodBuffers& buf, const std::vector<FaunaGpuInstance>& list) {
@@ -1622,6 +1635,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
+    m_postProcessShader.release();
     glActiveTexture(GL_TEXTURE0);
     glBindVertexArray(0);
 }
