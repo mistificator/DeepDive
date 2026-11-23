@@ -134,7 +134,7 @@ private:
                                   const std::vector<std::pair<int, float>>& chunks,
                                   bool forShadow);
     void drawInstPropOne(const PropLodBuffers& buf, size_t count, GLenum primitiveMode, bool countTris);
-    void drawInstPropBatches(bool forShadow, bool countTris, bool skipTessRocks = false);
+    void drawInstPropBatches(bool forShadow, bool countTris, bool skipTessProps = false);
     void cullAndUploadFauna(const DeepDiveEngine& engine, const FrustumPlanes& frustum);
 
     // Optional OpenGL 4.0+ tessellation interface (owned by QOpenGLContext)
@@ -145,6 +145,7 @@ private:
     bool m_gl4Ready = false;
     bool m_envTessReady = false;
     bool m_instPropTessReady = false;
+    bool m_faunaTessReady = false;
     bool m_waterTessReady = false;
     bool m_tessSupported = false;
     bool m_tessEnabled = false;
@@ -164,7 +165,7 @@ private:
     std::vector<uint8_t> m_anglerLodState;
     uint8_t m_whaleLodState = 0;
 
-    // OpenGL 3.3 core shader programs
+    // OpenGL 3.3 Core shader programs
     QOpenGLShaderProgram m_shadowEnvShader;
     QOpenGLShaderProgram m_shadowInstPropShader;
     QOpenGLShaderProgram m_shadowFaunaShader;
@@ -181,6 +182,7 @@ private:
     // Optional OpenGL 4.0+ hardware tessellation programs
     QOpenGLShaderProgram m_envTessShader;
     QOpenGLShaderProgram m_instPropTessShader;
+    QOpenGLShaderProgram m_faunaTessShader;
     QOpenGLShaderProgram m_waterTessShader;
 
     // Textures & static/dynamic geometry buffers

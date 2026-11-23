@@ -1244,8 +1244,17 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
 
                     QVector3D tX = gridPos[ixR * cols + iz] - gridPos[ixL * cols + iz];
                     QVector3D tZ = gridPos[ix * cols + izB] - gridPos[ix * cols + izF];
-                    // tX вдоль +X, tZ вдоль -Z -> cross(tX, tZ) смотрит строго вверх (+Y)
-                    QVector3D n = QVector3D::crossProduct(tX, tZ) * ySign;
+                    QVector3D n;
+                    if (iz == 0) {
+                        // Общая горизонтальная внешняя нормаль по передней кромке (без щели при тесселяции)
+                        n = QVector3D(-tX.z(), 0.0f, tX.x());
+                    } else if (iz == chordSegs) {
+                        // Общая горизонтальная внешняя нормаль по задней кромке
+                        n = QVector3D(tX.z(), 0.0f, -tX.x());
+                    } else {
+                        // tX вдоль +X, tZ вдоль -Z -> cross(tX, tZ) смотрит строго вверх (+Y)
+                        n = QVector3D::crossProduct(tX, tZ) * ySign;
+                    }
                     if (n.lengthSquared() < 1e-6f) n = QVector3D(0.0f, ySign, 0.0f);
                     n.normalize();
 

@@ -816,6 +816,7 @@ out vec3 vPos_TCS;
 out vec3 vNormal_TCS;
 out vec3 vColor_TCS;
 out vec2 vParam_TCS;
+out vec3 vSwayInfo_TCS; // xy: instance root XZ, z: local aPos.x
 
 void main() {
     float sx = max(aInstPosScaleXZ.w, 0.01);
@@ -846,10 +847,11 @@ void main() {
         }
     }
 
-    vPos_TCS    = rot * localPos + aInstPosScaleXZ.xyz;
-    vNormal_TCS = normalize(rot * localN);
-    vColor_TCS  = col;
-    vParam_TCS  = aParam;
+    vPos_TCS      = rot * localPos + aInstPosScaleXZ.xyz;
+    vNormal_TCS   = normalize(rot * localN);
+    vColor_TCS    = col;
+    vParam_TCS    = aParam;
+    vSwayInfo_TCS = vec3(aInstPosScaleXZ.x, aInstPosScaleXZ.z, aPos.x);
 }
 )";
 
@@ -860,33 +862,40 @@ in vec3 vPos_TCS[];
 in vec3 vNormal_TCS[];
 in vec3 vColor_TCS[];
 in vec2 vParam_TCS[];
+in vec3 vSwayInfo_TCS[];
 
 out vec3 vPos_TES[];
 out vec3 vNormal_TES[];
 out vec3 vColor_TES[];
 out vec2 vParam_TES[];
+out vec3 vSwayInfo_TES[];
 
 uniform vec3 uCamPos;
 uniform float uMaxTessLevel;
 
-float calcEdgeTess(vec3 pA, vec3 pB) {
+float calcEdgeTess(vec3 pA, vec3 pB, bool isFlora) {
     vec3 mid = 0.5 * (pA + pB);
     float dist = length(uCamPos - mid);
-    float t = 1.0 - smoothstep(14.0, 115.0, dist);
-    float maxL = min(uMaxTessLevel, 5.0);
+    float nearD = isFlora ? 8.0  : 14.0;
+    float farD  = isFlora ? 62.0 : 115.0;
+    float capL  = isFlora ? 4.0  : 5.0;
+    float t = 1.0 - smoothstep(nearD, farD, dist);
+    float maxL = min(uMaxTessLevel, capL);
     return mix(1.0, maxL, t * t);
 }
 
 void main() {
-    vPos_TES[gl_InvocationID]    = vPos_TCS[gl_InvocationID];
-    vNormal_TES[gl_InvocationID] = vNormal_TCS[gl_InvocationID];
-    vColor_TES[gl_InvocationID]  = vColor_TCS[gl_InvocationID];
-    vParam_TES[gl_InvocationID]  = vParam_TCS[gl_InvocationID];
+    vPos_TES[gl_InvocationID]      = vPos_TCS[gl_InvocationID];
+    vNormal_TES[gl_InvocationID]   = vNormal_TCS[gl_InvocationID];
+    vColor_TES[gl_InvocationID]    = vColor_TCS[gl_InvocationID];
+    vParam_TES[gl_InvocationID]    = vParam_TCS[gl_InvocationID];
+    vSwayInfo_TES[gl_InvocationID] = vSwayInfo_TCS[gl_InvocationID];
 
     if (gl_InvocationID == 0) {
-        float e0 = calcEdgeTess(vPos_TCS[1], vPos_TCS[2]);
-        float e1 = calcEdgeTess(vPos_TCS[2], vPos_TCS[0]);
-        float e2 = calcEdgeTess(vPos_TCS[0], vPos_TCS[1]);
+        bool isFlora = max(vParam_TCS[0].x, max(vParam_TCS[1].x, vParam_TCS[2].x)) > 1.5;
+        float e0 = calcEdgeTess(vPos_TCS[1], vPos_TCS[2], isFlora);
+        float e1 = calcEdgeTess(vPos_TCS[2], vPos_TCS[0], isFlora);
+        float e2 = calcEdgeTess(vPos_TCS[0], vPos_TCS[1], isFlora);
 
         gl_TessLevelOuter[0] = e0;
         gl_TessLevelOuter[1] = e1;
@@ -903,11 +912,13 @@ in vec3 vPos_TES[];
 in vec3 vNormal_TES[];
 in vec3 vColor_TES[];
 in vec2 vParam_TES[];
+in vec3 vSwayInfo_TES[];
 
 uniform sampler2D uRockTex;
 uniform mat4 uViewProj;
 uniform mat4 uLightSpaceMatrix;
 uniform vec3 uCamPos;
+uniform float uTime;
 
 out vec3 vWorldPos;
 out vec3 vNormal;
@@ -935,32 +946,78 @@ void main() {
     vec3 n1 = safeNorm(vNormal_TES[1]);
     vec3 n2 = safeNorm(vNormal_TES[2]);
 
-    vec3 pLin  = b.x * p0 + b.y * p1 + b.z * p2;
-    vec3 norm  = safeNorm(b.x * n0 + b.y * n1 + b.z * n2);
-    vec3 col   = b.x * vColor_TES[0] + b.y * vColor_TES[1] + b.z * vColor_TES[2];
-    vec2 param = b.x * vParam_TES[0] + b.y * vParam_TES[1] + b.z * vParam_TES[2];
+    vec3 pLin     = b.x * p0 + b.y * p1 + b.z * p2;
+    vec3 norm     = safeNorm(b.x * n0 + b.y * n1 + b.z * n2);
+    vec3 col      = b.x * vColor_TES[0] + b.y * vColor_TES[1] + b.z * vColor_TES[2];
+    vec2 param    = b.x * vParam_TES[0] + b.y * vParam_TES[1] + b.z * vParam_TES[2];
+    vec3 swayInfo = b.x * vSwayInfo_TES[0] + b.y * vSwayInfo_TES[1] + b.z * vSwayInfo_TES[2];
 
     float dist = length(uCamPos - pLin);
-    float fade = 1.0 - smoothstep(18.0, 105.0, dist);
+    float minDot = min(min(dot(n0, n1), dot(n1, n2)), dot(n2, n0));
+    float creaseGuard = smoothstep(0.28, 0.72, minDot);
 
     vec3 pos = pLin;
-    if (fade > 0.001) {
-        vec3 q0 = pLin - dot(pLin - p0, n0) * n0;
-        vec3 q1 = pLin - dot(pLin - p1, n1) * n1;
-        vec3 q2 = pLin - dot(pLin - p2, n2) * n2;
-        vec3 pPhong = b.x * q0 + b.y * q1 + b.z * q2;
-        pos = mix(pLin, pPhong, 0.55 * fade);
 
-        vec3 blend = max(abs(norm), vec3(0.0001));
-        blend = blend * blend;
-        blend = blend * blend;
-        blend /= (blend.x + blend.y + blend.z);
+    if (param.x < 1.5) {
+        // Rocks & crags: Phong silhouette smoothing + triplanar displacement
+        float fade = 1.0 - smoothstep(18.0, 105.0, dist);
+        if (fade > 0.001) {
+            vec3 q0 = pLin - dot(pLin - p0, n0) * n0;
+            vec3 q1 = pLin - dot(pLin - p1, n1) * n1;
+            vec3 q2 = pLin - dot(pLin - p2, n2) * n2;
+            vec3 pPhong = b.x * q0 + b.y * q1 + b.z * q2;
+            pos = mix(pLin, pPhong, 0.55 * fade * mix(0.25, 1.0, creaseGuard));
 
-        float lod = clamp(dist * 0.025, 0.5, 3.0);
-        float hMacro = sampleTriplanarHeightLod(pos * 0.055, blend, lod);
-        float hMicro = sampleTriplanarHeightLod(pos * 0.24,  blend, lod + 0.5);
-        float h = hMacro * 0.60 + hMicro * 0.40;
-        pos += norm * ((h - 0.5) * 0.26 * fade);
+            vec3 blend = max(abs(norm), vec3(0.0001));
+            blend = blend * blend;
+            blend = blend * blend;
+            blend /= (blend.x + blend.y + blend.z);
+
+            float lod = clamp(dist * 0.025, 0.5, 3.0);
+            float hMacro = sampleTriplanarHeightLod(pos * 0.055, blend, lod);
+            float hMicro = sampleTriplanarHeightLod(pos * 0.24,  blend, lod + 0.5);
+            float h = hMacro * 0.60 + hMicro * 0.40;
+            pos += norm * ((h - 0.5) * 0.26 * fade);
+        }
+    } else {
+        // Flora: gentle crease-safe Phong smoothing + smooth post-tessellation sway
+        float fade = 1.0 - smoothstep(10.0, 56.0, dist);
+        if (fade > 0.001 && creaseGuard > 0.001) {
+            vec3 q0 = pLin - dot(pLin - p0, n0) * n0;
+            vec3 q1 = pLin - dot(pLin - p1, n1) * n1;
+            vec3 q2 = pLin - dot(pLin - p2, n2) * n2;
+            vec3 pPhong = b.x * q0 + b.y * q1 + b.z * q2;
+            pos = mix(pLin, pPhong, 0.42 * creaseGuard * fade);
+        }
+
+        if (param.x > 4.5 || (param.x > 2.5 && param.x < 3.5)) {
+            float h = clamp(param.y, 0.0, 1.0);
+            float phase = uTime * 1.10 + swayInfo.x * 0.11 + swayInfo.y * 0.09;
+            float hCurve = h * sqrt(h);
+            float swayX = sin(phase + h * 2.8) * 1.25 * hCurve;
+            float swayZ = cos(phase * 0.82 + h * 3.8) * 0.78 * (h * h);
+            float flutter = sin(uTime * 2.6 + pos.y * 0.9 + swayInfo.z * 1.4) * 0.12 * h;
+            pos.x += swayX + flutter;
+            pos.z += swayZ + flutter;
+            norm = safeNorm(norm + vec3(swayX * 0.14, 0.0, swayZ * 0.14));
+        } else if (param.x > 3.5) {
+            float h = clamp(param.y, 0.0, 1.0);
+            float phase = uTime * 1.45 + swayInfo.x * 0.24 + swayInfo.y * 0.22;
+            float swayX = sin(phase + h * 2.4) * 0.24 * (h * h);
+            float swayZ = cos(phase * 0.85 + h * 2.8) * 0.20 * (h * h);
+            pos.x += swayX;
+            pos.z += swayZ;
+            norm = safeNorm(norm + vec3(swayX * 0.22, 0.0, swayZ * 0.22));
+        } else if (param.x > 1.5 && param.y > 0.01) {
+            float h = clamp(param.y, 0.0, 1.0);
+            float phase = uTime * 1.85 + pos.x * 0.30 + pos.z * 0.26;
+            float bend = h * sqrt(h);
+            float swayX = sin(phase + h * 2.0) * 0.26 * bend;
+            float swayZ = cos(phase * 0.84 + h * 2.4) * 0.22 * bend;
+            pos.x += swayX;
+            pos.z += swayZ;
+            norm = safeNorm(norm + vec3(swayX * 0.20, 0.0, swayZ * 0.20));
+        }
     }
 
     vWorldPos      = pos;
@@ -1084,7 +1141,7 @@ void main() {
 }
 )";
 
-inline const char* FaunaFrag = R"(#version 330 core
+#define DEEPDIVE_FAUNA_FRAG_BODY R"(
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec3 vColor;
@@ -1241,6 +1298,260 @@ void main() {
 
     vec3 outCol = lit * transmittance + fogColor * (1.0 - transmittance);
     FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
+}
+)";
+
+inline const char* FaunaFrag =
+    "#version 330 core\n"
+    DEEPDIVE_FAUNA_FRAG_BODY;
+
+inline const char* FaunaFrag400 =
+    "#version 400 core\n"
+    DEEPDIVE_FAUNA_FRAG_BODY;
+
+#undef DEEPDIVE_FAUNA_FRAG_BODY
+
+// ============================================================================
+// FAUNA HARDWARE TESSELLATION (OpenGL 4.0 Core — Local Phong + Smooth Swimming)
+// ============================================================================
+
+inline const char* FaunaTessVert = R"(#version 400 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+layout(location = 3) in vec4 aInstPosScale;
+layout(location = 4) in vec4 aInstRotPhase;  // x: yaw, y: phase, z: type, w: bank
+layout(location = 5) in vec4 aInstPitchTint; // x: pitch, yzw: colorTint
+
+out vec3 vLocalPos_TCS;
+out vec3 vLocalNorm_TCS;
+out vec3 vRawColor_TCS;
+out vec4 vInstPosScale_TCS;
+out vec4 vInstRotPhase_TCS;
+out vec4 vInstPitchTint_TCS;
+
+void main() {
+    vLocalPos_TCS      = aPos;
+    vLocalNorm_TCS     = aNormal;
+    vRawColor_TCS      = aColor;
+    vInstPosScale_TCS  = aInstPosScale;
+    vInstRotPhase_TCS  = aInstRotPhase;
+    vInstPitchTint_TCS = aInstPitchTint;
+}
+)";
+
+inline const char* FaunaTessControl = R"(#version 400 core
+layout(vertices = 3) out;
+
+in vec3 vLocalPos_TCS[];
+in vec3 vLocalNorm_TCS[];
+in vec3 vRawColor_TCS[];
+in vec4 vInstPosScale_TCS[];
+in vec4 vInstRotPhase_TCS[];
+in vec4 vInstPitchTint_TCS[];
+
+out vec3 vLocalPos_TES[];
+out vec3 vLocalNorm_TES[];
+out vec3 vRawColor_TES[];
+
+patch out vec4 pInstPosScale;
+patch out vec4 pInstRotPhase;
+patch out vec4 pInstPitchTint;
+patch out mat3 pRot;
+
+uniform vec3 uCamPos;
+uniform float uMaxTessLevel;
+
+float calcEdgeTess(vec3 wA, vec3 wB, float nearD, float farD, float capL) {
+    vec3 mid = 0.5 * (wA + wB);
+    float dist = length(uCamPos - mid);
+    float t = 1.0 - smoothstep(nearD, farD, dist);
+    float maxL = min(uMaxTessLevel, capL);
+    return mix(1.0, maxL, t * t);
+}
+
+void main() {
+    vLocalPos_TES[gl_InvocationID]  = vLocalPos_TCS[gl_InvocationID];
+    vLocalNorm_TES[gl_InvocationID] = vLocalNorm_TCS[gl_InvocationID];
+    vRawColor_TES[gl_InvocationID]  = vRawColor_TCS[gl_InvocationID];
+
+    if (gl_InvocationID == 0) {
+        vec4 instPosScale  = vInstPosScale_TCS[0];
+        vec4 instRotPhase  = vInstRotPhase_TCS[0];
+        vec4 instPitchTint = vInstPitchTint_TCS[0];
+
+        float yaw   = instRotPhase.x;
+        float pitch = instPitchTint.x;
+        float bank  = instRotPhase.w;
+
+        float cy = cos(yaw),   sy = sin(yaw);
+        float cp = cos(pitch), sp = sin(pitch);
+        float cb = cos(bank),  sb = sin(bank);
+
+        mat3 rotY = mat3(cy, 0.0, -sy,  0.0, 1.0, 0.0,  sy, 0.0, cy);
+        mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp);
+        mat3 rotZ = mat3(cb, sb, 0.0,   -sb, cb, 0.0,   0.0, 0.0, 1.0);
+        mat3 rot  = rotY * rotX * rotZ;
+
+        pInstPosScale  = instPosScale;
+        pInstRotPhase  = instRotPhase;
+        pInstPitchTint = instPitchTint;
+        pRot           = rot;
+
+        float nearD, farD, capL;
+        if (instRotPhase.z < 0.5) {
+            nearD = 4.0;  farD = 22.0;  capL = 3.0; // Reef fish (close-up only)
+        } else if (instRotPhase.z < 1.5) {
+            nearD = 10.0; farD = 75.0;  capL = 4.0; // Manta ray
+        } else if (instRotPhase.z < 2.5) {
+            nearD = 22.0; farD = 150.0; capL = 4.0; // Humpback whale
+        } else {
+            nearD = 10.0; farD = 65.0;  capL = 4.0; // Anglerfish
+        }
+
+        vec3 w0 = rot * (vLocalPos_TCS[0] * instPosScale.w) + instPosScale.xyz;
+        vec3 w1 = rot * (vLocalPos_TCS[1] * instPosScale.w) + instPosScale.xyz;
+        vec3 w2 = rot * (vLocalPos_TCS[2] * instPosScale.w) + instPosScale.xyz;
+
+        float e0 = calcEdgeTess(w1, w2, nearD, farD, capL);
+        float e1 = calcEdgeTess(w2, w0, nearD, farD, capL);
+        float e2 = calcEdgeTess(w0, w1, nearD, farD, capL);
+
+        gl_TessLevelOuter[0] = e0;
+        gl_TessLevelOuter[1] = e1;
+        gl_TessLevelOuter[2] = e2;
+        gl_TessLevelInner[0] = max(1.0, (e0 + e1 + e2) * 0.3333333);
+    }
+}
+)";
+
+inline const char* FaunaTessEval = R"(#version 400 core
+layout(triangles, fractional_even_spacing, ccw) in;
+
+in vec3 vLocalPos_TES[];
+in vec3 vLocalNorm_TES[];
+in vec3 vRawColor_TES[];
+
+patch in vec4 pInstPosScale;
+patch in vec4 pInstRotPhase;
+patch in vec4 pInstPitchTint;
+patch in mat3 pRot;
+
+uniform mat4 uViewProj;
+uniform mat4 uLightSpaceMatrix;
+uniform vec3 uCamPos;
+uniform float uTime;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec3 vColor;
+out vec4 vLightSpacePos;
+out float vEmissive;
+
+vec3 safeNorm(vec3 v) {
+    float l = length(v);
+    return (l > 0.0001) ? (v / l) : vec3(0.0, 1.0, 0.0);
+}
+
+void main() {
+    vec3 b = gl_TessCoord;
+
+    vec3 p0 = vLocalPos_TES[0], p1 = vLocalPos_TES[1], p2 = vLocalPos_TES[2];
+    vec3 n0 = safeNorm(vLocalNorm_TES[0]);
+    vec3 n1 = safeNorm(vLocalNorm_TES[1]);
+    vec3 n2 = safeNorm(vLocalNorm_TES[2]);
+
+    vec3 pLin   = b.x * p0 + b.y * p1 + b.z * p2;
+    vec3 localN = safeNorm(b.x * n0 + b.y * n1 + b.z * n2);
+    vec3 rawCol = b.x * vRawColor_TES[0] + b.y * vRawColor_TES[1] + b.z * vRawColor_TES[2];
+
+    // Smooth crease-guarded Phong interpolation in local model space before swimming animation
+    vec3 approxWorld = pRot * (pLin * pInstPosScale.w) + pInstPosScale.xyz;
+    float dist = length(uCamPos - approxWorld);
+    float farFade = (pInstRotPhase.z < 0.5) ? 20.0
+                  : (pInstRotPhase.z < 1.5) ? 70.0
+                  : (pInstRotPhase.z < 2.5) ? 140.0 : 60.0;
+    float fade = 1.0 - smoothstep(farFade * 0.25, farFade, dist);
+
+    float minDot = min(min(dot(n0, n1), dot(n1, n2)), dot(n2, n0));
+    float creaseGuard = smoothstep(0.32, 0.78, minDot);
+
+    vec3 localPos = pLin;
+    if (fade > 0.001 && creaseGuard > 0.001) {
+        vec3 q0 = pLin - dot(pLin - p0, n0) * n0;
+        vec3 q1 = pLin - dot(pLin - p1, n1) * n1;
+        vec3 q2 = pLin - dot(pLin - p2, n2) * n2;
+        vec3 pPhong = b.x * q0 + b.y * q1 + b.z * q2;
+        localPos = mix(pLin, pPhong, 0.48 * creaseGuard * fade);
+    }
+
+    // Swimming / wing-flapping / lure animation evaluated on the tessellated surface
+    if (pInstRotPhase.z < 0.5) {
+        float phase = pInstRotPhase.y + uTime * 9.5;
+        float tailWeight = smoothstep(0.35, -0.75, localPos.z);
+        float wave = sin(phase - localPos.z * 3.8) * 0.14 * tailWeight;
+        float dWaveDz = -3.8 * cos(phase - localPos.z * 3.8) * 0.14 * tailWeight;
+        localPos.x += wave;
+        localN = safeNorm(vec3(localN.x - dWaveDz * localN.z, localN.y, localN.z));
+    } else if (pInstRotPhase.z < 1.5) {
+        float phase = pInstRotPhase.y + uTime * 2.4;
+        float wingDist = abs(localPos.x);
+        float wf = clamp(wingDist / 2.05, 0.0, 1.25);
+        float wingFactor = wf * sqrt(wf);
+        float waveArg = phase - wingDist * 1.05 - localPos.z * 0.35;
+        float sW = sin(waveArg);
+        float cW = cos(waveArg);
+        float flap = sW * 0.44 * wingFactor;
+
+        float dWfDx = (wingDist > 0.001 && wf < 1.25) ? (sign(localPos.x) / 2.05) : 0.0;
+        float dFactorDx = 1.5 * sqrt(max(wf, 0.0001)) * dWfDx;
+        float dFlapDx = 0.44 * (-1.05 * sign(localPos.x) * cW * wingFactor + sW * dFactorDx);
+        float dFlapDz = 0.44 * (-0.35 * cW * wingFactor);
+
+        float tailW = smoothstep(-0.95, -3.0, localPos.z);
+        float tailArg = phase - 1.4 - localPos.z * 1.15;
+        float tailWave = sin(tailArg) * 0.20 * (tailW * tailW);
+        float dTailDz = -1.15 * cos(tailArg) * 0.20 * (tailW * tailW);
+
+        localPos.y += flap + tailWave;
+        localN = safeNorm(vec3(localN.x - dFlapDx * localN.y,
+                               localN.y,
+                               localN.z - (dFlapDz + dTailDz) * localN.y));
+    } else if (pInstRotPhase.z < 2.5) {
+        float phase = pInstRotPhase.y + uTime * 1.35;
+        float tailWeight = smoothstep(1.2, -6.4, localPos.z);
+        float w2 = tailWeight * tailWeight;
+        float waveArg = phase - localPos.z * 0.50;
+        float spineWave = sin(waveArg) * 0.58 * w2;
+        float dWaveDz = -0.50 * cos(waveArg) * 0.58 * w2;
+
+        float flipperWeight = clamp((abs(localPos.x) - 1.30) / 2.8, 0.0, 1.0)
+                            * smoothstep(-1.4, 0.2, localPos.z);
+        float finSway = sin(phase - abs(localPos.x) * 0.55) * 0.16 * flipperWeight;
+
+        localPos.y += spineWave + finSway;
+        localN = safeNorm(vec3(localN.x, localN.y, localN.z - dWaveDz * localN.y));
+    } else {
+        float phase = pInstRotPhase.y + uTime * 3.2;
+        float tailW = smoothstep(-0.1, -1.6, localPos.z);
+        localPos.x += sin(phase - localPos.z * 2.2) * 0.16 * tailW;
+
+        float finW = smoothstep(0.65, 1.25, abs(localPos.x));
+        localPos.y += sin(uTime * 4.2 + pInstRotPhase.y) * 0.08 * finW;
+
+        float lureW = smoothstep(0.45, 1.35, localPos.z) * smoothstep(0.15, 0.85, localPos.y);
+        localPos.x += sin(uTime * 2.1 + pInstRotPhase.y) * 0.09 * lureW;
+        localPos.y += cos(uTime * 1.7 + pInstRotPhase.y) * 0.07 * lureW;
+    }
+
+    vec3 worldPos  = pRot * (localPos * pInstPosScale.w) + pInstPosScale.xyz;
+    vWorldPos      = worldPos;
+    vNormal        = safeNorm(pRot * localN);
+    float maxC     = max(rawCol.r, max(rawCol.g, rawCol.b));
+    vEmissive      = smoothstep(1.20, 1.65, maxC);
+    vColor         = rawCol * pInstPitchTint.yzw;
+    vLightSpacePos = uLightSpaceMatrix * vec4(worldPos, 1.0);
+    gl_Position    = uViewProj * vec4(worldPos, 1.0);
 }
 )";
 

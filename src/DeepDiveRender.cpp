@@ -1,8 +1,8 @@
 #include "DeepDiveRender.h"
 #include "DeepDiveEngine.h"
 #include "Noise.h"
-#include "ShadersGeometry.h"
 #include "ShadersAtmosphere.h"
+#include "ShadersGeometry.h"
 #include <QOpenGLContext>
 #include <QOpenGLFunctions_4_0_Core>
 #include <QOpenGLVersionFunctionsFactory>
@@ -48,8 +48,20 @@ inline uint8_t updateBinaryLod(uint8_t currentLod, float dist, float threshold, 
     return currentLod;
 }
 
-inline bool isTessellatedRockArchetype(int archetype) {
-    return archetype == PROP_BOULDER_CHUNK || archetype == PROP_CLIFF_CRAG;
+inline bool isTessellatedPropArchetype(int archetype) {
+    switch (archetype) {
+    case PROP_BOULDER_CHUNK:
+    case PROP_CLIFF_CRAG:
+    case PROP_KELP_COLUMN:
+    case PROP_BARREL_SPONGE:
+    case PROP_CORAL_BUSH:
+    case PROP_TABLE_FAN:
+    case PROP_ANEMONE_PEN:
+        return true;
+    case PROP_GROUND_CARPET:
+    default:
+        return false;
+    }
 }
 
 // LOD transition thresholds for each of the 8 instanced prop archetypes (LOD0 -> LOD1 -> Cull)
@@ -130,6 +142,7 @@ void DeepDiveRender::initializeGLContext() {
     m_gl4Ready = false;
     m_envTessReady = false;
     m_instPropTessReady = false;
+    m_faunaTessReady = false;
     m_waterTessReady = false;
     m_tessSupported = false;
     m_tessEnabled = false;
@@ -248,6 +261,13 @@ void DeepDiveRender::compileEnvironmentShaders() {
             Shaders::InstPropTessControl,
             Shaders::InstPropTessEval,
             Shaders::EnvironmentFrag400);
+
+        m_faunaTessReady = linkTessProgram(
+            m_faunaTessShader,
+            Shaders::FaunaTessVert,
+            Shaders::FaunaTessControl,
+            Shaders::FaunaTessEval,
+            Shaders::FaunaFrag400);
     }
 }
 
@@ -273,7 +293,7 @@ void DeepDiveRender::compileWaterAndLightShaders() {
             Shaders::WaterSurfaceFrag400);
 
         // Enable hardware tessellation by default once all GL 4.0 tess stages link cleanly
-        m_tessSupported = m_envTessReady && m_instPropTessReady && m_waterTessReady;
+        m_tessSupported = m_envTessReady && m_instPropTessReady && m_faunaTessReady && m_waterTessReady;
         m_tessEnabled = m_tessSupported;
     }
 }
@@ -304,6 +324,10 @@ void DeepDiveRender::refreshGpuCapabilities(const std::vector<AdapterCapability>
 void DeepDiveRender::cleanup() {
     m_gl4 = nullptr;
     m_gl4Ready = false;
+    m_envTessReady = false;
+    m_instPropTessReady = false;
+    m_faunaTessReady = false;
+    m_waterTessReady = false;
     m_tessSupported = false;
     m_tessEnabled = false;
 
@@ -1015,10 +1039,10 @@ void DeepDiveRender::drawInstPropOne(const PropLodBuffers& buf,
     }
 }
 
-void DeepDiveRender::drawInstPropBatches(bool forShadow, bool countTris, bool skipTessRocks) {
+void DeepDiveRender::drawInstPropBatches(bool forShadow, bool countTris, bool skipTessProps) {
     for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
         if (forShadow && !PROP_LOD_CFG[a].castShadow) continue;
-        if (!(skipTessRocks && isTessellatedRockArchetype(a))) {
+        if (!(skipTessProps && isTessellatedPropArchetype(a))) {
             drawInstPropOne(m_propLod0[a], m_visPropsLod0[a].size(), GL_TRIANGLES, countTris);
         }
         drawInstPropOne(m_propLod1[a], m_visPropsLod1[a].size(), GL_TRIANGLES, countTris);
@@ -1159,11 +1183,12 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         }
     };
 
-    auto drawFaunaBatch = [&](const FaunaLodBuffers& buf, size_t instanceCount, bool countTris) {
+    auto drawFaunaBatch = [&](const FaunaLodBuffers& buf, size_t instanceCount,
+                              GLenum primitiveMode, bool countTris) {
         if (instanceCount == 0 || buf.indexCount == 0) return;
         const GLsizei clamped = static_cast<GLsizei>(std::min(instanceCount, static_cast<size_t>(buf.maxInstances)));
         glBindVertexArray(buf.vao);
-        glDrawElementsInstanced(GL_TRIANGLES, buf.indexCount, GL_UNSIGNED_INT, nullptr, clamped);
+        glDrawElementsInstanced(primitiveMode, buf.indexCount, GL_UNSIGNED_INT, nullptr, clamped);
         if (countTris) {
             m_stats.drawnTriangles += (buf.indexCount / 3) * clamped;
         }
@@ -1239,14 +1264,14 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         m_shadowFaunaShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
         m_shadowFaunaShader.setUniformValue("uTime", simTime);
 
-        drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   false);
-        drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   false);
-        drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  false);
-        drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  false);
-        drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  false);
-        drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  false);
-        drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), false);
-        drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), false);
+        drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   GL_TRIANGLES, false);
+        drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   GL_TRIANGLES, false);
+        drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  GL_TRIANGLES, false);
+        drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  GL_TRIANGLES, false);
+        drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  GL_TRIANGLES, false);
+        drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  GL_TRIANGLES, false);
+        drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), GL_TRIANGLES, false);
+        drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), GL_TRIANGLES, false);
     }
 
     // ========================================================================
@@ -1380,7 +1405,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         if (d < 430.0f) drawPropRange(chunk.shipwreckRange, true);
     }
 
-    // 1.3. Instanced environment props (LOD0 boulders & crags tessellated when enabled)
+    // 1.3. Instanced environment props (LOD0 rocks & flora tessellated when enabled)
     gatherAndUploadInstProps(world, visibleChunks, false);
     if (useTess) {
         bindCommonEnvUniforms(m_instPropTessShader);
@@ -1388,10 +1413,11 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         m_instPropTessShader.setUniformValue("uKelpTint", visuals.kelpTint);
         m_instPropTessShader.setUniformValue("uMaxTessLevel", maxTessF);
 
-        drawInstPropOne(m_propLod0[PROP_BOULDER_CHUNK],
-                        m_visPropsLod0[PROP_BOULDER_CHUNK].size(), GL_PATCHES, true);
-        drawInstPropOne(m_propLod0[PROP_CLIFF_CRAG],
-                        m_visPropsLod0[PROP_CLIFF_CRAG].size(), GL_PATCHES, true);
+        for (int a = 0; a < PROP_ARCHETYPE_COUNT; ++a) {
+            if (isTessellatedPropArchetype(a)) {
+                drawInstPropOne(m_propLod0[a], m_visPropsLod0[a].size(), GL_PATCHES, true);
+            }
+        }
     }
 
     bindCommonEnvUniforms(m_instPropShader);
@@ -1399,16 +1425,31 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     m_instPropShader.setUniformValue("uKelpTint", visuals.kelpTint);
     drawInstPropBatches(false, true, useTess);
 
-    // 1.4. Marine fauna (reef fish, manta rays, humpback whale, anglerfish)
-    bindCommonEnvUniforms(m_faunaShader);
-    drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   true);
-    drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   true);
-    drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  true);
-    drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  true);
-    drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  true);
-    drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  true);
-    drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), true);
-    drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), true);
+    // 1.4. Marine fauna (LOD0 smoothly tessellated when enabled; LOD1 stays GL_TRIANGLES)
+    if (useTess) {
+        bindCommonEnvUniforms(m_faunaTessShader);
+        m_faunaTessShader.setUniformValue("uMaxTessLevel", maxTessF);
+        drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   GL_PATCHES, true);
+        drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  GL_PATCHES, true);
+        drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  GL_PATCHES, true);
+        drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), GL_PATCHES, true);
+
+        bindCommonEnvUniforms(m_faunaShader);
+        drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), GL_TRIANGLES, true);
+    } else {
+        bindCommonEnvUniforms(m_faunaShader);
+        drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), GL_TRIANGLES, true);
+        drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), GL_TRIANGLES, true);
+    }
 
     // Resolve scene depth for shoreline foam and water contact ripples
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_msaaFBO);
