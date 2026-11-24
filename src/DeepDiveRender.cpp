@@ -1170,13 +1170,16 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     const float simTime        = engine.simulationTime();
     const int lureCount        = engine.lureCount();
     const auto& lurePositions  = engine.lurePositions();
+    const bool camAboveWater   = engine.isCameraAboveWater();
+    const int camAboveInt      = camAboveWater ? 1 : 0;
 
     const bool useTess = (m_tessSupported && m_tessEnabled && m_gl4 != nullptr);
     const float maxTessF = static_cast<float>(std::max(1, m_maxTessLevel));
 
     QMatrix4x4 proj;
     const float aspect = static_cast<float>(physW) / static_cast<float>(physH);
-    proj.perspective(65.0f, aspect, 0.25f, 460.0f);
+    const float fovY = std::clamp(65.0f + engine.dynamicFovOffset(), 52.0f, 78.0f);
+    proj.perspective(fovY, aspect, 0.25f, 460.0f);
 
     QMatrix4x4 view;
     view.lookAt(camPos, camPos + camForward, QVector3D(0.0f, 1.0f, 0.0f));
@@ -1317,12 +1320,15 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
 
     glDepthFunc(GL_LEQUAL);
     m_skyShader.bind();
+    m_skyShader.setUniformValue("uRockTex", 0);
     m_skyShader.setUniformValue("uInvViewProj", invViewProj);
     m_skyShader.setUniformValue("uCamPos", camPos);
     m_skyShader.setUniformValue("uSunDir", visuals.sunDir);
     m_skyShader.setUniformValue("uSunColor", visuals.sunColor);
     m_skyShader.setUniformValue("uWaterColorDeep", visuals.waterDeep);
     m_skyShader.setUniformValue("uWaterColorShallow", visuals.waterShallow);
+    m_skyShader.setUniformValue("uTime", simTime);
+    m_skyShader.setUniformValue("uCamAboveWater", camAboveInt);
     glBindVertexArray(m_skyVAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -1344,6 +1350,8 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         prog.setUniformValue("uVibrance", visuals.vibrance);
         prog.setUniformValue("uFogScale", visuals.fogScale);
         prog.setUniformValue("uTime", simTime);
+        prog.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
+        prog.setUniformValue("uCamAboveWater", camAboveInt);
         prog.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
         prog.setUniformValue("uLureCount", lureCount);
         if (lureCount > 0) {
@@ -1464,7 +1472,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), GL_TRIANGLES, true);
     }
 
-    // Resolve scene depth for shoreline foam and water contact ripples
+    // Resolve scene depth for shoreline foam, shoal transparency, and water contact ripples
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_msaaFBO);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_resolveFBO);
     glBlitFramebuffer(0, 0, physW, physH, 0, 0, physW, physH, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
@@ -1492,6 +1500,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     activeWaterShader.setUniformValue("uWaterColorShallow", visuals.waterShallow);
     activeWaterShader.setUniformValue("uFogScale", visuals.fogScale);
     activeWaterShader.setUniformValue("uTime", simTime);
+    activeWaterShader.setUniformValue("uCamAboveWater", camAboveInt);
     activeWaterShader.setUniformValue("uWhaleSurfA",
                                       QVector4D(whale.pos.x(), whale.pos.y(), whale.pos.z(), whale.scale));
     activeWaterShader.setUniformValue("uWhaleSurfB",
@@ -1508,61 +1517,65 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
 
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    glDepthMask(GL_FALSE);
+    // Underwater volumetric rays and bubble/plankton suspension (skipped while camera is in air)
+    if (!camAboveWater) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        glDepthMask(GL_FALSE);
 
-    if (m_rayIndexCount > 0 && m_rayInstanceCount > 0) {
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_FRONT); // Render back faces so shafts work both outside and inside
+        if (m_rayIndexCount > 0 && m_rayInstanceCount > 0) {
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_FRONT); // Render back faces so shafts work both outside and inside
 
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, m_rockTex);
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, m_shadowDepthTex);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_rockTex);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, m_shadowDepthTex);
 
-        m_rayShader.bind();
-        m_rayShader.setUniformValue("uRockTex", 0);
-        m_rayShader.setUniformValue("uSceneDepthTex", 1);
-        m_rayShader.setUniformValue("uShadowMap", 3);
-        m_rayShader.setUniformValue("uViewProj", viewProj);
-        m_rayShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
-        m_rayShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
-        m_rayShader.setUniformValue("uCamPos", camPos);
-        m_rayShader.setUniformValue("uSunDir", visuals.sunDir);
-        m_rayShader.setUniformValue("uSunColor", visuals.sunColor);
-        m_rayShader.setUniformValue("uWaterColorShallow", visuals.waterShallow);
-        m_rayShader.setUniformValue("uFogScale", visuals.fogScale);
-        m_rayShader.setUniformValue("uTime", simTime);
-        m_rayShader.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
+            m_rayShader.bind();
+            m_rayShader.setUniformValue("uRockTex", 0);
+            m_rayShader.setUniformValue("uSceneDepthTex", 1);
+            m_rayShader.setUniformValue("uShadowMap", 3);
+            m_rayShader.setUniformValue("uViewProj", viewProj);
+            m_rayShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
+            m_rayShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
+            m_rayShader.setUniformValue("uCamPos", camPos);
+            m_rayShader.setUniformValue("uSunDir", visuals.sunDir);
+            m_rayShader.setUniformValue("uSunColor", visuals.sunColor);
+            m_rayShader.setUniformValue("uWaterColorShallow", visuals.waterShallow);
+            m_rayShader.setUniformValue("uFogScale", visuals.fogScale);
+            m_rayShader.setUniformValue("uTime", simTime);
+            m_rayShader.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
 
-        glBindVertexArray(m_rayVAO);
-        glDrawElementsInstanced(GL_TRIANGLES, m_rayIndexCount, GL_UNSIGNED_INT, nullptr, m_rayInstanceCount);
+            glBindVertexArray(m_rayVAO);
+            glDrawElementsInstanced(GL_TRIANGLES, m_rayIndexCount, GL_UNSIGNED_INT, nullptr, m_rayInstanceCount);
 
-        glDisable(GL_CULL_FACE);
-        glEnable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_DEPTH_TEST);
+        }
+
+        if (!world.particles.empty() && m_particleVBO != 0) {
+            glBindBuffer(GL_ARRAY_BUFFER, m_particleVBO);
+            glBufferSubData(GL_ARRAY_BUFFER, 0,
+                            world.particles.size() * sizeof(Particle),
+                            world.particles.data());
+
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            m_particleShader.bind();
+            m_particleShader.setUniformValue("uViewProj", viewProj);
+            m_particleShader.setUniformValue("uCamPos", camPos);
+            m_particleShader.setUniformValue("uViewportHeight", static_cast<float>(physH));
+            m_particleShader.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
+            glBindVertexArray(m_particleVAO);
+            glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(world.particles.size()));
+        }
+
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
     }
-
-    if (!world.particles.empty() && m_particleVBO != 0) {
-        glBindBuffer(GL_ARRAY_BUFFER, m_particleVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0,
-                        world.particles.size() * sizeof(Particle),
-                        world.particles.data());
-
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        m_particleShader.bind();
-        m_particleShader.setUniformValue("uViewProj", viewProj);
-        m_particleShader.setUniformValue("uCamPos", camPos);
-        m_particleShader.setUniformValue("uViewportHeight", static_cast<float>(physH));
-        glBindVertexArray(m_particleVAO);
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(world.particles.size()));
-    }
-
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
 
     // ========================================================================
     // PASS 2: Resolve MSAA + Optional Bloom + Final Composite
@@ -1622,16 +1635,23 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, m_bloomTex[1]);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, m_rockTex);
 
     m_postProcessShader.setUniformValue("uSceneColorTex", 0);
     m_postProcessShader.setUniformValue("uSceneDepthTex", 1);
     m_postProcessShader.setUniformValue("uBloomTex", 2);
+    m_postProcessShader.setUniformValue("uRockTex", 3);
     m_postProcessShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
     m_postProcessShader.setUniformValue("uSunScreenPos", sunScreen);
     m_postProcessShader.setUniformValue("uWaterTint", visuals.waterShallow);
     m_postProcessShader.setUniformValue("uSurfaceProximity", surfaceProximity);
     m_postProcessShader.setUniformValue("uTime", simTime);
     m_postProcessShader.setUniformValue("uEnablePost", m_postProcessEnabled ? 1 : 0);
+    m_postProcessShader.setUniformValue("uCamAboveWater", camAboveInt);
+    m_postProcessShader.setUniformValue("uSplashAmount", engine.splashScreenAmount());
+    m_postProcessShader.setUniformValue("uLensWetness", engine.lensWetness());
+    m_postProcessShader.setUniformValue("uBulletTime", engine.bulletTimeFactor());
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
 

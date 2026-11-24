@@ -11,6 +11,11 @@ namespace {
 constexpr float PI     = 3.14159265358979323846f;
 constexpr float TWO_PI = 6.28318530717958647692f;
 
+// Large negative surface margin disables the water-surface ceiling in CollisionWorld
+// while preserving terrain, spire, boulder, shipwreck, and caldera wall collisions.
+constexpr float AIRBORNE_SURFACE_MARGIN = -220.0f;
+constexpr float BULLET_TIME_MIN_SCALE   = 0.26f;
+
 inline float wrapAngle(float a) {
     while (a > PI)  a -= TWO_PI;
     while (a < -PI) a += TWO_PI;
@@ -128,6 +133,18 @@ void DeepDiveEngine::setWorld(WorldData&& world, uint32_t seed) {
     m_wasPlayerColliding = false;
     m_fishHashNext.resize(m_world.fishAgents.size(), -1);
 
+    m_isAirborne = false;
+    m_camAboveWater = false;
+    m_camWaterHeight = ProcMath::WATER_SURFACE_Y;
+    m_airborneTime = 0.0f;
+    m_breachCooldown = 0.0f;
+    m_bulletTimeRealElapsed = 0.0f;
+    m_timeScale = 1.0f;
+    m_bulletTimeFactor = 0.0f;
+    m_splashScreenAmount = 0.0f;
+    m_lensWetness = 0.0f;
+    m_dynamicFovOffset = 0.0f;
+
     m_world.collision.resolveSphereCollision(
         m_playerPos, &m_playerVel,
         playerCollisionRadius(), playerFloorMargin(), playerSurfaceMargin());
@@ -139,7 +156,7 @@ void DeepDiveEngine::setWorld(WorldData&& world, uint32_t seed) {
     const float targetArm = (m_cameraMode == CameraMode::ThirdPersonFish) ? 4.2f
                                                                           : (m_cameraMode == CameraMode::ThirdPersonManta ? 9.2f : 0.0f);
     m_camArmDist = targetArm;
-    updatePlayerAvatarAndCamera(0.016f, QVector3D(0.0f, 0.0f, 0.0f), false);
+    updatePlayerAvatarAndCamera(0.016f, 0.016f, QVector3D(0.0f, 0.0f, 0.0f), false);
     refreshLureLights();
 }
 
@@ -160,14 +177,15 @@ void DeepDiveEngine::cycleCameraMode() {
     // Ensure the resized player hull (e.g. switching from small fish to manta) is clear of rocks
     m_world.collision.resolveSphereCollision(
         m_playerPos, &m_playerVel,
-        playerCollisionRadius(), playerFloorMargin(), playerSurfaceMargin());
+        playerCollisionRadius(), playerFloorMargin(),
+        m_isAirborne ? AIRBORNE_SURFACE_MARGIN : playerSurfaceMargin());
 
     float unusedImpact = 0.0f;
     resolveFaunaAndPlayerCollisions(unusedImpact);
 
     m_camArmDist = (m_cameraMode == CameraMode::ThirdPersonFish) ? 4.2f
                                                                  : (m_cameraMode == CameraMode::ThirdPersonManta ? 9.2f : 0.0f);
-    updatePlayerAvatarAndCamera(0.016f, QVector3D(0.0f, 0.0f, 0.0f), false);
+    updatePlayerAvatarAndCamera(0.016f, 0.016f, QVector3D(0.0f, 0.0f, 0.0f), false);
 }
 
 void DeepDiveEngine::summonWhaleNearPlayer() {
@@ -193,6 +211,11 @@ QVector3D DeepDiveEngine::cameraRight() const {
 
 float DeepDiveEngine::diveDepth() const {
     return std::max(0.0f, ProcMath::WATER_SURFACE_Y - m_playerPos.y());
+}
+
+float DeepDiveEngine::surfaceAltitude() const {
+    const float waveY = ProcMath::sampleWaterWaveHeight(m_playerPos.x(), m_playerPos.z(), m_time);
+    return m_playerPos.y() - waveY;
 }
 
 float DeepDiveEngine::radialDistance() const {
@@ -297,8 +320,8 @@ float DeepDiveEngine::playerSurfaceMargin() const {
     return 1.60f;
 }
 
-bool DeepDiveEngine::isCameraPointClear(const QVector3D& pt, float radius) const {
-    if (pt.y() > ProcMath::WATER_SURFACE_Y - radius) {
+bool DeepDiveEngine::isCameraPointClear(const QVector3D& pt, float radius, bool allowAboveWater) const {
+    if (!allowAboveWater && pt.y() > ProcMath::WATER_SURFACE_Y - radius) {
         return false;
     }
 
@@ -347,7 +370,8 @@ bool DeepDiveEngine::isCameraPointClear(const QVector3D& pt, float radius) const
     return true;
 }
 
-void DeepDiveEngine::updatePlayerAvatarAndCamera(float dt, const QVector3D& wishDir, bool moving) {
+void DeepDiveEngine::updatePlayerAvatarAndCamera(float realDt, float simDt,
+                                                 const QVector3D& wishDir, bool moving) {
     if (m_cameraMode == CameraMode::FirstPerson) {
         m_camPos = m_playerPos;
         m_camArmDist = 0.0f;
@@ -357,21 +381,24 @@ void DeepDiveEngine::updatePlayerAvatarAndCamera(float dt, const QVector3D& wish
     const bool isManta = (m_cameraMode == CameraMode::ThirdPersonManta);
     const float speed  = m_playerVel.length();
 
-    // Update avatar transform and swim cycle phase
+    // Update avatar transform and swim cycle phase (driven by simDt so motion slows in bullet-time)
     m_playerAvatar.pos = m_playerPos;
     m_playerAvatar.vel = m_playerVel;
 
     const float phaseRate = isManta
-                                ? (0.10f + speed * 0.085f)
-                                : (0.30f + speed * 0.24f);
-    m_playerAvatar.phase = std::fmod(m_playerAvatar.phase + dt * phaseRate, TWO_PI * 16.0f);
+                                ? (m_isAirborne ? (0.06f + speed * 0.055f) : (0.10f + speed * 0.085f))
+                                : (m_isAirborne ? (0.45f + speed * 0.28f)  : (0.30f + speed * 0.24f));
+    m_playerAvatar.phase = std::fmod(m_playerAvatar.phase + simDt * phaseRate, TWO_PI * 16.0f);
 
-    const float turnSmooth = isManta ? 5.2f : 9.5f;
-    const float maxPitch   = isManta ? 0.55f : 0.72f;
+    const float turnSmooth = m_isAirborne ? (isManta ? 6.5f : 10.5f) : (isManta ? 5.2f : 9.5f);
+    const float maxPitch   = m_isAirborne ? 1.05f : (isManta ? 0.55f : 0.72f);
     const float maxBank    = isManta ? 0.42f : 0.48f;
 
     QVector3D steerDir(0.0f, 0.0f, 0.0f);
-    if (moving && wishDir.lengthSquared() > 1e-4f) {
+    if (m_isAirborne && speed > 0.5f) {
+        // In mid-air, align the fish/manta smoothly along its ballistic arc
+        steerDir = m_playerVel / speed;
+    } else if (moving && wishDir.lengthSquared() > 1e-4f) {
         steerDir = wishDir.normalized();
     } else if (speed > 0.65f) {
         steerDir = m_playerVel / speed;
@@ -384,31 +411,40 @@ void DeepDiveEngine::updatePlayerAvatarAndCamera(float dt, const QVector3D& wish
             targetYaw = std::atan2(steerDir.x(), steerDir.z());
         }
         const float dYaw = wrapAngle(targetYaw - m_playerAvatar.yaw);
-        const float k = ProcMath::clamp(dt * turnSmooth, 0.0f, 1.0f);
+        const float k = ProcMath::clamp(simDt * turnSmooth, 0.0f, 1.0f);
         m_playerAvatar.yaw = wrapAngle(m_playerAvatar.yaw + dYaw * k);
 
         const float targetPitch = ProcMath::clamp(
             std::atan2(steerDir.y(), std::max(horiz, 0.2f)), -maxPitch, maxPitch);
         m_playerAvatar.pitch = ProcMath::mix(m_playerAvatar.pitch, targetPitch, k);
 
-        const float targetBank = ProcMath::clamp(-dYaw * (isManta ? 0.85f : 1.05f), -maxBank, maxBank);
-        m_playerAvatar.bank = ProcMath::mix(m_playerAvatar.bank, targetBank, ProcMath::clamp(dt * 5.0f, 0.0f, 1.0f));
+        const float targetBank = m_isAirborne
+                                     ? ProcMath::clamp(-dYaw * 0.65f + std::sin(m_airborneTime * 2.2f) * (isManta ? 0.10f : 0.18f),
+                                                       -maxBank, maxBank)
+                                     : ProcMath::clamp(-dYaw * (isManta ? 0.85f : 1.05f), -maxBank, maxBank);
+        m_playerAvatar.bank = ProcMath::mix(m_playerAvatar.bank, targetBank, ProcMath::clamp(simDt * 5.0f, 0.0f, 1.0f));
     } else {
         // Gently level out when hovering so the user can orbit and inspect the fish/manta
-        const float relax = ProcMath::clamp(dt * 3.0f, 0.0f, 1.0f);
+        const float relax = ProcMath::clamp(simDt * 3.0f, 0.0f, 1.0f);
         m_playerAvatar.pitch = ProcMath::mix(m_playerAvatar.pitch, 0.0f, relax);
         m_playerAvatar.bank  = ProcMath::mix(m_playerAvatar.bank,  0.0f, relax);
     }
 
-    // Spring-arm camera behind and slightly above the avatar
+    // Spring-arm camera behind and slightly above the avatar (arm responsiveness uses realDt)
     const QVector3D lookFwd = cameraForward();
-    const float desiredDist = isManta ? 9.2f : 4.2f;
+    const float waveAtPlayer = ProcMath::sampleWaterWaveHeight(m_playerPos.x(), m_playerPos.z(), m_time);
+    const bool allowCamAboveWater = m_isAirborne || (m_playerPos.y() > waveAtPlayer - 2.2f);
+
+    const float baseDist    = isManta ? 9.2f : 4.2f;
+    const float desiredDist = baseDist + m_bulletTimeFactor * (isManta ? 1.8f : 1.1f);
     const float minDist     = isManta ? 2.6f : 1.35f;
     const float liftY       = isManta ? 1.15f : 0.45f;
     const float camProbeR   = 0.55f;
 
     QVector3D anchor = m_playerPos + QVector3D(0.0f, liftY, 0.0f);
-    anchor.setY(std::min(anchor.y(), ProcMath::WATER_SURFACE_Y - 0.65f));
+    if (!allowCamAboveWater) {
+        anchor.setY(std::min(anchor.y(), ProcMath::WATER_SURFACE_Y - 0.65f));
+    }
 
     constexpr int TRACE_STEPS = 14;
     float clearDist = desiredDist;
@@ -416,19 +452,21 @@ void DeepDiveEngine::updatePlayerAvatarAndCamera(float dt, const QVector3D& wish
         const float t = static_cast<float>(i) / static_cast<float>(TRACE_STEPS);
         const float d = desiredDist * t;
         const QVector3D probe = anchor - lookFwd * d;
-        if (!isCameraPointClear(probe, camProbeR)) {
+        if (!isCameraPointClear(probe, camProbeR, allowCamAboveWater)) {
             clearDist = std::max(minDist, desiredDist * (static_cast<float>(i - 1) / static_cast<float>(TRACE_STEPS)));
             break;
         }
     }
 
-    // Pull in rapidly on obstacles, extend smoothly when water opens up
+    // Pull in rapidly on obstacles, extend smoothly when space opens up
     const float armRate = (clearDist < m_camArmDist) ? 18.0f : 5.5f;
-    m_camArmDist = ProcMath::mix(m_camArmDist, clearDist, ProcMath::clamp(dt * armRate, 0.0f, 1.0f));
+    m_camArmDist = ProcMath::mix(m_camArmDist, clearDist, ProcMath::clamp(realDt * armRate, 0.0f, 1.0f));
     m_camPos = anchor - lookFwd * m_camArmDist;
 
-    // Final safety clamp for camera against seafloor/surface
-    m_world.collision.resolveSphereCollision(m_camPos, nullptr, 0.45f, 0.35f, 0.55f);
+    // Final safety clamp for camera against seafloor/cliffs (and water ceiling only when underwater)
+    m_world.collision.resolveSphereCollision(
+        m_camPos, nullptr, 0.45f, 0.35f,
+        allowCamAboveWater ? AIRBORNE_SURFACE_MARGIN : 0.55f);
 }
 
 // ============================================================================
@@ -709,7 +747,7 @@ void DeepDiveEngine::updateWhaleNavigation(float dt, bool& whaleCalledOut) {
     const float bodyBot           = 1.12f * sc;
     const float submergedCeilingY = ProcMath::WATER_SURFACE_Y - (0.85f * sc + 0.9f);
     const float skimCeilingY      = ProcMath::WATER_SURFACE_Y - 0.25f * sc;
-    const float surfacingCeilingY = ProcMath::WATER_SURFACE_Y;
+    const float surfacingCeilingY = ProcMath::WATER_SURFACE_Y + 0.15f * sc;
     const float cruiseY           = submergedCeilingY - 0.8f;
     const float safeTurnR         = ProcMath::BASIN_INNER_RADIUS - (65.0f + halfLen);
 
@@ -1029,7 +1067,7 @@ void DeepDiveEngine::updateFaunaAgents(float dt) {
             steer.setY(steer.y() + (targetY - a.pos.y()) * 1.3f);
 
             // Reef fish gently scatter from diver or manta, but swim comfortably alongside another small fish
-            if (fleePlayer && !playerIsSmallFish) {
+            if (fleePlayer && !playerIsSmallFish && !m_isAirborne) {
                 const QVector3D fromPlayer = a.pos - m_playerPos;
                 const float dSq = fromPlayer.lengthSquared();
                 if (dSq < 49.0f && dSq > 1e-4f) {
@@ -1058,14 +1096,16 @@ void DeepDiveEngine::updateFaunaAgents(float dt) {
                     }
                 }
 
-                // Mantas also smoothly steer around the player
-                const QVector3D fromPlayer = a.pos - m_playerPos;
-                const float pAvoidR = rA + playerCollisionRadius() + 4.5f;
-                const float pDistSq = fromPlayer.lengthSquared();
-                if (pDistSq < pAvoidR * pAvoidR && pDistSq > 1e-4f) {
-                    const float d = std::sqrt(pDistSq);
-                    const float t = (pAvoidR - d) / pAvoidR;
-                    steer += (fromPlayer / d) * (t * 9.5f);
+                // Mantas also smoothly steer around the underwater player
+                if (!m_isAirborne) {
+                    const QVector3D fromPlayer = a.pos - m_playerPos;
+                    const float pAvoidR = rA + playerCollisionRadius() + 4.5f;
+                    const float pDistSq = fromPlayer.lengthSquared();
+                    if (pDistSq < pAvoidR * pAvoidR && pDistSq > 1e-4f) {
+                        const float d = std::sqrt(pDistSq);
+                        const float t = (pAvoidR - d) / pAvoidR;
+                        steer += (fromPlayer / d) * (t * 9.5f);
+                    }
                 }
             } else {
                 // Reef fish steer around nearby mantas
@@ -1482,7 +1522,8 @@ void DeepDiveEngine::resolveFaunaAndPlayerCollisions(float& maxPlayerImpactSpeed
         m_playerColliding = true;
         m_world.collision.resolveSphereCollision(
             m_playerPos, &m_playerVel,
-            pRadius, playerFloorMargin(), playerSurfaceMargin());
+            pRadius, playerFloorMargin(),
+            m_isAirborne ? AIRBORNE_SURFACE_MARGIN : playerSurfaceMargin());
     }
 }
 
@@ -1514,21 +1555,47 @@ void DeepDiveEngine::updateParticles(float dt) {
 }
 
 // ============================================================================
-// MAIN SIMULATION STEP
+// MAIN SIMULATION STEP (REAL TIME vs BULLET-TIME)
 // ============================================================================
 
-EngineStepEvents DeepDiveEngine::update(float dt, const EngineInput& input) {
+EngineStepEvents DeepDiveEngine::update(float realDt, const EngineInput& input) {
     EngineStepEvents events;
-    m_time += dt;
 
+    // 1. Camera look and cooldowns always run at full real-time responsiveness
     m_yaw += input.yawDelta;
     m_pitch = ProcMath::clamp(m_pitch + input.pitchDelta, -1.48f, 1.48f);
 
-    // 1. Update whale first so its multi-sphere hull is fresh for player & fauna avoidance
-    updateWhaleNavigation(dt, events.whaleCalled);
+    if (m_breachCooldown > 0.0f) {
+        m_breachCooldown = std::max(0.0f, m_breachCooldown - realDt);
+    }
+
+    // 2. Bullet-time time-dilation controller
+    const float preWaveY = ProcMath::sampleWaterWaveHeight(m_playerPos.x(), m_playerPos.z(), m_time);
+    const float preAlt   = m_playerPos.y() - preWaveY;
+
+    float targetTimeScale = 1.0f;
+    if (m_isAirborne) {
+        m_bulletTimeRealElapsed += realDt;
+        const bool inUpperArc = (preAlt > 0.75f) && (m_playerVel.y() > -6.0f || (input.sprint && preAlt > 2.2f));
+        if (inUpperArc && m_bulletTimeRealElapsed < 4.5f) {
+            targetTimeScale = BULLET_TIME_MIN_SCALE;
+        }
+    } else {
+        m_bulletTimeRealElapsed = 0.0f;
+    }
+
+    const float timeScaleRate = (targetTimeScale < m_timeScale) ? 9.0f : 5.5f;
+    m_timeScale = ProcMath::mix(m_timeScale, targetTimeScale, ProcMath::clamp(realDt * timeScaleRate, 0.0f, 1.0f));
+    m_bulletTimeFactor = ProcMath::clamp((1.0f - m_timeScale) / (1.0f - BULLET_TIME_MIN_SCALE), 0.0f, 1.0f);
+
+    const float simDt = realDt * m_timeScale;
+    m_time += simDt;
+
+    // 3. Update whale first so its multi-sphere hull is fresh for player & fauna avoidance
+    updateWhaleNavigation(simDt, events.whaleCalled);
     refreshWhaleColliders();
 
-    // 2. Integrate player body movement
+    // 4. Integrate player body movement (underwater swimming vs airborne ballistics)
     const QVector3D fwd = cameraForward();
     const QVector3D rgt = cameraRight();
     QVector3D wishDir = fwd * input.moveForward
@@ -1541,34 +1608,141 @@ EngineStepEvents DeepDiveEngine::update(float dt, const EngineInput& input) {
         wishDir /= std::sqrt(wishLenSq);
     }
 
-    float accel = 18.0f;
-    float drag  = 3.0f;
-    if (m_cameraMode == CameraMode::ThirdPersonFish) {
-        accel = input.sprint ? 48.0f : 19.0f;
-        drag  = 3.4f;
-    } else if (m_cameraMode == CameraMode::ThirdPersonManta) {
-        accel = input.sprint ? 54.0f : 21.0f;
-        drag  = 2.35f;
+    const float preCollisionSpeed = m_playerVel.length();
+    bool hitEnv = false;
+
+    if (!m_isAirborne) {
+        float accel = 18.0f;
+        float drag  = 3.0f;
+        if (m_cameraMode == CameraMode::ThirdPersonFish) {
+            accel = input.sprint ? 48.0f : 19.0f;
+            drag  = 3.4f;
+        } else if (m_cameraMode == CameraMode::ThirdPersonManta) {
+            accel = input.sprint ? 54.0f : 21.0f;
+            drag  = 2.35f;
+        } else {
+            accel = input.sprint ? 58.0f : 18.0f;
+            drag  = 3.0f;
+        }
+
+        m_playerVel += wishDir * (accel * simDt);
+        m_playerVel *= std::exp(-drag * simDt);
+        m_playerPos += m_playerVel * simDt;
+        m_playerPos.setY(m_playerPos.y() + std::sin(m_time * 1.4f) * 0.006f);
+
+        const float waveY = ProcMath::sampleWaterWaveHeight(m_playerPos.x(), m_playerPos.z(), m_time);
+        const bool approachingFastUp = input.sprint
+                                       && (m_breachCooldown <= 0.0f)
+                                       && (m_playerPos.y() > waveY - 7.5f)
+                                       && (m_playerVel.y() > 3.2f || (wishDir.y() > 0.22f && m_playerVel.length() > 8.0f));
+
+        // Relax water ceiling only when intentionally sprinting upward to breach
+        const float activeSurfaceMargin = approachingFastUp ? AIRBORNE_SURFACE_MARGIN : playerSurfaceMargin();
+        hitEnv = m_world.collision.resolveSphereCollision(
+            m_playerPos, &m_playerVel,
+            playerCollisionRadius(), playerFloorMargin(), activeSurfaceMargin);
+
+        // Trigger surface breach when crossing the wave surface
+        if (approachingFastUp && m_playerPos.y() >= waveY - 0.15f) {
+            m_isAirborne = true;
+            m_airborneTime = 0.0f;
+            m_bulletTimeRealElapsed = 0.0f;
+
+            float minLaunchVy = 15.2f;
+            float maxLaunchVy = 21.5f;
+            float vyBoost     = 1.32f;
+            if (m_cameraMode == CameraMode::ThirdPersonFish) {
+                minLaunchVy = 15.8f;
+                maxLaunchVy = 22.5f;
+                vyBoost     = 1.38f;
+            } else if (m_cameraMode == CameraMode::ThirdPersonManta) {
+                minLaunchVy = 14.6f;
+                maxLaunchVy = 20.5f;
+                vyBoost     = 1.28f;
+            }
+
+            const float launchVy = ProcMath::clamp(std::max(m_playerVel.y() * vyBoost, minLaunchVy),
+                                                   minLaunchVy, maxLaunchVy);
+            m_playerVel.setY(launchVy);
+
+            // Preserve a graceful forward arc over the waves
+            QVector3D horizVel(m_playerVel.x(), 0.0f, m_playerVel.z());
+            const float hSpd = horizVel.length();
+            if (hSpd < 7.5f) {
+                QVector3D fwdXZ(fwd.x(), 0.0f, fwd.z());
+                if (fwdXZ.lengthSquared() > 1e-4f) {
+                    fwdXZ.normalize();
+                    m_playerVel.setX(fwdXZ.x() * 7.5f);
+                    m_playerVel.setZ(fwdXZ.z() * 7.5f);
+                }
+            }
+
+            m_playerPos.setY(std::max(m_playerPos.y(), waveY + 0.35f));
+
+            events.breachedSurface = true;
+            events.splashIntensity = ProcMath::clamp(m_playerVel.length() / 24.0f, 0.55f, 1.0f);
+            m_splashScreenAmount = std::max(m_splashScreenAmount, 0.88f);
+            m_lensWetness = 1.0f;
+        }
     } else {
-        accel = input.sprint ? 58.0f : 18.0f;
-        drag  = 3.0f;
+        // Airborne ballistic arc with gentle horizontal air-steer
+        constexpr float GRAVITY = 19.5f;
+        m_airborneTime += simDt;
+
+        const QVector3D airSteer(wishDir.x(), 0.0f, wishDir.z());
+        m_playerVel += airSteer * (2.6f * simDt);
+        m_playerVel *= std::exp(-0.18f * simDt);
+        m_playerVel.setY(m_playerVel.y() - GRAVITY * simDt);
+        m_playerPos += m_playerVel * simDt;
+
+        // Keep full collisions against above-water cliffs, sea stacks, and basin rim
+        hitEnv = m_world.collision.resolveSphereCollision(
+            m_playerPos, &m_playerVel,
+            playerCollisionRadius(), playerFloorMargin(), AIRBORNE_SURFACE_MARGIN);
+
+        // If the player lands atop a sea stack, push down the slope back toward the ocean
+        if (hitEnv && m_airborneTime > 0.35f) {
+            const float gradStep = 2.0f;
+            const auto& col = m_world.collision;
+            const float hPx = col.sampleHeight(m_playerPos.x() + gradStep, m_playerPos.z());
+            const float hNx = col.sampleHeight(m_playerPos.x() - gradStep, m_playerPos.z());
+            const float hPz = col.sampleHeight(m_playerPos.x(), m_playerPos.z() + gradStep);
+            const float hNz = col.sampleHeight(m_playerPos.x(), m_playerPos.z() - gradStep);
+            QVector3D downhill(hNx - hPx, 0.0f, hNz - hPz);
+            if (downhill.lengthSquared() < 0.05f) {
+                downhill = QVector3D(-m_playerPos.x(), 0.0f, -m_playerPos.z());
+            }
+            if (downhill.lengthSquared() > 1e-4f) {
+                downhill.normalize();
+                m_playerVel += downhill * (14.0f * simDt);
+            }
+        }
+
+        // Check splashdown back into the ocean waves
+        const float waveY = ProcMath::sampleWaterWaveHeight(m_playerPos.x(), m_playerPos.z(), m_time);
+        if (m_airborneTime > 0.12f && m_playerPos.y() <= waveY) {
+            const float impactVy = std::abs(m_playerVel.y());
+            m_isAirborne = false;
+            m_breachCooldown = 0.65f;
+            m_bulletTimeRealElapsed = 0.0f;
+
+            // Absorb part of the plunge momentum for a weighty underwater dive
+            m_playerVel.setX(m_playerVel.x() * 0.78f);
+            m_playerVel.setY(std::min(m_playerVel.y() * 0.56f, -3.5f));
+            m_playerVel.setZ(m_playerVel.z() * 0.78f);
+
+            events.splashedDown = true;
+            events.splashIntensity = ProcMath::clamp(impactVy / 18.0f, 0.40f, 1.0f);
+            m_splashScreenAmount = std::max(m_splashScreenAmount,
+                                            ProcMath::clamp(0.65f + events.splashIntensity * 0.35f, 0.0f, 1.0f));
+        }
     }
 
-    const float preCollisionSpeed = m_playerVel.length();
-
-    m_playerVel += wishDir * (accel * dt);
-    m_playerVel *= std::exp(-drag * dt);
-    m_playerPos += m_playerVel * dt;
-    m_playerPos.setY(m_playerPos.y() + std::sin(m_time * 1.4f) * 0.006f);
-
-    const bool hitEnv = m_world.collision.resolveSphereCollision(
-        m_playerPos, &m_playerVel,
-        playerCollisionRadius(), playerFloorMargin(), playerSurfaceMargin());
     m_playerColliding = hitEnv;
 
-    // 3. Step fish, mantas & anglers, then resolve all mutual fauna & player collisions
-    updateFaunaAgents(dt);
-    updateAnglerAgents(dt);
+    // 5. Step fish, mantas & anglers, then resolve all mutual fauna & player collisions
+    updateFaunaAgents(simDt);
+    updateAnglerAgents(simDt);
 
     float maxImpactSpeed = hitEnv ? preCollisionSpeed : 0.0f;
     resolveFaunaAndPlayerCollisions(maxImpactSpeed);
@@ -1579,10 +1753,42 @@ EngineStepEvents DeepDiveEngine::update(float dt, const EngineInput& input) {
     }
     m_wasPlayerColliding = m_playerColliding;
 
-    // 4. Sync third-person avatar orientation and compute collision-aware camera position
-    updatePlayerAvatarAndCamera(dt, wishDir, isMoving);
+    // 6. Sync third-person avatar orientation and compute collision-aware camera position
+    updatePlayerAvatarAndCamera(realDt, simDt, wishDir, isMoving);
+
+    // 7. Track camera's own crossing of the ocean surface (distinct from avatar in 3rd person)
+    m_camWaterHeight = ProcMath::sampleWaterWaveHeight(m_camPos.x(), m_camPos.z(), m_time);
+    const bool camAboveNow = (m_camPos.y() > m_camWaterHeight);
+    if (camAboveNow != m_camAboveWater) {
+        events.cameraCrossedSurface = true;
+        events.cameraEnteredAir = camAboveNow;
+        events.splashIntensity = std::max(events.splashIntensity,
+                                          ProcMath::clamp(m_playerVel.length() / 20.0f, 0.45f, 1.0f));
+        m_splashScreenAmount = std::max(m_splashScreenAmount, camAboveNow ? 0.94f : 0.88f);
+        if (camAboveNow) {
+            m_lensWetness = 1.0f;
+        }
+    }
+    m_camAboveWater = camAboveNow;
+
+    // 8. Decay screen-space splash foam, lens droplets, and smooth dynamic FOV offset in real time
+    m_splashScreenAmount = std::max(0.0f, m_splashScreenAmount - realDt * 1.45f);
+    if (m_camAboveWater) {
+        m_lensWetness = std::max(0.0f, m_lensWetness - realDt * 0.22f);
+    } else {
+        m_lensWetness = std::max(0.0f, m_lensWetness - realDt * 3.50f);
+    }
+
+    float targetFovOffset = 0.0f;
+    if (m_isAirborne) {
+        targetFovOffset = 2.5f - m_bulletTimeFactor * 5.5f; // Slight launch kick -> focused slow-mo framing
+    } else if (input.sprint && isMoving) {
+        targetFovOffset = 4.5f;
+    }
+    m_dynamicFovOffset = ProcMath::mix(m_dynamicFovOffset, targetFovOffset, ProcMath::clamp(realDt * 5.0f, 0.0f, 1.0f));
+
     refreshLureLights();
-    updateParticles(dt);
+    updateParticles(simDt);
 
     return events;
 }

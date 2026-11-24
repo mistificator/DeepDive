@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <random>
 #include <vector>
+#include "Noise.h"
 #include "WorldGenerator.h"
 
 enum class CameraMode {
@@ -25,6 +26,13 @@ struct EngineStepEvents {
     bool playerCollisionImpact = false;
     float collisionImpactSpeed = 0.0f;
     bool whaleCalled = false;
+
+    // Water/air transition events (for audio splashes, rumble, and 3D spray bursts)
+    bool breachedSurface = false;
+    bool splashedDown = false;
+    bool cameraCrossedSurface = false;
+    bool cameraEnteredAir = false;
+    float splashIntensity = 0.0f;
 };
 
 struct BiomeVisuals {
@@ -45,7 +53,7 @@ public:
     DeepDiveEngine();
     ~DeepDiveEngine() = default;
 
-    // World lifecycle & simulation step
+    // World lifecycle & simulation step (dt is real frame delta time in seconds)
     void setWorld(WorldData&& world, uint32_t seed);
     EngineStepEvents update(float dt, const EngineInput& input);
 
@@ -63,6 +71,17 @@ public:
     uint32_t seed() const { return m_seed; }
     float simulationTime() const { return m_time; }
     bool isPlayerColliding() const { return m_playerColliding; }
+
+    // Surface breaching, bullet-time & dual-medium state
+    bool isPlayerAirborne() const { return m_isAirborne; }
+    bool isCameraAboveWater() const { return m_camAboveWater; }
+    float timeScale() const { return m_timeScale; }
+    float bulletTimeFactor() const { return m_bulletTimeFactor; }
+    float splashScreenAmount() const { return m_splashScreenAmount; }
+    float lensWetness() const { return m_lensWetness; }
+    float dynamicFovOffset() const { return m_dynamicFovOffset; }
+    float waterHeightAtCamera() const { return m_camWaterHeight; }
+    float surfaceAltitude() const;
 
     CameraMode cameraMode() const { return m_cameraMode; }
     const char* cameraModeName() const;
@@ -99,8 +118,8 @@ private:
     float playerCollisionRadius() const;
     float playerFloorMargin() const;
     float playerSurfaceMargin() const;
-    void updatePlayerAvatarAndCamera(float dt, const QVector3D& wishDir, bool moving);
-    bool isCameraPointClear(const QVector3D& pt, float radius) const;
+    void updatePlayerAvatarAndCamera(float realDt, float simDt, const QVector3D& wishDir, bool moving);
+    bool isCameraPointClear(const QVector3D& pt, float radius, bool allowAboveWater) const;
 
     void spawnWhalePass(bool nearPlayer);
     float sampleWhaleClearance(float x, float z) const;
@@ -124,6 +143,19 @@ private:
     float m_time = 0.0f;
     bool m_playerColliding = false;
     bool m_wasPlayerColliding = false;
+
+    // Breaching, airborne ballistics, bullet-time & screen wetness
+    bool m_isAirborne = false;
+    bool m_camAboveWater = false;
+    float m_camWaterHeight = ProcMath::WATER_SURFACE_Y;
+    float m_airborneTime = 0.0f;
+    float m_breachCooldown = 0.0f;
+    float m_bulletTimeRealElapsed = 0.0f;
+    float m_timeScale = 1.0f;
+    float m_bulletTimeFactor = 0.0f;
+    float m_splashScreenAmount = 0.0f;
+    float m_lensWetness = 0.0f;
+    float m_dynamicFovOffset = 0.0f;
 
     std::array<QVector3D, MAX_LURE_LIGHTS> m_lurePositions{};
     int m_lureCount = 0;

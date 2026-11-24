@@ -3,7 +3,7 @@
 namespace Shaders {
 
 // ============================================================================
-// 3D WATER SURFACE FROM BELOW (GL 3.3 + Hardware Tessellation GL 4.0)
+// 3D WATER SURFACE (TWO-SIDED: BELOW & ABOVE, GL 3.3 + GL 4.0 TESSELLATION)
 // ============================================================================
 
 inline const char* WaterSurfaceVert = R"(#version 330 core
@@ -26,33 +26,34 @@ void main() {
     float h = 0.0;
     vec2 grad = vec2(0.0);
 
+    // 4 directional harmonics synchronized 1:1 with ProcMath::sampleWaterWaveOffset
     {
-        vec2 d = vec2(0.82, 0.57);
-        float k = 0.17, a = 0.17 * edgeDamp;
-        float ph = dot(wxz, d) * k + uTime * 1.15;
+        vec2 k = vec2(0.048, 0.032);
+        float a = 0.26 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 1.15;
         h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        grad += k * (cos(ph) * a);
     }
     {
-        vec2 d = vec2(-0.64, 0.77);
-        float k = 0.27, a = 0.11 * edgeDamp;
-        float ph = dot(wxz, d) * k + uTime * 1.48;
+        vec2 k = vec2(-0.062, 0.054);
+        float a = 0.18 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 1.48;
         h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        grad += k * (cos(ph) * a);
     }
     {
-        vec2 d = vec2(0.31, -0.95);
-        float k = 0.44, a = 0.06 * edgeDamp;
-        float ph = dot(wxz, d) * k - uTime * 1.90;
-        h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        vec2 k = vec2(0.115, -0.095);
+        float a = 0.11 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 2.05;
+        h += cos(ph) * a;
+        grad += k * (-sin(ph) * a);
     }
     {
-        vec2 d = vec2(-0.92, -0.39);
-        float k = 0.72, a = 0.035 * edgeDamp;
-        float ph = dot(wxz, d) * k + uTime * 2.35;
+        vec2 k = vec2(0.185, 0.165);
+        float a = 0.06 * edgeDamp;
+        float ph = dot(wxz, k) - uTime * 2.75;
         h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        grad += k * (cos(ph) * a);
     }
 
     vec3 worldPos = vec3(wxz.x, uWaterY + h, wxz.y);
@@ -136,46 +137,47 @@ void main() {
     float h = 0.0;
     vec2 grad = vec2(0.0);
 
+    // 4 directional harmonics synchronized 1:1 with ProcMath::sampleWaterWaveOffset
     {
-        vec2 d = vec2(0.82, 0.57);
-        float k = 0.17, a = 0.17 * edgeDamp;
-        float ph = dot(wxz, d) * k + uTime * 1.15;
+        vec2 k = vec2(0.048, 0.032);
+        float a = 0.26 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 1.15;
         h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        grad += k * (cos(ph) * a);
     }
     {
-        vec2 d = vec2(-0.64, 0.77);
-        float k = 0.27, a = 0.11 * edgeDamp;
-        float ph = dot(wxz, d) * k + uTime * 1.48;
+        vec2 k = vec2(-0.062, 0.054);
+        float a = 0.18 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 1.48;
         h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        grad += k * (cos(ph) * a);
     }
     {
-        vec2 d = vec2(0.31, -0.95);
-        float k = 0.44, a = 0.06 * edgeDamp;
-        float ph = dot(wxz, d) * k - uTime * 1.90;
-        h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        vec2 k = vec2(0.115, -0.095);
+        float a = 0.11 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 2.05;
+        h += cos(ph) * a;
+        grad += k * (-sin(ph) * a);
     }
     {
-        vec2 d = vec2(-0.92, -0.39);
-        float k = 0.72, a = 0.035 * edgeDamp;
-        float ph = dot(wxz, d) * k + uTime * 2.35;
+        vec2 k = vec2(0.185, 0.165);
+        float a = 0.06 * edgeDamp;
+        float ph = dot(wxz, k) - uTime * 2.75;
         h += sin(ph) * a;
-        grad += d * (cos(ph) * a * k);
+        grad += k * (cos(ph) * a);
     }
     // High-frequency geometric chop for tessellated near-field surface
     if (nearChop > 0.005) {
         {
             vec2 d = vec2(0.55, -0.83);
-            float k = 1.28, a = 0.022 * nearChop;
+            float k = 1.28, a = 0.024 * nearChop;
             float ph = dot(wxz, d) * k + uTime * 2.95;
             h += sin(ph) * a;
             grad += d * (cos(ph) * a * k);
         }
         {
             vec2 d = vec2(-0.78, -0.62);
-            float k = 1.85, a = 0.014 * nearChop;
+            float k = 1.85, a = 0.015 * nearChop;
             float ph = dot(wxz, d) * k - uTime * 3.40;
             h += sin(ph) * a;
             grad += d * (cos(ph) * a * k);
@@ -190,7 +192,7 @@ void main() {
 }
 )";
 
-#define DEEPDIVE_WATER_FRAG_BODY R"(
+#define DEEPDIVE_WATER_FRAG_PART1 R"(
 in vec3 vWorldPos;
 in vec2 vWaveGrad;
 in float vWaveH;
@@ -205,6 +207,7 @@ uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
 uniform float uFogScale;
 uniform float uTime;
+uniform int uCamAboveWater;
 uniform vec4 uWhaleSurfA;
 uniform vec4 uWhaleSurfB;
 
@@ -230,10 +233,42 @@ vec3 computeUnderwaterFogColor(vec3 rayDir, vec3 L, float heightFactor, float ab
     return mix(fogCol, vec3(0.004, 0.014, 0.028), abyssMask * 0.92);
 }
 
+vec3 sampleDaySkyWater(vec3 dir, vec3 L, bool includeSunDisc) {
+    float elev = clamp(dir.y, 0.0, 1.0);
+    vec3 zenith  = vec3(0.10, 0.38, 0.82);
+    vec3 midSky  = vec3(0.28, 0.65, 0.96);
+    vec3 horizon = vec3(0.74, 0.90, 0.99);
+
+    vec3 sky = mix(horizon, midSky, smoothstep(0.0, 0.28, elev));
+    sky = mix(sky, zenith, pow(elev, 0.62));
+
+    float sunDot = clamp(dot(dir, L), 0.0, 1.0);
+    vec3 middaySun = vec3(1.18, 1.10, 0.94);
+    sky += middaySun * (pow(sunDot, 5.0) * 0.18 + pow(sunDot, 42.0) * 0.42);
+    if (includeSunDisc) {
+        sky += middaySun * (smoothstep(0.9975, 0.9994, sunDot) * 3.8);
+    }
+
+    // Distant clouds reflected on the water surface
+    if (elev > 0.03) {
+        vec2 cloudUV = dir.xz / (elev + 0.18);
+        float c1 = texture(uRockTex, cloudUV * 0.075 + vec2(uTime * 0.0032, uTime * 0.0014)).a;
+        float c2 = texture(uRockTex, cloudUV * 0.165 + vec2(-uTime * 0.0020, uTime * 0.0042)).a;
+        float cloud = smoothstep(0.54, 0.82, c1 * 0.65 + c2 * 0.35);
+        float cloudMask = cloud * smoothstep(0.03, 0.20, elev) * (1.0 - smoothstep(0.75, 0.98, elev) * 0.35);
+        vec3 cloudCol = mix(vec3(0.76, 0.85, 0.94), vec3(1.12, 1.10, 1.06), smoothstep(0.3, 0.85, c1));
+        cloudCol += middaySun * pow(sunDot, 12.0) * 0.35;
+        sky = mix(sky, cloudCol, cloudMask * 0.72);
+    }
+    return sky;
+}
+)"
+
+#define DEEPDIVE_WATER_FRAG_PART2 R"(
 void main() {
     vec3 toCam = uCamPos - vWorldPos;
     float dist = length(toCam);
-    vec3 V = dist > 0.0001 ? (toCam / dist) : vec3(0.0, -1.0, 0.0);
+    vec3 V = dist > 0.0001 ? (toCam / dist) : vec3(0.0, 1.0, 0.0);
     vec3 rayDir = -V;
     vec3 L = normalize(uSunDir);
 
@@ -316,8 +351,8 @@ void main() {
 
     if (hasContact) {
         float dist3D = contactDist3D;
-        float shoreZone = 1.0 - smoothstep(0.0, 4.2, dist3D);
-        float tightSeam = 1.0 - smoothstep(0.0, 1.15, dist3D);
+        float shoreZone = 1.0 - smoothstep(0.0, 4.4, dist3D);
+        float tightSeam = 1.0 - smoothstep(0.0, 1.25, dist3D);
 
         if (shoreZone > 0.005) {
             vec4 f1 = texture(uRockTex, p * 0.36 + vec2(uTime * 0.035, -uTime * 0.028));
@@ -346,9 +381,64 @@ void main() {
                   + (s4.rg * 2.0 - 1.0) * (0.14 * fineWeight);
 
     vec2 totalSlope = vWaveGrad * 1.90 + texSlope * 0.85 + shoreRippleGrad;
+    float waveCrest = clamp(0.5 + vWaveH * 0.95 + (s1.a - 0.5) * 0.45 + (s2.a - 0.5) * 0.35, 0.0, 1.0);
+
+    // ========================================================================
+    // ABOVE-WATER VIEW: Sunlit ocean surface, sky/cloud reflection & shoals
+    // ========================================================================
+    if (uCamAboveWater == 1) {
+        vec3 Nup = normalize(vec3(-totalSlope.x, 1.0, -totalSlope.y));
+        float cosV = clamp(dot(Nup, V), 0.0, 1.0);
+        float fresnel = 0.02 + 0.98 * pow(1.0 - cosV, 5.0);
+
+        vec3 R = reflect(rayDir, Nup);
+        R.y = max(R.y, 0.025);
+        vec3 reflCol = sampleDaySkyWater(normalize(R), L, true);
+
+        // Refracted water body: shallow turquoise glow over nearby reefs -> deep ocean blue
+        float waterThickness = (rawSceneDepth < 0.9992) ? max(sceneLin - waterLin, 0.0) : 80.0;
+        float shallowMask = exp(-waterThickness * 0.048);
+        vec3 deepOcean = mix(uWaterColorDeep * 0.72, vec3(0.012, 0.11, 0.24), 0.48);
+        vec3 shallowTurq = mix(uWaterColorShallow * 1.18, vec3(0.08, 0.62, 0.72), 0.35);
+        vec3 waterBody = mix(deepOcean, shallowTurq, shallowMask);
+
+        // Sunlit subsurface scatter through translucent wave crests
+        float sss = pow(clamp(dot(V, -L + Nup * 0.45), 0.0, 1.0), 3.0) * waveCrest;
+        float crestScatter = smoothstep(0.45, 0.95, waveCrest) * clamp(dot(Nup, L) * 0.5 + 0.5, 0.0, 1.0);
+        waterBody += shallowTurq * (sss * 0.55 + crestScatter * 0.18);
+
+        vec3 surfaceCol = mix(waterBody, reflCol, clamp(fresnel * 1.05, 0.02, 0.96));
+
+        // Midday solar glitter path across wave facets
+        vec3 H = normalize(L + V + vec3(0.0001));
+        float ndh = clamp(dot(Nup, H), 0.0, 1.0);
+        vec3 sunGlintCol = vec3(1.22, 1.14, 0.96);
+        float glintSharp = pow(max(ndh, 0.0001), 420.0) * 5.2;
+        float glintBroad = pow(max(ndh, 0.0001), 48.0)  * 0.36;
+        surfaceCol += sunGlintCol * (glintSharp + glintBroad);
+
+        // Subtle wind whitecaps on high crests + bright shoreline / whale foam
+        float whitecap = smoothstep(0.80, 0.96, waveCrest) * smoothstep(0.55, 0.85, s2.a) * 0.38;
+        float totalFoam = clamp(shoreFoam * 0.92 + whitecap, 0.0, 1.0);
+        vec3 dayFoamCol = vec3(0.96, 0.99, 1.02) * (0.86 + 0.26 * clamp(dot(Nup, L), 0.0, 1.0));
+        surfaceCol = mix(surfaceCol, dayFoamCol, totalFoam);
+        surfaceCol += vec3(1.0, 1.04, 1.08) * shoreBubbles * 0.35;
+
+        // Crisp daylight aerial perspective toward the horizon
+        float airFog = 1.0 - exp(-dist * 0.00145);
+        vec3 hazeDir = normalize(vec3(rayDir.x, 0.04, rayDir.z));
+        vec3 horizonCol = sampleDaySkyWater(hazeDir, L, false);
+        vec3 outCol = mix(surfaceCol, horizonCol, clamp(airFog * 0.78, 0.0, 0.85));
+
+        FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
+        return;
+    }
+
+    // ========================================================================
+    // UNDERWATER VIEW: Snell's Window, TIR & Spectral Underwater Fog
+    // ========================================================================
     vec3 N = normalize(vec3(totalSlope.x, -1.0, totalSlope.y));
 
-    float waveCrest = clamp(0.5 + vWaveH * 1.15 + (s1.a - 0.5) * 0.45 + (s2.a - 0.5) * 0.35, 0.0, 1.0);
     float causticNet = clamp(1.0 - abs(s1.a - s2.a) * 2.3, 0.0, 1.0);
     causticNet = causticNet * causticNet * causticNet * causticNet;
 
@@ -389,11 +479,11 @@ void main() {
         refractedCol = mix(rimSkyCol, zenithCol, pow(skyElev, 0.58));
 
         float sunDot = clamp(dot(T, L), 0.0, 1.0);
-        float s2 = sunDot * sunDot;
-        float s4 = s2 * s2;
-        float s16 = s4 * s4 * s4 * s4;
+        float s2d = sunDot * sunDot;
+        float s4d = s2d * s2d;
+        float s16 = s4d * s4d * s4d * s4d;
         float s64 = s16 * s16 * s16 * s16;
-        refractedCol += uSunColor * (s4 * 0.36 + s16 * 0.85 + s64 * 1.85);
+        refractedCol += uSunColor * (s4d * 0.36 + s16 * 0.85 + s64 * 1.85);
 
         refractedCol *= (0.76 + 0.44 * waveCrest);
         refractedCol += uSunColor * causticNet * 0.36 * (0.45 + 0.55 * fineWeight);
@@ -422,16 +512,19 @@ void main() {
 
 inline const char* WaterSurfaceFrag =
     "#version 330 core\n"
-    DEEPDIVE_WATER_FRAG_BODY;
+    DEEPDIVE_WATER_FRAG_PART1
+        DEEPDIVE_WATER_FRAG_PART2;
 
 inline const char* WaterSurfaceFrag400 =
     "#version 400 core\n"
-    DEEPDIVE_WATER_FRAG_BODY;
+    DEEPDIVE_WATER_FRAG_PART1
+        DEEPDIVE_WATER_FRAG_PART2;
 
-#undef DEEPDIVE_WATER_FRAG_BODY
+#undef DEEPDIVE_WATER_FRAG_PART1
+#undef DEEPDIVE_WATER_FRAG_PART2
 
 // ============================================================================
-// UNDERWATER SKYBOX
+// DUAL-MEDIUM SKYBOX (UNDERWATER GRADIENT + MIDDAY SUN & DISTANT CLOUDS)
 // ============================================================================
 
 inline const char* SkyboxVert = R"(#version 330 core
@@ -445,12 +538,15 @@ void main() {
 
 inline const char* SkyboxFrag = R"(#version 330 core
 in vec2 vNDC;
+uniform sampler2D uRockTex;
 uniform mat4 uInvViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
+uniform float uTime;
+uniform int uCamAboveWater;
 
 out vec4 FragColor;
 
@@ -458,6 +554,70 @@ void main() {
     vec4 worldTarget = uInvViewProj * vec4(vNDC, 1.0, 1.0);
     vec3 dir = normalize(worldTarget.xyz / max(abs(worldTarget.w), 0.0001) - uCamPos);
     vec3 L = normalize(uSunDir);
+
+    if (uCamAboveWater == 1) {
+        float elev = clamp(dir.y, 0.0, 1.0);
+        vec3 zenith  = vec3(0.08, 0.34, 0.78);
+        vec3 midSky  = vec3(0.25, 0.62, 0.95);
+        vec3 horizon = vec3(0.75, 0.91, 0.99);
+
+        vec3 col = mix(horizon, midSky, smoothstep(0.0, 0.26, elev));
+        col = mix(col, zenith, pow(elev, 0.58));
+
+        // Seamless ocean-horizon backdrop slightly below y = 0
+        if (dir.y < 0.0) {
+            vec3 farOcean = mix(horizon * 0.86, vec3(0.06, 0.24, 0.42), smoothstep(0.0, -0.18, dir.y));
+            col = farOcean;
+        }
+
+        // Bright midday sun disc, warm atmospheric glow & Mie scattering
+        float sunDot = clamp(dot(dir, L), 0.0, 1.0);
+        vec3 middaySun = vec3(1.25, 1.14, 0.94);
+        float mieWide  = pow(sunDot, 4.0) * 0.20;
+        float mieTight = pow(sunDot, 36.0) * 0.55;
+        float sunHalo  = pow(sunDot, 220.0) * 1.45;
+        float sunDisc  = smoothstep(0.9986, 0.99945, sunDot) * 6.5;
+        col += middaySun * (mieWide + mieTight + sunHalo + sunDisc) * smoothstep(-0.04, 0.06, dir.y);
+
+        // Distant procedural cumulus & high cirrus clouds on a curved sky dome
+        if (dir.y > 0.015) {
+            vec2 domeUV = dir.xz / (dir.y + 0.14);
+            vec2 drift1 = vec2(uTime * 0.0028, uTime * 0.0012);
+            vec2 drift2 = vec2(-uTime * 0.0018, uTime * 0.0034);
+
+            float warp = (texture(uRockTex, domeUV * 0.045 + drift2).a - 0.5) * 0.38;
+            vec2 wUV = domeUV + vec2(warp, -warp * 0.7);
+
+            float cBase   = texture(uRockTex, wUV * 0.068 + drift1).a;
+            float cDetail = texture(uRockTex, wUV * 0.155 + drift2).a;
+            float cWisps  = texture(uRockTex, domeUV * 0.28 + drift1 * 1.6).a;
+
+            float density = cBase * 0.58 + cDetail * 0.28 + cWisps * 0.14;
+            float puffs   = smoothstep(0.55, 0.80, density);
+
+            // Soft sunlit top & silver-lining rim near the midday sun
+            vec2 sunStepUV = L.xz * 0.028;
+            float cTowardSun = texture(uRockTex, (wUV + sunStepUV) * 0.068 + drift1).a;
+            float lightShade = clamp(0.55 + (cBase - cTowardSun) * 2.2, 0.25, 1.0);
+            float silverLining = pow(sunDot, 10.0) * (1.0 - puffs * 0.65) * smoothstep(0.48, 0.72, density);
+
+            vec3 cloudShadow = vec3(0.66, 0.78, 0.90);
+            vec3 cloudLit    = vec3(1.14, 1.12, 1.07);
+            vec3 cloudCol = mix(cloudShadow, cloudLit, lightShade) + middaySun * silverLining * 0.55;
+
+            // Keep clouds cleanly distant near the horizon and softly tapered overhead
+            float horizonFade = smoothstep(0.015, 0.16, dir.y);
+            float zenithSoft  = 1.0 - smoothstep(0.68, 0.98, dir.y) * 0.25;
+            float cloudAlpha  = puffs * horizonFade * zenithSoft * 0.84;
+
+            // Gently blend distant clouds into horizon haze
+            cloudCol = mix(horizon, cloudCol, smoothstep(0.02, 0.22, dir.y));
+            col = mix(col, cloudCol, cloudAlpha);
+        }
+
+        FragColor = vec4(clamp(col, 0.0, 8.0), 1.0);
+        return;
+    }
 
     float camAbyss = smoothstep(-20.0, -54.0, uCamPos.y);
     float camHeightFactor = clamp((uCamPos.y + 34.0) / 62.0, 0.06, 1.0);
@@ -702,9 +862,11 @@ layout(location = 1) in vec4 aColorSize;
 uniform mat4 uViewProj;
 uniform vec3 uCamPos;
 uniform float uViewportHeight;
+uniform float uWaterY;
 
 out vec3 vColor;
 out float vType;
+out float vClipped;
 
 void main() {
     gl_Position = uViewProj * vec4(aPos, 1.0);
@@ -713,15 +875,18 @@ void main() {
     gl_PointSize = clamp((size * uViewportHeight * 0.6) / dist, 1.5, 42.0);
     vColor = aColorSize.rgb;
     vType = aColorSize.a < 0.0 ? 1.0 : 0.0;
+    vClipped = (aPos.y > uWaterY - 0.35) ? 1.0 : 0.0;
 }
 )";
 
 inline const char* ParticleFrag = R"(#version 330 core
 in vec3 vColor;
 in float vType;
+in float vClipped;
 out vec4 FragColor;
 
 void main() {
+    if (vClipped > 0.5) discard;
     vec2 uv = gl_PointCoord * 2.0 - 1.0;
     float r2 = dot(uv, uv);
     if (r2 > 1.0) discard;
@@ -797,6 +962,7 @@ in vec2 vUV;
 uniform sampler2D uSceneColorTex;
 uniform sampler2D uSceneDepthTex;
 uniform sampler2D uBloomTex;
+uniform sampler2D uRockTex;
 
 uniform vec2 uInvResolution;
 uniform vec3 uSunScreenPos;
@@ -804,6 +970,10 @@ uniform vec3 uWaterTint;
 uniform float uSurfaceProximity;
 uniform float uTime;
 uniform int uEnablePost;
+uniform int uCamAboveWater;
+uniform float uSplashAmount;
+uniform float uLensWetness;
+uniform float uBulletTime;
 
 out vec4 FragColor;
 
@@ -829,74 +999,170 @@ vec3 acesToneMapping(vec3 x) {
     return clamp((s * (a * s + b)) / (s * (c * s + d) + e), 0.0, 1.0);
 }
 
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Procedural sliding water droplets on the camera lens when breaching into air
+vec3 evalLensDroplets(vec2 uv, float aspect, float wetness, float t) {
+    if (wetness <= 0.005) return vec3(0.0);
+
+    vec2 gridScale = vec2(9.5 * aspect, 9.5);
+    vec2 gUV = uv * gridScale;
+    gUV.y += t * 0.55; // droplets slowly slide down the lens
+
+    vec2 cell = floor(gUV);
+    vec2 f = fract(gUV) - 0.5;
+
+    float h1 = hash21(cell);
+    float h2 = hash21(cell + 17.3);
+    float h3 = hash21(cell + 43.7);
+    if (h1 < 0.42) return vec3(0.0);
+
+    vec2 center = vec2((h2 - 0.5) * 0.52, (h3 - 0.5) * 0.48);
+    vec2 d = f - center;
+    d.y *= 0.80; // slight vertical teardrop elongation
+    float r = 0.11 + 0.12 * fract(h1 * 7.31);
+    float dist = length(d);
+    float mask = smoothstep(r, r * 0.35, dist) * wetness;
+    if (mask <= 0.001) return vec3(0.0);
+
+    vec2 refractOff = -(d / max(r, 0.01)) * 0.018 * mask;
+    float spec = pow(clamp(1.0 - length(d - vec2(-0.04, 0.05)) / max(r * 0.75, 0.01), 0.0, 1.0), 3.0) * mask;
+    return vec3(refractOff, spec);
+}
+
 void main() {
     if (uEnablePost == 0) {
         FragColor = vec4(clamp(sanitizeHDR(texture(uSceneColorTex, vUV).rgb), 0.0, 1.0), 1.0);
         return;
     }
 
-    vec2 waveOffset = vec2(
-        sin(vUV.y * 13.0 + uTime * 1.45) * cos(vUV.x * 10.0 + uTime * 0.95),
-        cos(vUV.x * 12.0 - uTime * 1.15) * sin(vUV.y * 11.0 + uTime * 0.85)
-    ) * 0.0012;
-    vec2 uv = clamp(vUV + waveOffset, 0.001, 0.999);
-
-    float rawDepth = texture(uSceneDepthTex, uv).r;
-    float linDepth = linearizeDepth(rawDepth);
-    float turbidityBlur = clamp((linDepth - 14.0) / 90.0, 0.05, 1.0);
-
-    vec2 edgeVec = uv - 0.5;
+    float aspect = uInvResolution.y / max(uInvResolution.x, 1e-6);
+    vec2 edgeVec = vUV - 0.5;
     float radialDist = length(edgeVec);
-    vec2 caShift = edgeVec * (0.0030 * radialDist);
 
-    vec3 centerCol;
-    centerCol.r = sanitizeHDR(texture(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999)).rgb).r;
-    centerCol.g = sanitizeHDR(texture(uSceneColorTex, uv).rgb).g;
-    centerCol.b = sanitizeHDR(texture(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999)).rgb).b;
+    vec3 mapped;
 
-    vec2 blurStep = uInvResolution * (1.2 + turbidityBlur * 2.4);
-    vec3 ringCol = (
-        sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2( blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
-        sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
-        sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2( blurStep.x, -blurStep.y), 0.001, 0.999)).rgb) +
-        sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x, -blurStep.y), 0.001, 0.999)).rgb)
-    ) * 0.25;
+    if (uCamAboveWater == 1) {
+        // Above-water: crisp sunlit air + dripping lens droplets + soft solar bloom
+        vec3 drop = evalLensDroplets(vUV, aspect, uLensWetness, uTime);
+        vec2 uv = clamp(vUV + drop.xy, 0.001, 0.999);
 
-    vec3 sceneCol = mix(centerCol, ringCol, turbidityBlur * 0.46);
+        float caAmp = 0.0010 + uBulletTime * 0.0022;
+        vec2 caShift = edgeVec * (caAmp * radialDist);
 
-    vec3 scatteredBloom = sanitizeHDR(texture(uBloomTex, uv).rgb);
-    sceneCol = mix(sceneCol, scatteredBloom, 0.16) + scatteredBloom * 0.34;
+        vec3 sceneCol;
+        sceneCol.r = sanitizeHDR(texture(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999)).rgb).r;
+        sceneCol.g = sanitizeHDR(texture(uSceneColorTex, uv).rgb).g;
+        sceneCol.b = sanitizeHDR(texture(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999)).rgb).b;
 
-    if (uSunScreenPos.z > 0.0) {
-        vec2 sunUV = uSunScreenPos.xy;
-        vec2 deltaUV = (uv - sunUV);
-        float sunDist = length(deltaUV);
-        vec2 stepUV = deltaUV / 24.0 * min(1.0, 0.85 / max(sunDist, 0.001));
+        vec3 bloom = sanitizeHDR(texture(uBloomTex, uv).rgb);
+        sceneCol += bloom * 0.18;
 
-        vec2 sampleUV = uv;
-        float illuminationDecay = 1.0;
-        vec3 godRayAcc = vec3(0.0);
-
-        for (int i = 0; i < 24; ++i) {
-            sampleUV -= stepUV;
-            vec2 clampedUV = clamp(sampleUV, 0.002, 0.998);
-            vec3 sColor = sanitizeHDR(texture(uBloomTex, clampedUV).rgb);
-            godRayAcc += sColor * illuminationDecay;
-            illuminationDecay *= 0.935;
+        // Subtle warm solar glare when looking toward midday sun
+        if (uSunScreenPos.z > 0.0) {
+            float sunDist = length(uv - uSunScreenPos.xy);
+            float glare = exp(-sunDist * 2.8) * clamp(uSunScreenPos.z, 0.0, 1.0);
+            sceneCol += vec3(1.05, 0.98, 0.84) * glare * 0.14;
         }
 
-        float rayFade = clamp(uSunScreenPos.z, 0.0, 1.0) * exp(-sunDist * 1.05);
-        sceneCol += godRayAcc * (0.044 * rayFade);
+        // Droplet specular glint
+        sceneCol += vec3(0.95, 1.02, 1.08) * drop.z * 0.65;
+
+        mapped = acesToneMapping(sceneCol * (1.06 + uBulletTime * 0.05));
+        mapped = pow(max(mapped, vec3(0.0001)), vec3(0.97));
+
+        float vigStrength = mix(0.84, 0.68, uBulletTime);
+        float vignette = smoothstep(1.08, 0.30, radialDist);
+        mapped *= mix(vigStrength, 1.0, vignette);
+    } else {
+        // Underwater: subtle optical refraction, depth turbidity blur, bloom & god rays
+        vec2 waveOffset = vec2(
+            sin(vUV.y * 13.0 + uTime * 1.45) * cos(vUV.x * 10.0 + uTime * 0.95),
+            cos(vUV.x * 12.0 - uTime * 1.15) * sin(vUV.y * 11.0 + uTime * 0.85)
+        ) * 0.0012;
+        vec2 uv = clamp(vUV + waveOffset, 0.001, 0.999);
+
+        float rawDepth = texture(uSceneDepthTex, uv).r;
+        float linDepth = linearizeDepth(rawDepth);
+        float turbidityBlur = clamp((linDepth - 14.0) / 90.0, 0.05, 1.0);
+
+        vec2 caShift = edgeVec * (0.0030 * radialDist);
+
+        vec3 centerCol;
+        centerCol.r = sanitizeHDR(texture(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999)).rgb).r;
+        centerCol.g = sanitizeHDR(texture(uSceneColorTex, uv).rgb).g;
+        centerCol.b = sanitizeHDR(texture(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999)).rgb).b;
+
+        vec2 blurStep = uInvResolution * (1.2 + turbidityBlur * 2.4);
+        vec3 ringCol = (
+            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2( blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
+            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
+            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2( blurStep.x, -blurStep.y), 0.001, 0.999)).rgb) +
+            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x, -blurStep.y), 0.001, 0.999)).rgb)
+        ) * 0.25;
+
+        vec3 sceneCol = mix(centerCol, ringCol, turbidityBlur * 0.46);
+
+        vec3 scatteredBloom = sanitizeHDR(texture(uBloomTex, uv).rgb);
+        sceneCol = mix(sceneCol, scatteredBloom, 0.16) + scatteredBloom * 0.34;
+
+        if (uSunScreenPos.z > 0.0) {
+            vec2 sunUV = uSunScreenPos.xy;
+            vec2 deltaUV = (uv - sunUV);
+            float sunDist = length(deltaUV);
+            vec2 stepUV = deltaUV / 24.0 * min(1.0, 0.85 / max(sunDist, 0.001));
+
+            vec2 sampleUV = uv;
+            float illuminationDecay = 1.0;
+            vec3 godRayAcc = vec3(0.0);
+
+            for (int i = 0; i < 24; ++i) {
+                sampleUV -= stepUV;
+                vec2 clampedUV = clamp(sampleUV, 0.002, 0.998);
+                vec3 sColor = sanitizeHDR(texture(uBloomTex, clampedUV).rgb);
+                godRayAcc += sColor * illuminationDecay;
+                illuminationDecay *= 0.935;
+            }
+
+            float rayFade = clamp(uSunScreenPos.z, 0.0, 1.0) * exp(-sunDist * 1.05);
+            sceneCol += godRayAcc * (0.044 * rayFade);
+        }
+
+        float topGrad = clamp(vUV.y, 0.0, 1.0);
+        sceneCol += uWaterTint * (topGrad * topGrad) * (0.055 + 0.055 * clamp(uSurfaceProximity, 0.0, 1.0));
+
+        mapped = acesToneMapping(sceneCol * 1.18);
+        mapped = pow(max(mapped, vec3(0.0001)), vec3(0.96));
+
+        float vignette = smoothstep(1.02, 0.28, radialDist);
+        mapped *= mix(0.60, 1.0, vignette);
     }
 
-    float topGrad = clamp(vUV.y, 0.0, 1.0);
-    sceneCol += uWaterTint * (topGrad * topGrad) * (0.055 + 0.055 * clamp(uSurfaceProximity, 0.0, 1.0));
+    // Screen-space white foam & radial sea spray burst when crossing water/air boundary
+    if (uSplashAmount > 0.002) {
+        float sp = clamp(uSplashAmount, 0.0, 1.0);
+        vec2 aspectUV = vec2(edgeVec.x * aspect, edgeVec.y);
+        float rNorm = length(aspectUV);
+        vec2 radialDir = (rNorm > 0.001) ? (aspectUV / rNorm) : vec2(0.0, 1.0);
 
-    vec3 mapped = acesToneMapping(sceneCol * 1.18);
-    mapped = pow(max(mapped, vec3(0.0001)), vec3(0.96));
+        float n1 = texture(uRockTex, vUV * vec2(2.6, 2.2) - radialDir * (1.0 - sp) * 0.45 + vec2(0.0, uTime * 0.14)).a;
+        float n2 = texture(uRockTex, vUV * vec2(6.5, 5.5) + vec2(uTime * 0.18, -uTime * 0.24)).a;
+        float foamNoise = n1 * 0.62 + n2 * 0.38;
 
-    float vignette = smoothstep(1.02, 0.28, radialDist);
-    mapped *= mix(0.60, 1.0, vignette);
+        // Strong full-screen froth right at impact (sp > 0.65), clearing from center outward
+        float edgeBias = smoothstep(0.05, 0.72, rNorm);
+        float surgeCore = smoothstep(0.52, 0.94, sp);
+        float sprayVeil = smoothstep(0.66 - sp * 0.56 - edgeBias * 0.22, 0.88 - sp * 0.36, foamNoise);
+        float droplets  = smoothstep(0.76 - sp * 0.22, 0.90 - sp * 0.12, n2) * sp;
+
+        float foamAlpha = clamp(surgeCore * (0.58 + 0.38 * n1) + sprayVeil * sp * 0.78 + droplets * 0.45, 0.0, 0.94);
+        vec3 foamCol = mix(vec3(0.84, 0.95, 0.99), vec3(0.99, 1.0, 1.0), smoothstep(0.35, 0.80, foamNoise));
+        mapped = mix(mapped, foamCol, foamAlpha);
+    }
 
     FragColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
 }

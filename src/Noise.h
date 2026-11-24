@@ -9,6 +9,7 @@ namespace ProcMath {
 
 inline constexpr float WORLD_HALF_SIZE      = 800.0f; // Мир 1600 x 1600 м
 inline constexpr float WATER_SURFACE_Y      = 28.0f;  // Уровень водной глади
+inline constexpr float WATER_MAX_WAVE_AMP   = 0.65f;  // Максимальная амплитуда гребня волны
 inline constexpr float BASIN_INNER_RADIUS   = 500.0f; // Начало подъема кольцевых утесов
 inline constexpr float BASIN_RIM_RADIUS     = 670.0f; // Гребень замкнутых скал
 inline constexpr float PLAYABLE_HARD_RADIUS = 720.0f; // Страховочный лимит за видимыми утесами
@@ -200,6 +201,30 @@ inline float tileableVoronoi2D(float u, float v, int period, uint32_t seed) {
         }
     }
     return clamp(md2 - md1, 0.0f, 1.0f);
+}
+
+// Синхронизированное с шейдером воды вертикальное смещение волн (4 направленных гармоники)
+inline float sampleWaterWaveOffset(float x, float z, float t) {
+    const float w1 = std::sin(x *  0.048f + z *  0.032f + t * 1.15f) * 0.26f;
+    const float w2 = std::sin(x * -0.062f + z *  0.054f + t * 1.48f) * 0.18f;
+    const float w3 = std::cos(x *  0.115f - z *  0.095f + t * 2.05f) * 0.11f;
+    const float w4 = std::sin(x *  0.185f + z *  0.165f - t * 2.75f) * 0.06f;
+    return w1 + w2 + w3 + w4;
+}
+
+inline float sampleWaterWaveHeight(float x, float z, float t) {
+    return WATER_SURFACE_Y + sampleWaterWaveOffset(x, z, t);
+}
+
+inline QVector3D sampleWaterWaveNormal(float x, float z, float t) {
+    const float c1 = std::cos(x *  0.048f + z *  0.032f + t * 1.15f) * 0.26f;
+    const float c2 = std::cos(x * -0.062f + z *  0.054f + t * 1.48f) * 0.18f;
+    const float s3 = -std::sin(x * 0.115f - z *  0.095f + t * 2.05f) * 0.11f;
+    const float c4 = std::cos(x *  0.185f + z *  0.165f - t * 2.75f) * 0.06f;
+
+    const float dhdx = c1 * 0.048f + c2 * (-0.062f) + s3 * 0.115f + c4 * 0.185f;
+    const float dhdz = c1 * 0.032f + c2 *   0.054f  + s3 * (-0.095f) + c4 * 0.165f;
+    return QVector3D(-dhdx, 1.0f, -dhdz).normalized();
 }
 
 // 5 глубоких абиссальных впадин (ближайшая ~135 м впереди-слева от старта)
