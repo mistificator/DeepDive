@@ -1033,7 +1033,7 @@ void WorldGenerator::generateShipwrecks(WorldData& data, uint32_t seed) {
 }
 
 // ============================================================================
-// ПРОЦЕДУРНЫЕ 3D-МОДЕЛИ ФАУНЫ (РЫБЫ, СКАТЫ-МАНТЫ, ГОРБАТЫЙ КИТ, УДИЛЬЩИК)
+// ПРОЦЕДУРНЫЕ 3D-МОДЕЛИ ФАУНЫ (РЫБЫ, СКАТЫ-МАНТЫ, ГОРБАТЫЙ КИТ, УДИЛЬЩИК, ЧАЙКИ)
 // ============================================================================
 
 void WorldGenerator::generateFaunaMeshes(WorldData& data) {
@@ -1360,6 +1360,240 @@ void WorldGenerator::generateFaunaMeshes(WorldData& data) {
 
     buildManta(data.mantaLod0Verts, data.mantaLod0Inds, 24, 12, true);
     buildManta(data.mantaLod1Verts, data.mantaLod1Inds, 10, 5, false);
+
+    // Генерируем также 3D-меши чаек (без необходимости менять WorldGeneratorFlora.cpp)
+    generateSeagullMeshes(data);
+}
+
+void WorldGenerator::generateSeagullMeshes(WorldData& data) {
+    auto buildSeagull = [](std::vector<FaunaVertex>& verts, std::vector<uint32_t>& inds,
+                           int spanSegs, int chordSegs, int bodyRings, int bodySegs, bool highLod) {
+        const QVector3D whitePlumage(0.95f, 0.96f, 0.98f);
+        const QVector3D gullGrey(0.66f, 0.72f, 0.78f);
+        const QVector3D darkWingTip(0.09f, 0.11f, 0.14f);
+        const QVector3D underTipDark(0.16f, 0.18f, 0.22f);
+        const QVector3D beakYellow(0.96f, 0.76f, 0.16f);
+        const QVector3D beakTipCol(0.94f, 0.36f, 0.12f);
+        const QVector3D eyeCol(0.02f, 0.025f, 0.04f);
+
+        auto emitTriCCW = [&](uint32_t i0, uint32_t i1, uint32_t i2) {
+            const QVector3D& p0 = verts[i0].pos;
+            const QVector3D& p1 = verts[i1].pos;
+            const QVector3D& p2 = verts[i2].pos;
+            QVector3D faceN = QVector3D::crossProduct(p1 - p0, p2 - p0);
+            QVector3D avgN  = verts[i0].normal + verts[i1].normal + verts[i2].normal;
+            if (QVector3D::dotProduct(faceN, avgN) >= 0.0f) {
+                inds.insert(inds.end(), {i0, i1, i2});
+            } else {
+                inds.insert(inds.end(), {i0, i2, i1});
+            }
+        };
+
+        // 1. Обтекаемый корпус, шея и голова (от лба z = +0.74 до основания хвоста z = -0.78)
+        {
+            const uint32_t bodyBase = static_cast<uint32_t>(verts.size());
+            std::vector<QVector3D> gridPos((bodyRings + 1) * bodySegs);
+            std::vector<QVector3D> gridCol((bodyRings + 1) * bodySegs);
+
+            for (int r = 0; r <= bodyRings; ++r) {
+                float t = static_cast<float>(r) / static_cast<float>(bodyRings);
+                float z = 0.74f - t * 1.52f;
+                float env = std::max(0.0f, std::sin(std::pow(t, 0.78f) * PI));
+
+                // Лёгкий изгиб головы вверх и сужение шеи
+                float neckDip = 1.0f - 0.24f * std::exp(-std::pow((t - 0.16f) / 0.08f, 2.0f));
+                float headBump = 1.0f + 0.22f * std::exp(-std::pow((t - 0.07f) / 0.06f, 2.0f));
+                float rx = 0.19f * std::pow(env, 0.72f) * neckDip * headBump;
+                float ry = 0.17f * std::pow(env, 0.68f) * neckDip * headBump;
+                float cy = 0.12f * (1.0f - ProcMath::smoothstep(0.02f, 0.34f, t))
+                           - 0.03f * std::sin(t * PI);
+
+                for (int j = 0; j < bodySegs; ++j) {
+                    float a = (TWO_PI * j) / bodySegs;
+                    float ca = std::cos(a), sa = std::sin(a);
+                    gridPos[r * bodySegs + j] = QVector3D(ca * rx, cy + sa * ry, z);
+
+                    // Спина светло-серая между плечами и хвостом; голова, шея и брюшко — снежно-белые
+                    float mantleMask = ProcMath::smoothstep(0.20f, 0.34f, t)
+                                       * (1.0f - ProcMath::smoothstep(0.76f, 0.90f, t))
+                                       * ProcMath::smoothstep(0.15f, 0.55f, sa);
+                    gridCol[r * bodySegs + j] = ProcMath::mix(whitePlumage, gullGrey, mantleMask);
+                }
+            }
+
+            const QVector3D headFront(0.0f, 0.12f, 0.76f);
+            const QVector3D tailRoot (0.0f, -0.01f, -0.80f);
+
+            for (int r = 0; r <= bodyRings; ++r) {
+                for (int j = 0; j < bodySegs; ++j) {
+                    const QVector3D& pPrev = (r > 0) ? gridPos[(r - 1) * bodySegs + j] : headFront;
+                    const QVector3D& pNext = (r < bodyRings) ? gridPos[(r + 1) * bodySegs + j] : tailRoot;
+                    int jPrev = (j - 1 + bodySegs) % bodySegs;
+                    int jNext = (j + 1) % bodySegs;
+                    QVector3D n = QVector3D::crossProduct(pNext - pPrev,
+                                                          gridPos[r * bodySegs + jNext] - gridPos[r * bodySegs + jPrev]);
+                    if (n.lengthSquared() < 1e-6f) n = QVector3D(0.0f, 1.0f, 0.0f);
+                    n.normalize();
+                    verts.push_back({gridPos[r * bodySegs + j], n, gridCol[r * bodySegs + j]});
+                }
+            }
+
+            uint32_t frontIdx = static_cast<uint32_t>(verts.size());
+            verts.push_back({headFront, QVector3D(0.0f, 0.15f, 1.0f).normalized(), whitePlumage});
+            uint32_t backIdx = static_cast<uint32_t>(verts.size());
+            verts.push_back({tailRoot, QVector3D(0.0f, 0.0f, -1.0f), whitePlumage});
+
+            for (int j = 0; j < bodySegs; ++j) {
+                int jNext = (j + 1) % bodySegs;
+                emitTriCCW(frontIdx, bodyBase + j, bodyBase + jNext);
+                uint32_t lastR = bodyBase + bodyRings * bodySegs;
+                emitTriCCW(backIdx, lastR + jNext, lastR + j);
+            }
+            for (int r = 0; r < bodyRings; ++r) {
+                uint32_t r0 = bodyBase + r * bodySegs;
+                uint32_t r1 = bodyBase + (r + 1) * bodySegs;
+                for (int j = 0; j < bodySegs; ++j) {
+                    int jNext = (j + 1) % bodySegs;
+                    emitTriCCW(r0 + j, r1 + j, r0 + jNext);
+                    emitTriCCW(r0 + jNext, r1 + j, r1 + jNext);
+                }
+            }
+        }
+
+        // 2. Жёлтый клюв с лёгким оранжевым кончиком
+        appendFaunaCone(verts, inds,
+                        QVector3D(0.0f, 0.105f, 0.70f),
+                        QVector3D(0.0f, 0.075f, 1.00f),
+                        0.052f, highLod ? 6 : 4, beakYellow, beakTipCol);
+
+        // 3. Глаза на LOD0
+        if (highLod) {
+            for (float side : {-1.0f, 1.0f}) {
+                appendFaunaSphere(verts, inds,
+                                  QVector3D(side * 0.088f, 0.155f, 0.59f),
+                                  QVector3D(0.024f, 0.024f, 0.024f),
+                                  4, 6, eyeCol);
+            }
+        }
+
+        // 4. Веерный белый хвост (двусторонняя замкнутая пластина)
+        {
+            auto addTailSurface = [&](float ySign) {
+                uint32_t tb = static_cast<uint32_t>(verts.size());
+                const int wSegs = highLod ? 4 : 2;
+                for (int ix = 0; ix <= wSegs; ++ix) {
+                    float u = (static_cast<float>(ix) / wSegs) * 2.0f - 1.0f;
+                    QVector3D pRoot(u * 0.08f, 0.01f + ySign * 0.018f, -0.66f);
+                    QVector3D pEnd (u * 0.29f, -0.02f + ySign * 0.008f, -1.16f + std::abs(u) * 0.06f);
+                    QVector3D n(0.0f, ySign, 0.0f);
+                    verts.push_back({pRoot, n, whitePlumage});
+                    verts.push_back({pEnd,  n, whitePlumage});
+                }
+                for (int ix = 0; ix < wSegs; ++ix) {
+                    uint32_t i0 = tb + ix * 2;
+                    emitTriCCW(i0, i0 + 2, i0 + 1);
+                    emitTriCCW(i0 + 2, i0 + 3, i0 + 1);
+                }
+            };
+            addTailSurface( 1.0f);
+            addTailSurface(-1.0f);
+        }
+
+        // 5. Изящные крылья чайки с характерным изгибом в запястье и чёрными кончиками
+        auto addWingSurface = [&](float ySign) {
+            const int cols = chordSegs + 1;
+            const int rows = spanSegs + 1;
+            std::vector<QVector3D> gridPos(rows * cols);
+            std::vector<QVector3D> gridCol(rows * cols);
+
+            for (int ix = 0; ix <= spanSegs; ++ix) {
+                float u = (static_cast<float>(ix) / spanSegs) * 2.0f - 1.0f;
+                float absU = std::abs(u);
+                float x = u * 1.62f;
+
+                // Классический силуэт чайки: лёгкий вынос вперёд к запястью (absU ~ 0.44), затем стреловидное сужение к кончику
+                float wristArc = std::sin(ProcMath::clamp(absU / 0.45f, 0.0f, 1.0f) * PI * 0.5f);
+                float outerT   = ProcMath::smoothstep(0.42f, 1.0f, absU);
+
+                float leadZ  = 0.24f + 0.14f * wristArc - 0.54f * std::pow(outerT, 1.25f);
+                float trailZ = -0.34f + 0.06f * wristArc + 0.04f * outerT;
+                float chordLen = std::max(0.04f, leadZ - trailZ);
+
+                // Естественный M-образный профиль крыла (подъём к запястью, лёгкий спад к кончику)
+                float gullArchY = 0.05f + 0.13f * std::sin(ProcMath::clamp(absU / 0.52f, 0.0f, 1.0f) * PI * 0.5f)
+                                  - 0.08f * outerT;
+                float thick = (0.048f * (1.0f - absU * 0.85f) + 0.008f) * ProcMath::clamp(chordLen / 0.45f, 0.35f, 1.2f);
+
+                for (int iz = 0; iz <= chordSegs; ++iz) {
+                    float v = static_cast<float>(iz) / chordSegs;
+                    float z = ProcMath::mix(leadZ, trailZ, v);
+                    float airfoil = std::sin(std::pow(ProcMath::clamp(v, 0.0f, 1.0f), 0.68f) * PI);
+                    float y = gullArchY + ySign * thick * airfoil * (ySign > 0.0f ? 1.0f : 0.45f);
+
+                    QVector3D col;
+                    float tipBlack = ProcMath::smoothstep(0.71f, 0.84f, absU + (1.0f - v) * 0.08f);
+                    if (ySign > 0.0f) {
+                        // Верх крыла: жемчужно-серый, белая задняя кромка, чёрные маховые перья на кончиках
+                        float whiteEdge = ProcMath::smoothstep(0.78f, 0.96f, v) * (1.0f - tipBlack);
+                        col = ProcMath::mix(gullGrey, whitePlumage, whiteEdge * 0.85f);
+                        col = ProcMath::mix(col, darkWingTip, tipBlack);
+                        // Маленькое белое «зеркальце» у самого кончика крыла
+                        float mirrorSpot = std::exp(-std::pow((absU - 0.91f) / 0.035f, 2.0f)
+                                                    - std::pow((v - 0.52f) / 0.18f, 2.0f));
+                        col = ProcMath::mix(col, whitePlumage, mirrorSpot * 0.72f);
+                    } else {
+                        // Низ крыла: ярко-белый с тёмными кончиками (отлично читается снизу на фоне неба)
+                        col = ProcMath::mix(whitePlumage, underTipDark, tipBlack * 0.92f);
+                    }
+
+                    gridPos[ix * cols + iz] = QVector3D(x, y, z);
+                    gridCol[ix * cols + iz] = col;
+                }
+            }
+
+            uint32_t base = static_cast<uint32_t>(verts.size());
+            for (int ix = 0; ix <= spanSegs; ++ix) {
+                int ixL = std::max(0, ix - 1);
+                int ixR = std::min(spanSegs, ix + 1);
+                for (int iz = 0; iz <= chordSegs; ++iz) {
+                    int izF = std::max(0, iz - 1);
+                    int izB = std::min(chordSegs, iz + 1);
+
+                    QVector3D tX = gridPos[ixR * cols + iz] - gridPos[ixL * cols + iz];
+                    QVector3D tZ = gridPos[ix * cols + izB] - gridPos[ix * cols + izF];
+                    QVector3D n;
+                    if (iz == 0) {
+                        n = QVector3D(-tX.z(), 0.0f, tX.x());
+                    } else if (iz == chordSegs) {
+                        n = QVector3D(tX.z(), 0.0f, -tX.x());
+                    } else {
+                        n = QVector3D::crossProduct(tX, tZ) * ySign;
+                    }
+                    if (n.lengthSquared() < 1e-6f) n = QVector3D(0.0f, ySign, 0.0f);
+                    n.normalize();
+
+                    verts.push_back({gridPos[ix * cols + iz], n, gridCol[ix * cols + iz]});
+                }
+            }
+
+            for (int ix = 0; ix < spanSegs; ++ix) {
+                for (int iz = 0; iz < chordSegs; ++iz) {
+                    uint32_t i00 = base + ix * cols + iz;
+                    uint32_t i10 = i00 + cols;
+                    uint32_t i01 = i00 + 1;
+                    uint32_t i11 = i10 + 1;
+                    emitTriCCW(i00, i10, i01);
+                    emitTriCCW(i10, i11, i01);
+                }
+            }
+        };
+
+        addWingSurface( 1.0f);
+        addWingSurface(-1.0f);
+    };
+
+    buildSeagull(data.seagullLod0Verts, data.seagullLod0Inds, 18, 6, 10, 10, true);
+    buildSeagull(data.seagullLod1Verts, data.seagullLod1Inds,  8, 3,  5,  6, false);
 }
 
 void WorldGenerator::generateWhaleMeshes(WorldData& data) {
@@ -1858,7 +2092,7 @@ void WorldGenerator::generateAnglerMeshes(WorldData& data) {
 }
 
 // ============================================================================
-// ЗАСЕЛЕНИЕ ФАУНОЙ, ОБЪЁМНЫЕ СОЛНЕЧНЫЕ ЛУЧИ И ЗАВЕСЫ ПУЗЫРЬКОВ
+// ЗАСЕЛЕНИЕ ФАУНОЙ (РЫБЫ, СКАТЫ, УДИЛЬЩИКИ, ЧАЙКИ), СОЛНЕЧНЫЕ ЛУЧИ И ПУЗЫРЬКИ
 // ============================================================================
 
 void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
@@ -1982,6 +2216,70 @@ void WorldGenerator::generateFaunaAgents(WorldData& data, uint32_t seed) {
         angler.vel = QVector3D(-std::sin(ang), 0.0f, std::cos(ang)) * angler.cruiseSpeed;
         angler.yaw = std::atan2(angler.vel.x(), angler.vel.z());
         data.anglerAgents.push_back(angler);
+    }
+
+    // Парящие в вышине чайки (часть — над центральной лагуной, остальные — вокруг кекуров и скал)
+    constexpr int SEAGULL_COUNT = 34;
+    data.seagullAgents.reserve(SEAGULL_COUNT);
+    const auto& spires = ProcMath::getCentralSpires(seed);
+
+    for (int g = 0; g < SEAGULL_COUNT; ++g) {
+        float h1 = ProcMath::hash3(g, 1, 13, seed + 4457u);
+        float h2 = ProcMath::hash3(g, 2, 17, seed + 4457u);
+        float h3 = ProcMath::hash3(g, 3, 19, seed + 4457u);
+        float h4 = ProcMath::hash3(g, 4, 23, seed + 4457u);
+
+        float homeX = 0.0f, homeZ = 0.0f, orbitR = 55.0f;
+        float baseAlt = ProcMath::WATER_SURFACE_Y + 18.0f + h3 * 34.0f;
+
+        if (g < 10) {
+            // Ближняя стая над центром лагуны — сразу видна при выныривании
+            float ang = (TWO_PI * static_cast<float>(g)) / 10.0f + h1 * 0.45f;
+            float rCenter = 24.0f + h2 * 85.0f;
+            homeX = std::cos(ang) * rCenter;
+            homeZ = 10.0f + std::sin(ang) * rCenter;
+            orbitR = 42.0f + h4 * 48.0f;
+            baseAlt = ProcMath::WATER_SURFACE_Y + 16.0f + h3 * 22.0f;
+        } else if (g < 24 && !spires.empty()) {
+            // Чайки, парящие в восходящих потоках у высоких скальных кекуров
+            const auto& sp = spires[(g - 10) % spires.size()];
+            homeX = sp.x;
+            homeZ = sp.z;
+            orbitR = sp.radius + 26.0f + h4 * 42.0f;
+            baseAlt = ProcMath::WATER_SURFACE_Y + 24.0f + h3 * 30.0f;
+        } else {
+            // Дальние чайки по всей акватории кальдеры
+            float ang = h1 * TWO_PI;
+            float rCenter = 150.0f + h2 * 260.0f;
+            homeX = std::cos(ang) * rCenter;
+            homeZ = std::sin(ang) * rCenter;
+            orbitR = 65.0f + h4 * 75.0f;
+            baseAlt = ProcMath::WATER_SURFACE_Y + 22.0f + h3 * 36.0f;
+        }
+
+        float startAng = h2 * TWO_PI;
+        float gx = homeX + std::cos(startAng) * (orbitR * 0.78f);
+        float gz = homeZ + std::sin(startAng) * (orbitR * 0.78f);
+        float groundY = data.collision.sampleHeight(gx, gz);
+        float gy = std::max(baseAlt, groundY + 10.0f);
+
+        float dirSign = (g % 2 == 0) ? 1.0f : -1.0f;
+        QVector3D tangent(-std::sin(startAng) * dirSign, 0.0f, std::cos(startAng) * dirSign);
+
+        FaunaAgent gull;
+        gull.pos = QVector3D(gx, gy, gz);
+        gull.homeCenter = QVector3D(homeX, baseAlt, homeZ);
+        gull.homeRadius = orbitR;
+        gull.preferredDepth = gy; // для чаек хранит целевую высоту парения
+        gull.cruiseSpeed = 8.5f + h4 * 4.2f;
+        gull.scale = 0.88f + h1 * 0.44f;
+        gull.boundingRadius = 1.65f * gull.scale;
+        gull.phase = h3 * 16.0f + static_cast<float>(g) * 0.73f;
+        gull.type = 4.0f;
+        gull.tint = QVector3D(0.96f + h2 * 0.08f, 0.96f + h3 * 0.07f, 0.95f + h4 * 0.08f);
+        gull.vel = tangent * gull.cruiseSpeed;
+        gull.yaw = std::atan2(gull.vel.x(), gull.vel.z());
+        data.seagullAgents.push_back(gull);
     }
 }
 

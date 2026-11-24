@@ -140,12 +140,23 @@ void DeepDiveWidget::updateHudOverlay() {
                                  ? "N/A"
                                  : (m_render->tessellationEnabled() ? "ON" : "OFF");
 
+    const QString depthOrAlt = m_engine->isPlayerAirborne()
+                                   ? QString("Alt: +%1m").arg(qRound(std::max(0.0f, m_engine->surfaceAltitude())))
+                                   : QString("Depth: %1m").arg(qRound(m_engine->diveDepth()));
+
+    QString statusTag;
+    if (m_engine->bulletTimeFactor() > 0.15f) {
+        statusTag = QString("[BULLET-TIME %1x]").arg(m_engine->timeScale(), 0, 'f', 2);
+    } else if (m_engine->isPlayerColliding()) {
+        statusTag = "[COLLISION]";
+    }
+
     const FrameRenderStats& st = m_render->stats();
 
     const QString hud = QString(
                             "GPU: %1 | GL %2.%3 | %4x MSAA | Tess: %5 | Shadows: %6 | PostFX: %7 | Audio: %8 | Pad: %9 | FPS: %10\n"
-                            "Chunks: %11/%12 (LOD0:%13 LOD1:%14 LOD2:%15 LOD3:%16) | Props: %17 | Tris: %18k | Fish: %19+%20 | Mantas: %21+%22 | Anglers: %23\n"
-                            "Cam: %24 | Depth: %25m | R: %26m %27 | Seed: %28 | Biome: %29 | [C/L3] Cam [`] HUD [F/R3] Wire [T] Tess [B] Biome [K] Whale [Alt+Enter] FS"
+                            "Chunks: %11/%12 (LOD0:%13 LOD1:%14 LOD2:%15 LOD3:%16) | Props: %17 | Tris: %18k | Fish: %19+%20 | Mantas: %21+%22 | Anglers: %23 | Gulls: %24\n"
+                            "Cam: %25 | %26 | R: %27m %28 | Seed: %29 | Biome: %30 | [C/L3] Cam [`] HUD [F/R3] Wire [T] Tess [B] Biome [K] Whale [Alt+Enter] FS"
                             )
                             .arg(m_render->glRendererInfo())
                             .arg(m_render->glMajorVersion())
@@ -170,10 +181,11 @@ void DeepDiveWidget::updateHudOverlay() {
                             .arg(st.visibleMantaLod0)
                             .arg(st.visibleMantaLod1)
                             .arg(st.visibleAnglers)
+                            .arg(st.visibleSeagulls)
                             .arg(m_engine->cameraModeName())
-                            .arg(qRound(m_engine->diveDepth()))
+                            .arg(depthOrAlt)
                             .arg(qRound(m_engine->radialDistance()))
-                            .arg(m_engine->isPlayerColliding() ? "[COLLISION]" : "")
+                            .arg(statusTag)
                             .arg(m_seed)
                             .arg(m_engine->biomeName());
 
@@ -562,18 +574,39 @@ void DeepDiveWidget::paintGL() {
         input.sprint       = input.sprint || gp.sprint;
     }
 
-    // Step underwater simulation
+    // Step underwater & airborne simulation
     const EngineStepEvents events = m_engine->update(dt, input);
 
-    if (events.playerCollisionImpact && gp.connected && events.collisionImpactSpeed > 1.8f) {
-        const float intensity = std::clamp(events.collisionImpactSpeed / 16.0f, 0.15f, 0.60f);
-        m_gamepad.triggerRumble(intensity, intensity * 0.45f, 0.14f);
+    // Tactile rumble feedback for collisions and water-surface breaching/splashdown
+    if (gp.connected) {
+        if (events.breachedSurface) {
+            const float s = std::clamp(events.splashIntensity, 0.45f, 1.0f);
+            m_gamepad.triggerRumble(0.28f * s, 0.58f * s, 0.18f);
+        } else if (events.splashedDown) {
+            const float s = std::clamp(events.splashIntensity, 0.40f, 1.0f);
+            m_gamepad.triggerRumble(0.64f * s, 0.30f * s, 0.22f);
+        } else if (events.playerCollisionImpact && events.collisionImpactSpeed > 1.8f) {
+            const float intensity = std::clamp(events.collisionImpactSpeed / 16.0f, 0.15f, 0.60f);
+            m_gamepad.triggerRumble(intensity, intensity * 0.45f, 0.14f);
+        }
     }
 
+    // Dual-medium audio state (camera-driven so 3rd-person water crossings feel exact)
     if (m_audioEngine) {
-        m_audioEngine->updateState(m_engine->playerPosition().y(),
+        m_audioEngine->updateState(m_engine->cameraPosition().y(),
                                    m_engine->cameraSpeed(),
-                                   m_engine->audioBiomeIndex());
+                                   m_engine->audioBiomeIndex(),
+                                   m_engine->isCameraAboveWater(),
+                                   m_engine->timeScale());
+
+        if (events.breachedSurface) {
+            m_audioEngine->triggerSplash(true, events.splashIntensity);
+        } else if (events.splashedDown) {
+            m_audioEngine->triggerSplash(false, events.splashIntensity);
+        } else if (events.cameraCrossedSurface) {
+            m_audioEngine->triggerSplash(events.cameraEnteredAir, events.splashIntensity * 0.65f);
+        }
+
         if (events.whaleCalled) {
             m_audioEngine->triggerWhaleCall();
         }

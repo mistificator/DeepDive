@@ -49,6 +49,7 @@ struct BiomeVisuals {
 class DeepDiveEngine {
 public:
     static constexpr int MAX_LURE_LIGHTS = 8;
+    static constexpr int MAX_SPRAY_PARTICLES = 384;
 
     DeepDiveEngine();
     ~DeepDiveEngine() = default;
@@ -67,6 +68,7 @@ public:
     const FaunaAgent& whale() const { return m_whale; }
     const std::array<QVector3D, MAX_LURE_LIGHTS>& lurePositions() const { return m_lurePositions; }
     int lureCount() const { return m_lureCount; }
+    const std::vector<SprayGpuVertex>& sprayVertices() const { return m_sprayGpuVerts; }
 
     uint32_t seed() const { return m_seed; }
     float simulationTime() const { return m_time; }
@@ -112,6 +114,18 @@ private:
         float radius = 1.0f;
     };
 
+    struct AirSprayParticle {
+        QVector3D pos;
+        QVector3D vel;
+        float age = 0.0f;
+        float lifetime = 1.0f;
+        float baseSize = 0.4f;
+        float drag = 0.45f;
+        float gravityScale = 1.0f;
+        bool isMist = false;
+        bool active = false;
+    };
+
     static constexpr int WHALE_COLLIDER_COUNT = 7;
 
     void configurePlayerAvatar(bool resetOrientation);
@@ -131,10 +145,16 @@ private:
 
     void updateFaunaAgents(float dt);
     void updateAnglerAgents(float dt);
+    void updateSeagullAgents(float dt);
     void resolveFaunaAndPlayerCollisions(float& maxPlayerImpactSpeed);
     void refreshLureLights();
     QVector3D computeAnglerLureWorldPos(const FaunaAgent& a) const;
     void updateParticles(float dt);
+
+    void spawnSprayBurst(const QVector3D& origin, const QVector3D& inheritedVel,
+                         int count, float radialSpeed, float upSpeed,
+                         float sizeScale, float mistRatio, float gravityScale = 1.0f);
+    void updateAirSpray(float simDt);
 
     // World & simulation state
     WorldData m_world;
@@ -149,6 +169,7 @@ private:
     bool m_camAboveWater = false;
     float m_camWaterHeight = ProcMath::WATER_SURFACE_Y;
     float m_airborneTime = 0.0f;
+    float m_airTrailTimer = 0.0f;
     float m_breachCooldown = 0.0f;
     float m_bulletTimeRealElapsed = 0.0f;
     float m_timeScale = 1.0f;
@@ -160,6 +181,11 @@ private:
     std::array<QVector3D, MAX_LURE_LIGHTS> m_lurePositions{};
     int m_lureCount = 0;
 
+    // 3D airborne spray / mist ring buffer (breach fountains, splashdown crowns, whale blow spout)
+    std::array<AirSprayParticle, MAX_SPRAY_PARTICLES> m_sprayPool{};
+    int m_sprayCursor = 0;
+    std::vector<SprayGpuVertex> m_sprayGpuVerts;
+
     // Autonomous humpback whale state & multi-sphere collider hull
     std::mt19937 m_rng;
     FaunaAgent m_whale;
@@ -169,6 +195,7 @@ private:
     QVector3D m_whaleWaypoint{0.0f, 20.5f, 0.0f};
     float m_whaleWaypointTimer = 0.0f;
     float m_whaleSongTimer = 7.0f;
+    float m_whaleBlowTimer = 1.2f;
 
     WhaleState m_whaleState = WhaleState::Cruising;
     float m_whaleTurnDir = 1.0f;

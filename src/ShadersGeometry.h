@@ -16,7 +16,7 @@ uniform float uTime;
 void main() {
     vec3 pos = aPos;
 
-    if (aParam.x > 4.5 && aParam.x < 5.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
+    if ((aParam.x > 4.5 && aParam.x < 5.5) || (aParam.x > 2.5 && aParam.x < 3.5)) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.15 + pos.x * 0.12 + pos.z * 0.10;
         float hCurve = h * sqrt(h);
@@ -109,7 +109,7 @@ void main() {
 inline const char* ShadowFaunaVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 3) in vec4 aInstPosScale;
-layout(location = 4) in vec4 aInstRotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler), w: bank
+layout(location = 4) in vec4 aInstRotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler, 4=seagull), w: bank
 layout(location = 5) in vec4 aInstPitchTint; // x: pitch, yzw: tint
 
 uniform mat4 uLightSpaceMatrix;
@@ -138,13 +138,29 @@ void main() {
                             * smoothstep(-1.4, 0.2, localPos.z);
         float finSway = sin(phase - abs(localPos.x) * 0.55) * 0.16 * flipperWeight;
         localPos.y += spineWave + finSway;
-    } else {
+    } else if (aInstRotPhase.z < 3.5) {
         float phase = aInstRotPhase.y + uTime * 3.2;
         float tailW = smoothstep(-0.1, -1.6, localPos.z);
         localPos.x += sin(phase - localPos.z * 2.2) * 0.16 * tailW;
         float lureW = smoothstep(0.45, 1.35, localPos.z) * smoothstep(0.15, 0.85, localPos.y);
         localPos.x += sin(uTime * 2.1 + aInstRotPhase.y) * 0.09 * lureW;
         localPos.y += cos(uTime * 1.7 + aInstRotPhase.y) * 0.07 * lureW;
+    } else {
+        // Seagull: brief energetic wingbeat burst alternating with long serene gliding
+        float cycle = fract(uTime * 0.14 + aInstRotPhase.y * 0.13);
+        float flapEnv = smoothstep(0.0, 0.08, cycle) * (1.0 - smoothstep(0.28, 0.40, cycle));
+        float beatPhase = uTime * 7.2 + aInstRotPhase.y * 3.1;
+
+        float wingDist = max(abs(localPos.x) - 0.14, 0.0);
+        float w = clamp(wingDist / 1.48, 0.0, 1.0);
+        float wPow = pow(max(w, 0.0001), 1.25) * step(0.001, wingDist);
+
+        float flapY   = sin(beatPhase - w * 1.15) * 0.58 * wPow * flapEnv;
+        float bodyBob = -sin(beatPhase) * 0.055 * flapEnv * (1.0 - w);
+        float glideY  = sin(uTime * 0.95 + aInstRotPhase.y) * 0.045 * w * (1.0 - flapEnv);
+
+        localPos.y += flapY + bodyBob + glideY;
+        localPos.x *= (1.0 - 0.08 * abs(sin(beatPhase - w * 0.8)) * w * flapEnv);
     }
 
     localPos *= aInstPosScale.w;
@@ -1147,7 +1163,7 @@ void main() {
 )";
 
 // ============================================================================
-// MARINE FAUNA SHADERS (Fish, Manta Rays, Humpback Whale, Anglerfish)
+// MARINE & AERIAL FAUNA SHADERS (Fish, Manta Rays, Whale, Anglerfish, Seagulls)
 // ============================================================================
 
 inline const char* FaunaVert = R"(#version 330 core
@@ -1155,7 +1171,7 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec3 aColor;
 layout(location = 3) in vec4 aInstPosScale;
-layout(location = 4) in vec4 aInstRotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler), w: bank
+layout(location = 4) in vec4 aInstRotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler, 4=seagull), w: bank
 layout(location = 5) in vec4 aInstPitchTint; // x: pitch, yzw: colorTint
 
 uniform mat4 uViewProj;
@@ -1167,6 +1183,7 @@ out vec3 vNormal;
 out vec3 vColor;
 out vec4 vLightSpacePos;
 out float vEmissive;
+out float vFaunaType;
 
 void main() {
     vec3 localPos = aPos;
@@ -1217,7 +1234,7 @@ void main() {
 
         localPos.y += spineWave + finSway;
         localN = normalize(vec3(localN.x, localN.y, localN.z - dWaveDz * localN.y));
-    } else {
+    } else if (aInstRotPhase.z < 3.5) {
         float phase = aInstRotPhase.y + uTime * 3.2;
         float tailW = smoothstep(-0.1, -1.6, localPos.z);
         localPos.x += sin(phase - localPos.z * 2.2) * 0.16 * tailW;
@@ -1228,6 +1245,33 @@ void main() {
         float lureW = smoothstep(0.45, 1.35, localPos.z) * smoothstep(0.15, 0.85, localPos.y);
         localPos.x += sin(uTime * 2.1 + aInstRotPhase.y) * 0.09 * lureW;
         localPos.y += cos(uTime * 1.7 + aInstRotPhase.y) * 0.07 * lureW;
+    } else {
+        // Seagull: alternating wingbeat bursts & soaring glides with articulated outer wing lag
+        float cycle = fract(uTime * 0.14 + aInstRotPhase.y * 0.13);
+        float flapEnv = smoothstep(0.0, 0.08, cycle) * (1.0 - smoothstep(0.28, 0.40, cycle));
+        float beatPhase = uTime * 7.2 + aInstRotPhase.y * 3.1;
+
+        float absX = abs(localPos.x);
+        float wingSign = sign(localPos.x);
+        float wingDist = max(absX - 0.14, 0.0);
+        float w = clamp(wingDist / 1.48, 0.0, 1.0);
+        float wingActive = step(0.001, wingDist);
+        float wPow = pow(max(w, 0.0001), 1.25) * wingActive;
+
+        float beatArg = beatPhase - w * 1.15;
+        float sB = sin(beatArg);
+        float cB = cos(beatArg);
+        float flapY   = sB * 0.58 * wPow * flapEnv;
+        float bodyBob = -sin(beatPhase) * 0.055 * flapEnv * (1.0 - w);
+        float glideY  = sin(uTime * 0.95 + aInstRotPhase.y) * 0.045 * w * (1.0 - flapEnv);
+
+        float dWdx = (absX > 0.14 && w < 1.0) ? (wingSign / 1.48) : 0.0;
+        float dWPowDx = 1.25 * pow(max(w, 0.0001), 0.25) * dWdx * wingActive;
+        float dFlapDx = 0.58 * flapEnv * (sB * dWPowDx - 1.15 * cB * wPow * dWdx);
+
+        localPos.y += flapY + bodyBob + glideY;
+        localPos.x *= (1.0 - 0.08 * abs(sin(beatPhase - w * 0.8)) * w * flapEnv);
+        localN = normalize(vec3(localN.x - dFlapDx * localN.y, localN.y, localN.z));
     }
 
     localPos *= aInstPosScale.w;
@@ -1253,6 +1297,7 @@ void main() {
     vEmissive = smoothstep(1.20, 1.65, maxC);
     vColor = aColor * aInstPitchTint.yzw;
     vLightSpacePos = uLightSpaceMatrix * vec4(worldPos, 1.0);
+    vFaunaType = aInstRotPhase.z;
 
     gl_Position = uViewProj * vec4(worldPos, 1.0);
 }
@@ -1264,6 +1309,7 @@ in vec3 vNormal;
 in vec3 vColor;
 in vec4 vLightSpacePos;
 in float vEmissive;
+in float vFaunaType;
 
 uniform sampler2D uRockTex;
 uniform sampler2D uShadowMap;
@@ -1356,6 +1402,40 @@ void main() {
     vec3 V = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
     vec3 L = normalize(uSunDir);
 
+    bool isSeagull = (vFaunaType > 3.5);
+    vec3 H = normalize(L + V + vec3(0.0001));
+    float specBase = clamp(dot(N, H), 0.0, 1.0);
+    float rimBase  = clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0);
+
+    // Matte sunlit feather shading for soaring seagulls
+    if (isSeagull) {
+        vec3 baseCol = clamp(vColor, 0.0, 1.05);
+        float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+        float wrapSun = clamp((dot(N, L) + 0.35) / 1.35, 0.0, 1.0);
+        vec3 middaySun = vec3(1.18, 1.12, 0.98);
+        // Ocean turquoise bounce from below + crisp sky fill from above
+        vec3 oceanBounce = vec3(0.28, 0.52, 0.64);
+        vec3 skyTop      = vec3(0.56, 0.76, 0.98);
+        vec3 ambFill     = mix(oceanBounce, skyTop, hemi);
+
+        // Soft feather-edge backlight translucency against the midday sun
+        float backLight = clamp(dot(V, -L + N * 0.25), 0.0, 1.0);
+        float featherTrans = backLight * backLight * 0.26;
+        float softSpec = pow(max(specBase, 0.0001), 14.0) * step(0.0002, specBase) * 0.10;
+        float rimGlow = rimBase * rimBase * 0.18;
+
+        vec3 lit = baseCol * (ambFill * 0.68 + middaySun * wrapSun * 0.86)
+                 + baseCol * middaySun * featherTrans
+                 + middaySun * softSpec
+                 + vec3(0.85, 0.92, 1.00) * rimGlow;
+
+        float airFog = 1.0 - exp(-dist * 0.00135);
+        vec3 airHaze = computeDayAerialHaze(-V, L);
+        vec3 outCol = mix(lit, airHaze, clamp(airFog * 0.78, 0.0, 0.86));
+        FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
+        return;
+    }
+
     float waveSurfY = evalWaveSurfY(vWorldPos.xz, uTime);
     float aboveWaterMask = smoothstep(waveSurfY - 0.16, waveSurfY + 0.28, vWorldPos.y);
     float underwaterMask = 1.0 - aboveWaterMask;
@@ -1366,10 +1446,7 @@ void main() {
     float ambSurvival = mix(1.0, 0.08, abyssDark);
 
     float diff = clamp((dot(N, L) + 0.42) / 1.42, 0.0, 1.0) * shadow * sunSurvival;
-    vec3 H = normalize(L + V + vec3(0.0001));
-    float specBase = clamp(dot(N, H), 0.0, 1.0);
     float spec = pow(max(specBase, 0.0001), 30.0) * step(0.0002, specBase) * 0.42 * shadow * sunSurvival;
-    float rimBase = clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0);
     float rim = rimBase * rimBase * sqrt(rimBase) * 0.34 * ambSurvival;
 
     vec2 caustUV = vWorldPos.xz * 0.12 + vec2(uTime * 0.05, -uTime * 0.04);
@@ -1475,7 +1552,7 @@ inline const char* FaunaFrag400 =
 #undef DEEPDIVE_FAUNA_FRAG_BODY
 
 // ============================================================================
-// FAUNA HARDWARE TESSELLATION (OpenGL 4.0 Core — Local Phong + Smooth Swimming)
+// FAUNA HARDWARE TESSELLATION (OpenGL 4.0 Core — Local Phong + Smooth Motion)
 // ============================================================================
 
 inline const char* FaunaTessVert = R"(#version 400 core
@@ -1568,8 +1645,10 @@ void main() {
             nearD = 10.0; farD = 75.0;  capL = 4.0; // Manta ray
         } else if (instRotPhase.z < 2.5) {
             nearD = 22.0; farD = 150.0; capL = 4.0; // Humpback whale
-        } else {
+        } else if (instRotPhase.z < 3.5) {
             nearD = 10.0; farD = 65.0;  capL = 4.0; // Anglerfish
+        } else {
+            nearD = 12.0; farD = 85.0;  capL = 3.0; // Seagull
         }
 
         vec3 w0 = rot * (vLocalPos_TCS[0] * instPosScale.w) + instPosScale.xyz;
@@ -1610,6 +1689,7 @@ out vec3 vNormal;
 out vec3 vColor;
 out vec4 vLightSpacePos;
 out float vEmissive;
+out float vFaunaType;
 
 vec3 safeNorm(vec3 v) {
     float l = length(v);
@@ -1628,12 +1708,13 @@ void main() {
     vec3 localN = safeNorm(b.x * n0 + b.y * n1 + b.z * n2);
     vec3 rawCol = b.x * vRawColor_TES[0] + b.y * vRawColor_TES[1] + b.z * vRawColor_TES[2];
 
-    // Smooth crease-guarded Phong interpolation in local model space before swimming animation
+    // Smooth crease-guarded Phong interpolation in local model space before swimming/flying animation
     vec3 approxWorld = pRot * (pLin * pInstPosScale.w) + pInstPosScale.xyz;
     float dist = length(uCamPos - approxWorld);
     float farFade = (pInstRotPhase.z < 0.5) ? 20.0
                   : (pInstRotPhase.z < 1.5) ? 70.0
-                  : (pInstRotPhase.z < 2.5) ? 140.0 : 60.0;
+                  : (pInstRotPhase.z < 2.5) ? 140.0
+                  : (pInstRotPhase.z < 3.5) ? 60.0 : 80.0;
     float fade = 1.0 - smoothstep(farFade * 0.25, farFade, dist);
 
     float minDot = min(min(dot(n0, n1), dot(n1, n2)), dot(n2, n0));
@@ -1648,7 +1729,7 @@ void main() {
         localPos = mix(pLin, pPhong, 0.48 * creaseGuard * fade);
     }
 
-    // Swimming / wing-flapping / lure animation evaluated on the tessellated surface
+    // Swimming / wing-flapping / lure / soaring animation evaluated on the tessellated surface
     if (pInstRotPhase.z < 0.5) {
         float phase = pInstRotPhase.y + uTime * 9.5;
         float tailWeight = smoothstep(0.35, -0.75, localPos.z);
@@ -1694,7 +1775,7 @@ void main() {
 
         localPos.y += spineWave + finSway;
         localN = safeNorm(vec3(localN.x, localN.y, localN.z - dWaveDz * localN.y));
-    } else {
+    } else if (pInstRotPhase.z < 3.5) {
         float phase = pInstRotPhase.y + uTime * 3.2;
         float tailW = smoothstep(-0.1, -1.6, localPos.z);
         localPos.x += sin(phase - localPos.z * 2.2) * 0.16 * tailW;
@@ -1705,6 +1786,32 @@ void main() {
         float lureW = smoothstep(0.45, 1.35, localPos.z) * smoothstep(0.15, 0.85, localPos.y);
         localPos.x += sin(uTime * 2.1 + pInstRotPhase.y) * 0.09 * lureW;
         localPos.y += cos(uTime * 1.7 + pInstRotPhase.y) * 0.07 * lureW;
+    } else {
+        float cycle = fract(uTime * 0.14 + pInstRotPhase.y * 0.13);
+        float flapEnv = smoothstep(0.0, 0.08, cycle) * (1.0 - smoothstep(0.28, 0.40, cycle));
+        float beatPhase = uTime * 7.2 + pInstRotPhase.y * 3.1;
+
+        float absX = abs(localPos.x);
+        float wingSign = sign(localPos.x);
+        float wingDist = max(absX - 0.14, 0.0);
+        float w = clamp(wingDist / 1.48, 0.0, 1.0);
+        float wingActive = step(0.001, wingDist);
+        float wPow = pow(max(w, 0.0001), 1.25) * wingActive;
+
+        float beatArg = beatPhase - w * 1.15;
+        float sB = sin(beatArg);
+        float cB = cos(beatArg);
+        float flapY   = sB * 0.58 * wPow * flapEnv;
+        float bodyBob = -sin(beatPhase) * 0.055 * flapEnv * (1.0 - w);
+        float glideY  = sin(uTime * 0.95 + pInstRotPhase.y) * 0.045 * w * (1.0 - flapEnv);
+
+        float dWdx = (absX > 0.14 && w < 1.0) ? (wingSign / 1.48) : 0.0;
+        float dWPowDx = 1.25 * pow(max(w, 0.0001), 0.25) * dWdx * wingActive;
+        float dFlapDx = 0.58 * flapEnv * (sB * dWPowDx - 1.15 * cB * wPow * dWdx);
+
+        localPos.y += flapY + bodyBob + glideY;
+        localPos.x *= (1.0 - 0.08 * abs(sin(beatPhase - w * 0.8)) * w * flapEnv);
+        localN = safeNorm(vec3(localN.x - dFlapDx * localN.y, localN.y, localN.z));
     }
 
     vec3 worldPos  = pRot * (localPos * pInstPosScale.w) + pInstPosScale.xyz;
@@ -1714,6 +1821,7 @@ void main() {
     vEmissive      = smoothstep(1.20, 1.65, maxC);
     vColor         = rawCol * pInstPitchTint.yzw;
     vLightSpacePos = uLightSpaceMatrix * vec4(worldPos, 1.0);
+    vFaunaType     = pInstRotPhase.z;
     gl_Position    = uViewProj * vec4(worldPos, 1.0);
 }
 )";

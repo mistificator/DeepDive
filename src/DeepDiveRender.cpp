@@ -221,6 +221,23 @@ void DeepDiveRender::initBaseResources(const std::vector<AdapterCapability>& ada
 
     glGenVertexArrays(1, &m_particleVAO);
     glGenBuffers(1, &m_particleVBO);
+
+    // Dynamic vertex buffer for 3D airborne breach spray, splashdown crowns & whale blow spout
+    m_sprayMaxVertices = DeepDiveEngine::MAX_SPRAY_PARTICLES;
+    glGenVertexArrays(1, &m_sprayVAO);
+    glGenBuffers(1, &m_sprayVBO);
+    glBindVertexArray(m_sprayVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_sprayVBO);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<size_t>(m_sprayMaxVertices) * sizeof(SprayGpuVertex),
+                 nullptr, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SprayGpuVertex),
+                          reinterpret_cast<void*>(offsetof(SprayGpuVertex, pos)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(SprayGpuVertex),
+                          reinterpret_cast<void*>(offsetof(SprayGpuVertex, colorSize)));
+    glBindVertexArray(0);
 }
 
 void DeepDiveRender::compileShadowShaders() {
@@ -306,6 +323,10 @@ void DeepDiveRender::compilePostProcessShaders() {
     m_particleShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ParticleFrag);
     m_particleShader.link();
 
+    m_sprayShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::SprayVert);
+    m_sprayShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::SprayFrag);
+    m_sprayShader.link();
+
     m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
     m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ScatterBlurFrag);
     m_scatterBlurShader.link();
@@ -361,6 +382,8 @@ void DeepDiveRender::cleanup() {
     deleteFaunaLodBuffers(m_whaleLod1);
     deleteFaunaLodBuffers(m_anglerLod0);
     deleteFaunaLodBuffers(m_anglerLod1);
+    deleteFaunaLodBuffers(m_seagullLod0);
+    deleteFaunaLodBuffers(m_seagullLod1);
 
     if (m_waterVAO) { glDeleteVertexArrays(1, &m_waterVAO); m_waterVAO = 0; }
     if (m_waterVBO) { glDeleteBuffers(1, &m_waterVBO); m_waterVBO = 0; }
@@ -376,6 +399,10 @@ void DeepDiveRender::cleanup() {
 
     if (m_particleVAO) { glDeleteVertexArrays(1, &m_particleVAO); m_particleVAO = 0; }
     if (m_particleVBO) { glDeleteBuffers(1, &m_particleVBO); m_particleVBO = 0; }
+
+    if (m_sprayVAO) { glDeleteVertexArrays(1, &m_sprayVAO); m_sprayVAO = 0; }
+    if (m_sprayVBO) { glDeleteBuffers(1, &m_sprayVBO); m_sprayVBO = 0; }
+    m_sprayMaxVertices = 0;
 }
 
 void DeepDiveRender::queryOpenGLCapabilities(const std::vector<AdapterCapability>& adapters) {
@@ -713,10 +740,12 @@ void DeepDiveRender::setupFaunaLodBuffers(FaunaLodBuffers& buf,
     glBindVertexArray(buf.vao);
 
     glBindBuffer(GL_ARRAY_BUFFER, buf.vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(FaunaVertex), verts.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(FaunaVertex),
+                 verts.empty() ? nullptr : verts.data(), GL_STATIC_DRAW);
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buf.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, inds.size() * sizeof(uint32_t), inds.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, inds.size() * sizeof(uint32_t),
+                 inds.empty() ? nullptr : inds.data(), GL_STATIC_DRAW);
 
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(FaunaVertex),
@@ -840,6 +869,7 @@ void DeepDiveRender::uploadWorld(const WorldData& world) {
     m_fishLodState.assign(world.fishAgents.size(), 0);
     m_mantaLodState.assign(world.mantaAgents.size(), 0);
     m_anglerLodState.assign(world.anglerAgents.size(), 0);
+    m_seagullLodState.assign(world.seagullAgents.size(), 0);
     m_whaleLodState = 0;
 
     auto setupEnvVAO = [&](GLuint vao, GLuint vbo, GLuint ebo,
@@ -881,14 +911,16 @@ void DeepDiveRender::uploadWorld(const WorldData& world) {
     }
 
     // Reserve +1 slot in fish & manta LOD0 buffers for the third-person player avatar
-    setupFaunaLodBuffers(m_fishLod0,   world.fishLod0Verts,   world.fishLod0Inds,   world.fishAgents.size() + 1);
-    setupFaunaLodBuffers(m_fishLod1,   world.fishLod1Verts,   world.fishLod1Inds,   world.fishAgents.size());
-    setupFaunaLodBuffers(m_mantaLod0,  world.mantaLod0Verts,  world.mantaLod0Inds,  world.mantaAgents.size() + 1);
-    setupFaunaLodBuffers(m_mantaLod1,  world.mantaLod1Verts,  world.mantaLod1Inds,  world.mantaAgents.size());
-    setupFaunaLodBuffers(m_whaleLod0,  world.whaleLod0Verts,  world.whaleLod0Inds,  1);
-    setupFaunaLodBuffers(m_whaleLod1,  world.whaleLod1Verts,  world.whaleLod1Inds,  1);
-    setupFaunaLodBuffers(m_anglerLod0, world.anglerLod0Verts, world.anglerLod0Inds, world.anglerAgents.size());
-    setupFaunaLodBuffers(m_anglerLod1, world.anglerLod1Verts, world.anglerLod1Inds, world.anglerAgents.size());
+    setupFaunaLodBuffers(m_fishLod0,    world.fishLod0Verts,    world.fishLod0Inds,    world.fishAgents.size() + 1);
+    setupFaunaLodBuffers(m_fishLod1,    world.fishLod1Verts,    world.fishLod1Inds,    world.fishAgents.size());
+    setupFaunaLodBuffers(m_mantaLod0,   world.mantaLod0Verts,   world.mantaLod0Inds,   world.mantaAgents.size() + 1);
+    setupFaunaLodBuffers(m_mantaLod1,   world.mantaLod1Verts,   world.mantaLod1Inds,   world.mantaAgents.size());
+    setupFaunaLodBuffers(m_whaleLod0,   world.whaleLod0Verts,   world.whaleLod0Inds,   1);
+    setupFaunaLodBuffers(m_whaleLod1,   world.whaleLod1Verts,   world.whaleLod1Inds,   1);
+    setupFaunaLodBuffers(m_anglerLod0,  world.anglerLod0Verts,  world.anglerLod0Inds,  world.anglerAgents.size());
+    setupFaunaLodBuffers(m_anglerLod1,  world.anglerLod1Verts,  world.anglerLod1Inds,  world.anglerAgents.size());
+    setupFaunaLodBuffers(m_seagullLod0, world.seagullLod0Verts, world.seagullLod0Inds, world.seagullAgents.size());
+    setupFaunaLodBuffers(m_seagullLod1, world.seagullLod1Verts, world.seagullLod1Inds, world.seagullAgents.size());
 
     m_visFishLod0.reserve(world.fishAgents.size() + 1);
     m_visFishLod1.reserve(world.fishAgents.size());
@@ -898,6 +930,8 @@ void DeepDiveRender::uploadWorld(const WorldData& world) {
     m_visWhaleLod1.reserve(1);
     m_visAnglerLod0.reserve(world.anglerAgents.size());
     m_visAnglerLod1.reserve(world.anglerAgents.size());
+    m_visSeagullLod0.reserve(world.seagullAgents.size());
+    m_visSeagullLod1.reserve(world.seagullAgents.size());
 
     m_rayIndexCount    = static_cast<GLsizei>(world.godRayMeshInds.size());
     m_rayInstanceCount = static_cast<GLsizei>(world.godRayInstances.size());
@@ -1066,15 +1100,19 @@ void DeepDiveRender::cullAndUploadFauna(const DeepDiveEngine& engine, const Frus
     m_visWhaleLod1.clear();
     m_visAnglerLod0.clear();
     m_visAnglerLod1.clear();
+    m_visSeagullLod0.clear();
+    m_visSeagullLod1.clear();
 
-    constexpr float FISH_LOD0_DIST   = 115.0f;
-    constexpr float FISH_MAX_DIST    = 240.0f;
-    constexpr float MANTA_LOD0_DIST  = 200.0f;
-    constexpr float MANTA_MAX_DIST   = 350.0f;
-    constexpr float WHALE_LOD0_DIST  = 330.0f;
-    constexpr float WHALE_MAX_DIST   = 460.0f;
-    constexpr float ANGLER_LOD0_DIST = 165.0f;
-    constexpr float ANGLER_MAX_DIST  = 310.0f;
+    constexpr float FISH_LOD0_DIST    = 115.0f;
+    constexpr float FISH_MAX_DIST     = 240.0f;
+    constexpr float MANTA_LOD0_DIST   = 200.0f;
+    constexpr float MANTA_MAX_DIST    = 350.0f;
+    constexpr float WHALE_LOD0_DIST   = 330.0f;
+    constexpr float WHALE_MAX_DIST    = 460.0f;
+    constexpr float ANGLER_LOD0_DIST  = 165.0f;
+    constexpr float ANGLER_MAX_DIST   = 310.0f;
+    constexpr float SEAGULL_LOD0_DIST = 165.0f;
+    constexpr float SEAGULL_MAX_DIST  = 450.0f;
 
     for (size_t i = 0; i < world.fishAgents.size(); ++i) {
         const auto& f = world.fishAgents[i];
@@ -1121,6 +1159,18 @@ void DeepDiveRender::cullAndUploadFauna(const DeepDiveEngine& engine, const Frus
         else         m_visAnglerLod1.push_back(packFaunaInstance(a));
     }
 
+    for (size_t i = 0; i < world.seagullAgents.size(); ++i) {
+        const auto& g = world.seagullAgents[i];
+        const float dist = (g.pos - camPos).length();
+        if (dist > SEAGULL_MAX_DIST) continue;
+        if (!frustum.intersectsSphere(g.pos, g.boundingRadius * 1.8f)) continue;
+
+        uint8_t& st = m_seagullLodState[i];
+        st = updateBinaryLod(st, dist, SEAGULL_LOD0_DIST, 10.0f);
+        if (st == 0) m_visSeagullLod0.push_back(packFaunaInstance(g));
+        else         m_visSeagullLod1.push_back(packFaunaInstance(g));
+    }
+
     // Append third-person player avatar at full LOD0 (rendered in both shadow and main passes)
     if (engine.hasPlayerAvatar()) {
         const FaunaAgent& av = engine.playerAvatar();
@@ -1140,20 +1190,23 @@ void DeepDiveRender::cullAndUploadFauna(const DeepDiveEngine& engine, const Frus
         glBufferSubData(GL_ARRAY_BUFFER, 0, count * sizeof(FaunaGpuInstance), list.data());
     };
 
-    upload(m_fishLod0,   m_visFishLod0);
-    upload(m_fishLod1,   m_visFishLod1);
-    upload(m_mantaLod0,  m_visMantaLod0);
-    upload(m_mantaLod1,  m_visMantaLod1);
-    upload(m_whaleLod0,  m_visWhaleLod0);
-    upload(m_whaleLod1,  m_visWhaleLod1);
-    upload(m_anglerLod0, m_visAnglerLod0);
-    upload(m_anglerLod1, m_visAnglerLod1);
+    upload(m_fishLod0,    m_visFishLod0);
+    upload(m_fishLod1,    m_visFishLod1);
+    upload(m_mantaLod0,   m_visMantaLod0);
+    upload(m_mantaLod1,   m_visMantaLod1);
+    upload(m_whaleLod0,   m_visWhaleLod0);
+    upload(m_whaleLod1,   m_visWhaleLod1);
+    upload(m_anglerLod0,  m_visAnglerLod0);
+    upload(m_anglerLod1,  m_visAnglerLod1);
+    upload(m_seagullLod0, m_visSeagullLod0);
+    upload(m_seagullLod1, m_visSeagullLod1);
 
     m_stats.visibleFishLod0  = static_cast<int>(m_visFishLod0.size());
     m_stats.visibleFishLod1  = static_cast<int>(m_visFishLod1.size());
     m_stats.visibleMantaLod0 = static_cast<int>(m_visMantaLod0.size());
     m_stats.visibleMantaLod1 = static_cast<int>(m_visMantaLod1.size());
     m_stats.visibleAnglers   = static_cast<int>(m_visAnglerLod0.size() + m_visAnglerLod1.size());
+    m_stats.visibleSeagulls  = static_cast<int>(m_visSeagullLod0.size() + m_visSeagullLod1.size());
 }
 
 // ============================================================================
@@ -1283,14 +1336,16 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         m_shadowFaunaShader.setUniformValue("uLightSpaceMatrix", lightSpaceMatrix);
         m_shadowFaunaShader.setUniformValue("uTime", simTime);
 
-        drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   GL_TRIANGLES, false);
-        drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   GL_TRIANGLES, false);
-        drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  GL_TRIANGLES, false);
-        drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  GL_TRIANGLES, false);
-        drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  GL_TRIANGLES, false);
-        drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  GL_TRIANGLES, false);
-        drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), GL_TRIANGLES, false);
-        drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), GL_TRIANGLES, false);
+        drawFaunaBatch(m_fishLod0,    m_visFishLod0.size(),    GL_TRIANGLES, false);
+        drawFaunaBatch(m_fishLod1,    m_visFishLod1.size(),    GL_TRIANGLES, false);
+        drawFaunaBatch(m_mantaLod0,   m_visMantaLod0.size(),   GL_TRIANGLES, false);
+        drawFaunaBatch(m_mantaLod1,   m_visMantaLod1.size(),   GL_TRIANGLES, false);
+        drawFaunaBatch(m_whaleLod0,   m_visWhaleLod0.size(),   GL_TRIANGLES, false);
+        drawFaunaBatch(m_whaleLod1,   m_visWhaleLod1.size(),   GL_TRIANGLES, false);
+        drawFaunaBatch(m_anglerLod0,  m_visAnglerLod0.size(),  GL_TRIANGLES, false);
+        drawFaunaBatch(m_anglerLod1,  m_visAnglerLod1.size(),  GL_TRIANGLES, false);
+        drawFaunaBatch(m_seagullLod0, m_visSeagullLod0.size(), GL_TRIANGLES, false);
+        drawFaunaBatch(m_seagullLod1, m_visSeagullLod1.size(), GL_TRIANGLES, false);
     }
 
     // ========================================================================
@@ -1449,30 +1504,34 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     m_instPropShader.setUniformValue("uKelpTint", visuals.kelpTint);
     drawInstPropBatches(false, true, useTess);
 
-    // 1.4. Marine fauna (LOD0 smoothly tessellated when enabled; LOD1 stays GL_TRIANGLES)
+    // 1.4. Marine & aerial fauna (LOD0 smoothly tessellated when enabled; LOD1 stays GL_TRIANGLES)
     if (useTess) {
         bindCommonEnvUniforms(m_faunaTessShader);
         m_faunaTessShader.setUniformValue("uMaxTessLevel", maxTessF);
-        drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   GL_PATCHES, true);
-        drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  GL_PATCHES, true);
-        drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  GL_PATCHES, true);
-        drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), GL_PATCHES, true);
+        drawFaunaBatch(m_fishLod0,    m_visFishLod0.size(),    GL_PATCHES, true);
+        drawFaunaBatch(m_mantaLod0,   m_visMantaLod0.size(),   GL_PATCHES, true);
+        drawFaunaBatch(m_whaleLod0,   m_visWhaleLod0.size(),   GL_PATCHES, true);
+        drawFaunaBatch(m_anglerLod0,  m_visAnglerLod0.size(),  GL_PATCHES, true);
+        drawFaunaBatch(m_seagullLod0, m_visSeagullLod0.size(), GL_PATCHES, true);
 
         bindCommonEnvUniforms(m_faunaShader);
-        drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   GL_TRIANGLES, true);
-        drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  GL_TRIANGLES, true);
-        drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  GL_TRIANGLES, true);
-        drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), GL_TRIANGLES, true);
+        drawFaunaBatch(m_fishLod1,    m_visFishLod1.size(),    GL_TRIANGLES, true);
+        drawFaunaBatch(m_mantaLod1,   m_visMantaLod1.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_whaleLod1,   m_visWhaleLod1.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_anglerLod1,  m_visAnglerLod1.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_seagullLod1, m_visSeagullLod1.size(), GL_TRIANGLES, true);
     } else {
         bindCommonEnvUniforms(m_faunaShader);
-        drawFaunaBatch(m_fishLod0,   m_visFishLod0.size(),   GL_TRIANGLES, true);
-        drawFaunaBatch(m_fishLod1,   m_visFishLod1.size(),   GL_TRIANGLES, true);
-        drawFaunaBatch(m_mantaLod0,  m_visMantaLod0.size(),  GL_TRIANGLES, true);
-        drawFaunaBatch(m_mantaLod1,  m_visMantaLod1.size(),  GL_TRIANGLES, true);
-        drawFaunaBatch(m_whaleLod0,  m_visWhaleLod0.size(),  GL_TRIANGLES, true);
-        drawFaunaBatch(m_whaleLod1,  m_visWhaleLod1.size(),  GL_TRIANGLES, true);
-        drawFaunaBatch(m_anglerLod0, m_visAnglerLod0.size(), GL_TRIANGLES, true);
-        drawFaunaBatch(m_anglerLod1, m_visAnglerLod1.size(), GL_TRIANGLES, true);
+        drawFaunaBatch(m_fishLod0,    m_visFishLod0.size(),    GL_TRIANGLES, true);
+        drawFaunaBatch(m_fishLod1,    m_visFishLod1.size(),    GL_TRIANGLES, true);
+        drawFaunaBatch(m_mantaLod0,   m_visMantaLod0.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_mantaLod1,   m_visMantaLod1.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_whaleLod0,   m_visWhaleLod0.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_whaleLod1,   m_visWhaleLod1.size(),   GL_TRIANGLES, true);
+        drawFaunaBatch(m_anglerLod0,  m_visAnglerLod0.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_anglerLod1,  m_visAnglerLod1.size(),  GL_TRIANGLES, true);
+        drawFaunaBatch(m_seagullLod0, m_visSeagullLod0.size(), GL_TRIANGLES, true);
+        drawFaunaBatch(m_seagullLod1, m_visSeagullLod1.size(), GL_TRIANGLES, true);
     }
 
     // Resolve scene depth for shoreline foam, shoal transparency, and water contact ripples
@@ -1575,6 +1634,41 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
             glBindVertexArray(m_particleVAO);
             glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(world.particles.size()));
         }
+
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
+    // 3D airborne spray droplets, breach fountains & surfacing whale blow spout
+    const auto& sprayVerts = engine.sprayVertices();
+    if (!sprayVerts.empty() && m_sprayVBO != 0 && m_sprayMaxVertices > 0) {
+        const GLsizei sprayCount = static_cast<GLsizei>(
+            std::min(sprayVerts.size(), static_cast<size_t>(m_sprayMaxVertices)));
+
+        glBindBuffer(GL_ARRAY_BUFFER, m_sprayVBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0,
+                        static_cast<size_t>(sprayCount) * sizeof(SprayGpuVertex),
+                        sprayVerts.data());
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_rockTex);
+
+        m_sprayShader.bind();
+        m_sprayShader.setUniformValue("uRockTex", 0);
+        m_sprayShader.setUniformValue("uViewProj", viewProj);
+        m_sprayShader.setUniformValue("uCamPos", camPos);
+        m_sprayShader.setUniformValue("uSunDir", visuals.sunDir);
+        m_sprayShader.setUniformValue("uViewportHeight", static_cast<float>(physH));
+        m_sprayShader.setUniformValue("uTime", simTime);
+
+        glBindVertexArray(m_sprayVAO);
+        glDrawArrays(GL_POINTS, 0, sprayCount);
 
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);

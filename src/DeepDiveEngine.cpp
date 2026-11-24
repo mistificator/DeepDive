@@ -1,5 +1,4 @@
 #include "DeepDiveEngine.h"
-#include "Noise.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -123,6 +122,7 @@ DeepDiveEngine::DeepDiveEngine() {
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
     m_rng.seed(rd() ^ timeSeed);
 
+    m_sprayGpuVerts.reserve(MAX_SPRAY_PARTICLES);
     configurePlayerAvatar(true);
 }
 
@@ -137,6 +137,7 @@ void DeepDiveEngine::setWorld(WorldData&& world, uint32_t seed) {
     m_camAboveWater = false;
     m_camWaterHeight = ProcMath::WATER_SURFACE_Y;
     m_airborneTime = 0.0f;
+    m_airTrailTimer = 0.0f;
     m_breachCooldown = 0.0f;
     m_bulletTimeRealElapsed = 0.0f;
     m_timeScale = 1.0f;
@@ -144,6 +145,10 @@ void DeepDiveEngine::setWorld(WorldData&& world, uint32_t seed) {
     m_splashScreenAmount = 0.0f;
     m_lensWetness = 0.0f;
     m_dynamicFovOffset = 0.0f;
+
+    for (auto& sp : m_sprayPool) sp.active = false;
+    m_sprayCursor = 0;
+    m_sprayGpuVerts.clear();
 
     m_world.collision.resolveSphereCollision(
         m_playerPos, &m_playerVel,
@@ -728,6 +733,7 @@ void DeepDiveEngine::spawnWhalePass(bool nearPlayer) {
     m_whaleSurfaceBlend    = 0.0f;
     m_whaleSurfaceTimer    = 0.0f;
     m_whaleSurfaceCooldown = firstSurfCdDist(m_rng);
+    m_whaleBlowTimer       = 1.0f;
 
     const float freeD = measureWhaleFreeDist(bestPos.x(), bestPos.z(), bestYaw, 140.0f);
     if (freeD >= 45.0f) {
@@ -821,6 +827,7 @@ void DeepDiveEngine::updateWhaleNavigation(float dt, bool& whaleCalledOut) {
         m_whaleSurfaceCooldown -= dt;
         if (m_whaleSurfaceCooldown <= 0.0f && freeForward >= 42.0f && distFromCenter < safeTurnR) {
             m_whaleSurfacing = true;
+            m_whaleBlowTimer = 0.9f;
             std::uniform_real_distribution<float> durDist(12.0f, 18.0f);
             m_whaleSurfaceTimer = durDist(m_rng);
             if ((m_whale.pos - m_playerPos).length() < 360.0f) {
@@ -1016,6 +1023,17 @@ void DeepDiveEngine::updateWhaleNavigation(float dt, bool& whaleCalledOut) {
         startAvoidingTurn(&inward);
     }
 
+    // Periodic misty blowhole spout while whale is surfaced near the ocean top
+    if (m_whaleSurfacing && m_whaleSurfaceBlend > 0.72f) {
+        m_whaleBlowTimer -= dt;
+        if (m_whaleBlowTimer <= 0.0f) {
+            m_whaleBlowTimer = 4.6f + std::fmod(m_time * 1.37f, 2.6f);
+            QVector3D blowPos = faunaLocalToWorld(m_whale, QVector3D(0.0f, 0.85f, 3.25f));
+            blowPos.setY(std::max(blowPos.y(), ProcMath::WATER_SURFACE_Y + 0.35f));
+            spawnSprayBurst(blowPos, m_whale.vel * 0.35f, 38, 2.2f, 13.5f, 1.55f, 0.78f, 0.55f);
+        }
+    }
+
     m_whaleSongTimer -= dt;
     if (m_whaleSongTimer <= 0.0f) {
         m_whaleSongTimer = 24.0f + std::fmod(m_time * 3.7f, 14.0f);
@@ -1026,7 +1044,7 @@ void DeepDiveEngine::updateWhaleNavigation(float dt, bool& whaleCalledOut) {
 }
 
 // ============================================================================
-// FAUNA, ANGLERFISH & INTER-ENTITY COLLISIONS
+// FAUNA, ANGLERFISH, SEAGULLS & INTER-ENTITY COLLISIONS
 // ============================================================================
 
 void DeepDiveEngine::updateFaunaAgents(float dt) {
@@ -1323,6 +1341,106 @@ void DeepDiveEngine::updateAnglerAgents(float dt) {
     }
 }
 
+void DeepDiveEngine::updateSeagullAgents(float dt) {
+    auto& gulls = m_world.seagullAgents;
+    const size_t count = gulls.size();
+    const float minAirY = ProcMath::WATER_SURFACE_Y + 8.5f;
+    const float maxAirY = ProcMath::WATER_SURFACE_Y + 78.0f;
+    const float maxPlayR = ProcMath::BASIN_RIM_RADIUS - 35.0f;
+
+    for (size_t i = 0; i < count; ++i) {
+        auto& g = gulls[i];
+        const QVector3D fwd = (g.vel.lengthSquared() > 1e-4f)
+                                  ? g.vel.normalized()
+                                  : QVector3D(std::sin(g.yaw), 0.0f, std::cos(g.yaw));
+
+        const float orbitSign = (i % 2 == 0) ? 1.0f : -1.0f;
+        const QVector3D toHome = g.homeCenter - g.pos;
+        const QVector3D horizToHome(toHome.x(), 0.0f, toHome.z());
+        const float homeDist = horizToHome.length();
+
+        QVector3D steer(0.0f, 0.0f, 0.0f);
+        if (homeDist > 1.0f) {
+            const QVector3D radial = horizToHome / homeDist;
+            const QVector3D tangent(-radial.z() * orbitSign, 0.0f, radial.x() * orbitSign);
+            steer += tangent * 4.2f;
+
+            // Keep gulls riding wide thermals rather than collapsing onto homeCenter
+            if (homeDist > g.homeRadius) {
+                const float pull = (homeDist - g.homeRadius) / std::max(g.homeRadius, 1.0f);
+                steer += radial * (pull * 10.5f + 2.4f);
+            } else if (homeDist < g.homeRadius * 0.42f) {
+                steer -= radial * 3.2f;
+            }
+        }
+
+        // Gentle thermal drift and lateral soaring wave
+        const QVector3D side(-fwd.z(), 0.0f, fwd.x());
+        steer += side * (std::sin(m_time * 0.48f + g.phase) * 1.45f);
+
+        const float thermalAlt = g.preferredDepth + std::sin(m_time * 0.34f + g.phase) * 4.8f;
+        const float groundNow  = m_world.collision.sampleHeight(g.pos.x(), g.pos.z());
+        const QVector3D ahead  = g.pos + fwd * 18.0f;
+        const float groundAhead = m_world.collision.sampleHeight(ahead.x(), ahead.z());
+        const float safeFloorY = std::max({minAirY, groundNow + 9.0f, groundAhead + 11.0f});
+        const float targetY    = ProcMath::clamp(std::max(thermalAlt, safeFloorY), minAirY, maxAirY);
+        steer.setY(steer.y() + (targetY - g.pos.y()) * 1.65f);
+
+        // Keep soaring birds inside the volcanic caldera sky
+        const float rCenter = std::sqrt(g.pos.x() * g.pos.x() + g.pos.z() * g.pos.z());
+        if (rCenter > maxPlayR) {
+            const QVector3D inward(-g.pos.x() / rCenter, 0.0f, -g.pos.z() / rCenter);
+            steer += inward * ((rCenter - maxPlayR) * 0.45f + 4.0f);
+        }
+
+        // Soft gull-to-gull separation
+        for (size_t j = 0; j < count; ++j) {
+            if (i == j) continue;
+            const QVector3D diff = g.pos - gulls[j].pos;
+            const float dSq = diff.lengthSquared();
+            constexpr float SEP_R = 9.0f;
+            if (dSq < SEP_R * SEP_R && dSq > 1e-4f) {
+                const float d = std::sqrt(dSq);
+                steer += (diff / d) * (((SEP_R - d) / SEP_R) * 6.5f);
+            }
+        }
+
+        g.vel += steer * dt;
+        float spd = g.vel.length();
+        if (spd < 0.2f) {
+            g.vel = fwd * g.cruiseSpeed;
+            spd = g.cruiseSpeed;
+        }
+
+        QVector3D dir = g.vel / spd;
+        dir.setY(ProcMath::clamp(dir.y(), -0.34f, 0.34f));
+        dir.normalize();
+        const float targetSpd = ProcMath::mix(spd, g.cruiseSpeed, ProcMath::clamp(dt * 2.5f, 0.0f, 1.0f));
+        g.vel = dir * targetSpd;
+        g.pos += g.vel * dt;
+
+        // Hard floor clearance above waves and sea stacks
+        const float hardMinY = std::max(minAirY, m_world.collision.sampleHeight(g.pos.x(), g.pos.z()) + 6.0f);
+        if (g.pos.y() < hardMinY) {
+            g.pos.setY(hardMinY);
+            if (g.vel.y() < 0.0f) g.vel.setY(std::abs(g.vel.y()) * 0.35f);
+        }
+
+        const float horizSpd = std::sqrt(g.vel.x() * g.vel.x() + g.vel.z() * g.vel.z());
+        const float targetYaw = std::atan2(g.vel.x(), g.vel.z());
+        const float dYaw = wrapAngle(targetYaw - g.yaw);
+        const float k = ProcMath::clamp(dt * 3.8f, 0.0f, 1.0f);
+        g.yaw = wrapAngle(g.yaw + dYaw * k);
+
+        const float targetPitch = ProcMath::clamp(std::atan2(g.vel.y(), std::max(horizSpd, 0.5f)), -0.35f, 0.35f);
+        g.pitch = ProcMath::mix(g.pitch, targetPitch, k);
+
+        // Graceful soaring bank into turns
+        const float targetBank = ProcMath::clamp(-dYaw * 2.6f, -0.58f, 0.58f);
+        g.bank = ProcMath::mix(g.bank, targetBank, ProcMath::clamp(dt * 3.2f, 0.0f, 1.0f));
+    }
+}
+
 void DeepDiveEngine::resolveFaunaAndPlayerCollisions(float& maxPlayerImpactSpeed) {
     auto& fishes  = m_world.fishAgents;
     auto& mantas  = m_world.mantaAgents;
@@ -1527,6 +1645,10 @@ void DeepDiveEngine::resolveFaunaAndPlayerCollisions(float& maxPlayerImpactSpeed
     }
 }
 
+// ============================================================================
+// UNDERWATER PARTICLES & 3D AIRBORNE SPRAY / WHALE BLOW SPOUT
+// ============================================================================
+
 void DeepDiveEngine::updateParticles(float dt) {
     constexpr float BOX_SPAN_XZ = 160.0f;
     constexpr float BOX_HALF_XZ = BOX_SPAN_XZ * 0.5f;
@@ -1551,6 +1673,85 @@ void DeepDiveEngine::updateParticles(float dt) {
         p.pos.setX(wrapAround(nextX, m_camPos.x(), BOX_SPAN_XZ, BOX_HALF_XZ));
         p.pos.setY(wrapAround(nextY, yCenter,      BOX_SPAN_Y,  BOX_HALF_Y));
         p.pos.setZ(wrapAround(p.pos.z(), m_camPos.z(), BOX_SPAN_XZ, BOX_HALF_XZ));
+    }
+}
+
+void DeepDiveEngine::spawnSprayBurst(const QVector3D& origin, const QVector3D& inheritedVel,
+                                     int count, float radialSpeed, float upSpeed,
+                                     float sizeScale, float mistRatio, float gravityScale) {
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+
+    for (int i = 0; i < count; ++i) {
+        AirSprayParticle& sp = m_sprayPool[m_sprayCursor];
+        m_sprayCursor = (m_sprayCursor + 1) % MAX_SPRAY_PARTICLES;
+
+        const float ang   = u01(m_rng) * TWO_PI;
+        const float rFrac = std::sqrt(u01(m_rng));
+        const float hJitter = (u01(m_rng) - 0.35f) * 0.65f;
+        const bool isMist = (u01(m_rng) < mistRatio);
+
+        const float radOff = rFrac * (isMist ? 1.45f : 1.05f) * sizeScale;
+        sp.pos = origin + QVector3D(std::cos(ang) * radOff, hJitter, std::sin(ang) * radOff);
+
+        const float spdR = radialSpeed * (0.35f + 0.85f * u01(m_rng));
+        const float spdY = upSpeed * (0.45f + 0.80f * u01(m_rng));
+        sp.vel = inheritedVel + QVector3D(std::cos(ang) * spdR, spdY, std::sin(ang) * spdR);
+
+        sp.age = 0.0f;
+        sp.lifetime = isMist ? (1.15f + u01(m_rng) * 1.10f) : (0.75f + u01(m_rng) * 0.85f);
+        sp.baseSize = (isMist ? (0.62f + u01(m_rng) * 0.78f) : (0.18f + u01(m_rng) * 0.26f)) * sizeScale;
+        sp.drag = isMist ? 1.35f : 0.28f;
+        sp.gravityScale = isMist ? (gravityScale * 0.42f) : gravityScale;
+        sp.isMist = isMist;
+        sp.active = true;
+    }
+}
+
+void DeepDiveEngine::updateAirSpray(float simDt) {
+    constexpr float GRAVITY = 18.5f;
+    m_sprayGpuVerts.clear();
+
+    for (auto& sp : m_sprayPool) {
+        if (!sp.active) continue;
+
+        sp.age += simDt;
+        if (sp.age >= sp.lifetime) {
+            sp.active = false;
+            continue;
+        }
+
+        sp.vel *= std::exp(-sp.drag * simDt);
+        sp.vel.setY(sp.vel.y() - GRAVITY * sp.gravityScale * simDt);
+        sp.pos += sp.vel * simDt;
+
+        // Retire droplets once they fall back below the ocean surface
+        if (sp.age > 0.14f && sp.pos.y() < ProcMath::WATER_SURFACE_Y - 0.55f) {
+            sp.active = false;
+            continue;
+        }
+
+        const float t = sp.age / sp.lifetime;
+        const float fadeIn  = ProcMath::smoothstep(0.0f, 0.10f, t);
+        const float fadeOut = 1.0f - ProcMath::smoothstep(0.45f, 1.0f, t);
+        const float alpha   = ProcMath::clamp(fadeIn * fadeOut, 0.0f, 1.0f);
+        if (alpha <= 0.01f) continue;
+
+        SprayGpuVertex gv;
+        gv.pos = sp.pos;
+        if (sp.isMist) {
+            // Mist puffs expand softly as they dissipate; fade alpha is encoded in rgb magnitude
+            const float curSize = sp.baseSize * (0.75f + 1.35f * t);
+            const QVector3D tint(0.92f, 0.98f, 1.00f);
+            const QVector3D premul = tint * (alpha * 0.78f);
+            gv.colorSize = QVector4D(premul.x(), premul.y(), premul.z(), curSize);
+        } else {
+            // Crisp sunlit water droplets (negative size flag)
+            const float curSize = sp.baseSize * (1.0f - 0.35f * t);
+            const QVector3D tint(0.96f, 0.99f, 1.00f);
+            const QVector3D premul = tint * alpha;
+            gv.colorSize = QVector4D(premul.x(), premul.y(), premul.z(), -curSize);
+        }
+        m_sprayGpuVerts.push_back(gv);
     }
 }
 
@@ -1646,6 +1847,7 @@ EngineStepEvents DeepDiveEngine::update(float realDt, const EngineInput& input) 
         if (approachingFastUp && m_playerPos.y() >= waveY - 0.15f) {
             m_isAirborne = true;
             m_airborneTime = 0.0f;
+            m_airTrailTimer = 0.0f;
             m_bulletTimeRealElapsed = 0.0f;
 
             float minLaunchVy = 15.2f;
@@ -1683,6 +1885,12 @@ EngineStepEvents DeepDiveEngine::update(float realDt, const EngineInput& input) 
             events.splashIntensity = ProcMath::clamp(m_playerVel.length() / 24.0f, 0.55f, 1.0f);
             m_splashScreenAmount = std::max(m_splashScreenAmount, 0.88f);
             m_lensWetness = 1.0f;
+
+            // Erupt a 3D fountain of sea spray & droplets from the breach point
+            const float sprayScale = (m_cameraMode == CameraMode::ThirdPersonManta) ? 1.35f
+                                                                                    : (m_cameraMode == CameraMode::ThirdPersonFish ? 0.85f : 1.05f);
+            const QVector3D breachOrigin(m_playerPos.x(), waveY + 0.25f, m_playerPos.z());
+            spawnSprayBurst(breachOrigin, m_playerVel * 0.42f, 92, 5.4f * sprayScale, 10.5f, sprayScale, 0.44f);
         }
     } else {
         // Airborne ballistic arc with gentle horizontal air-steer
@@ -1694,6 +1902,16 @@ EngineStepEvents DeepDiveEngine::update(float realDt, const EngineInput& input) 
         m_playerVel *= std::exp(-0.18f * simDt);
         m_playerVel.setY(m_playerVel.y() - GRAVITY * simDt);
         m_playerPos += m_playerVel * simDt;
+
+        // Shed sparkling water droplets from the leaping avatar in early flight
+        if (m_airborneTime < 1.35f) {
+            m_airTrailTimer -= simDt;
+            if (m_airTrailTimer <= 0.0f) {
+                m_airTrailTimer = 0.045f;
+                const float trailScale = (m_cameraMode == CameraMode::ThirdPersonManta) ? 1.15f : 0.72f;
+                spawnSprayBurst(m_playerPos, m_playerVel * 0.55f, 4, 2.2f * trailScale, 1.2f, trailScale * 0.75f, 0.25f);
+            }
+        }
 
         // Keep full collisions against above-water cliffs, sea stacks, and basin rim
         hitEnv = m_world.collision.resolveSphereCollision(
@@ -1735,14 +1953,22 @@ EngineStepEvents DeepDiveEngine::update(float realDt, const EngineInput& input) 
             events.splashIntensity = ProcMath::clamp(impactVy / 18.0f, 0.40f, 1.0f);
             m_splashScreenAmount = std::max(m_splashScreenAmount,
                                             ProcMath::clamp(0.65f + events.splashIntensity * 0.35f, 0.0f, 1.0f));
+
+            // Circular crown splash erupting upward & outward from impact
+            const float crownScale = ((m_cameraMode == CameraMode::ThirdPersonManta) ? 1.40f : 1.0f)
+                                     * (0.75f + 0.45f * events.splashIntensity);
+            const QVector3D impactPos(m_playerPos.x(), waveY + 0.20f, m_playerPos.z());
+            spawnSprayBurst(impactPos, QVector3D(m_playerVel.x() * 0.18f, 0.0f, m_playerVel.z() * 0.18f),
+                            76, 7.2f * crownScale, 9.2f * crownScale, crownScale, 0.50f);
         }
     }
 
     m_playerColliding = hitEnv;
 
-    // 5. Step fish, mantas & anglers, then resolve all mutual fauna & player collisions
+    // 5. Step underwater fauna & soaring seagulls, then resolve mutual fauna & player collisions
     updateFaunaAgents(simDt);
     updateAnglerAgents(simDt);
+    updateSeagullAgents(simDt);
 
     float maxImpactSpeed = hitEnv ? preCollisionSpeed : 0.0f;
     resolveFaunaAndPlayerCollisions(maxImpactSpeed);
@@ -1789,6 +2015,7 @@ EngineStepEvents DeepDiveEngine::update(float realDt, const EngineInput& input) 
 
     refreshLureLights();
     updateParticles(simDt);
+    updateAirSpray(simDt);
 
     return events;
 }

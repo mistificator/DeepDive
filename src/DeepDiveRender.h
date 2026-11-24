@@ -33,6 +33,7 @@ struct FrameRenderStats {
     int visibleMantaLod0 = 0;
     int visibleMantaLod1 = 0;
     int visibleAnglers = 0;
+    int visibleSeagulls = 0;
 };
 
 class DeepDiveRender : protected QOpenGLFunctions_3_3_Core {
@@ -163,6 +164,7 @@ private:
     std::vector<uint8_t> m_fishLodState;
     std::vector<uint8_t> m_mantaLodState;
     std::vector<uint8_t> m_anglerLodState;
+    std::vector<uint8_t> m_seagullLodState;
     uint8_t m_whaleLodState = 0;
 
     // OpenGL 3.3 Core shader programs
@@ -176,6 +178,7 @@ private:
     QOpenGLShaderProgram m_skyShader;
     QOpenGLShaderProgram m_rayShader;
     QOpenGLShaderProgram m_particleShader;
+    QOpenGLShaderProgram m_sprayShader;
     QOpenGLShaderProgram m_scatterBlurShader;
     QOpenGLShaderProgram m_postProcessShader;
 
@@ -199,11 +202,13 @@ private:
     FaunaLodBuffers m_mantaLod0, m_mantaLod1;
     FaunaLodBuffers m_whaleLod0, m_whaleLod1;
     FaunaLodBuffers m_anglerLod0, m_anglerLod1;
+    FaunaLodBuffers m_seagullLod0, m_seagullLod1;
 
     std::vector<FaunaGpuInstance> m_visFishLod0, m_visFishLod1;
     std::vector<FaunaGpuInstance> m_visMantaLod0, m_visMantaLod1;
     std::vector<FaunaGpuInstance> m_visWhaleLod0, m_visWhaleLod1;
     std::vector<FaunaGpuInstance> m_visAnglerLod0, m_visAnglerLod1;
+    std::vector<FaunaGpuInstance> m_visSeagullLod0, m_visSeagullLod1;
 
     GLuint m_waterVAO = 0, m_waterVBO = 0, m_waterEBO = 0;
     GLsizei m_waterIndexCount = 0;
@@ -213,6 +218,9 @@ private:
     GLsizei m_rayIndexCount = 0;
     GLsizei m_rayInstanceCount = 0;
     GLuint m_particleVAO = 0, m_particleVBO = 0;
+
+    GLuint m_sprayVAO = 0, m_sprayVBO = 0;
+    GLsizei m_sprayMaxVertices = 0;
 
     // Shadow map FBO
     static constexpr int SHADOW_MAP_RES = 2048;

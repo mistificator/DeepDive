@@ -22,7 +22,7 @@ struct FaunaVertex {
 // Компактная структура инстанса фауны для GPU
 struct FaunaGpuInstance {
     QVector4D posScale;  // xyz: worldPos, w: scale
-    QVector4D rotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler), w: bank
+    QVector4D rotPhase;  // x: yaw, y: phase, z: type (0=fish, 1=manta, 2=whale, 3=angler, 4=seagull), w: bank
     QVector4D pitchTint; // x: pitch, yzw: color tint
 };
 
@@ -71,7 +71,7 @@ struct FaunaAgent {
     float yaw = 0.0f;
     float pitch = 0.0f;
     float bank = 0.0f;
-    float type = 0.0f; // 0 = fish, 1 = manta, 2 = whale, 3 = anglerfish
+    float type = 0.0f; // 0 = fish, 1 = manta, 2 = whale, 3 = anglerfish, 4 = seagull
 };
 
 struct GodRayInstance {
@@ -85,6 +85,12 @@ struct Particle {
     QVector4D colorSize;
     float speedY;
     float phase;
+};
+
+// Компактная вершина 3D-брызг и водяной пыли в воздухе (передаётся на GPU каждый кадр)
+struct SprayGpuVertex {
+    QVector3D pos;
+    QVector4D colorSize; // rgb: оттенок с учётом прозрачности, a: >0 водяная дымка/пена, <0 блестящая капля
 };
 
 struct MeshRange {
@@ -196,6 +202,12 @@ struct WorldData {
     std::vector<uint32_t>    anglerLod1Inds;
     std::vector<FaunaAgent>  anglerAgents;
 
+    std::vector<FaunaVertex> seagullLod0Verts;
+    std::vector<uint32_t>    seagullLod0Inds;
+    std::vector<FaunaVertex> seagullLod1Verts;
+    std::vector<uint32_t>    seagullLod1Inds;
+    std::vector<FaunaAgent>  seagullAgents;
+
     std::vector<QVector3D>      godRayMeshVerts;
     std::vector<uint32_t>       godRayMeshInds;
     std::vector<GodRayInstance> godRayInstances;
@@ -214,6 +226,7 @@ private:
     static void generateFaunaMeshes(WorldData& data);
     static void generateWhaleMeshes(WorldData& data);
     static void generateAnglerMeshes(WorldData& data);
+    static void generateSeagullMeshes(WorldData& data);
     static void generateFaunaAgents(WorldData& data, uint32_t seed);
     static void generateGodRaysAndParticles(WorldData& data, uint32_t seed);
 

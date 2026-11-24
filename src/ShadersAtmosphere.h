@@ -637,7 +637,7 @@ void main() {
 )";
 
 // ============================================================================
-// VOLUMETRIC GOD RAYS, PARTICLES & POST-PROCESSING
+// VOLUMETRIC GOD RAYS, PARTICLES, AIRBORNE SPRAY & POST-PROCESSING
 // ============================================================================
 
 inline const char* TranslucentVert = R"(#version 330 core
@@ -902,6 +902,107 @@ void main() {
         float glow = oneMinusR2 * oneMinusR2;
         FragColor = vec4(clamp(vColor * 1.25, 0.0, 3.0), glow * 0.85);
     }
+}
+)";
+
+inline const char* SprayVert = R"(#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColorSize; // rgb: tint * alpha, a: >0 mist puff, <0 droplet
+
+uniform mat4 uViewProj;
+uniform vec3 uCamPos;
+uniform float uViewportHeight;
+
+out vec3 vWorldPos;
+out vec3 vTint;
+out float vAlpha;
+out float vIsDrop;
+out float vSeed;
+
+void main() {
+    gl_Position = uViewProj * vec4(aPos, 1.0);
+    float dist = max(length(uCamPos - aPos), 0.75);
+    bool isDrop = (aColorSize.a < 0.0);
+    float size = abs(aColorSize.a);
+    float maxPx = isDrop ? 30.0 : 92.0;
+    float scaleMul = isDrop ? 0.58 : 0.78;
+    gl_PointSize = clamp((size * uViewportHeight * scaleMul) / dist, 2.0, maxPx);
+
+    float alpha = clamp(max(aColorSize.r, max(aColorSize.g, aColorSize.b)), 0.0, 1.0);
+    vWorldPos = aPos;
+    vTint     = aColorSize.rgb / max(alpha, 0.001);
+    vAlpha    = alpha;
+    vIsDrop   = isDrop ? 1.0 : 0.0;
+    vSeed     = fract(sin(float(gl_VertexID) * 12.9898 + 4.1414) * 43758.5453);
+}
+)";
+
+inline const char* SprayFrag = R"(#version 330 core
+in vec3 vWorldPos;
+in vec3 vTint;
+in float vAlpha;
+in float vIsDrop;
+in float vSeed;
+
+uniform sampler2D uRockTex;
+uniform vec3 uCamPos;
+uniform vec3 uSunDir;
+uniform float uTime;
+
+out vec4 FragColor;
+
+void main() {
+    if (vAlpha <= 0.005) discard;
+    vec2 uv = gl_PointCoord * 2.0 - 1.0;
+    float r2 = dot(uv, uv);
+    if (r2 > 1.0) discard;
+
+    vec3 viewVec = vWorldPos - uCamPos;
+    float dist = length(viewVec);
+    vec3 D = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
+    vec3 L = normalize(uSunDir);
+
+    // Sunlit forward scattering ("silver lining" when spray is backlit by midday sun)
+    float sunDot = clamp(dot(D, L), 0.0, 1.0);
+    float forwardScatter = pow(sunDot, 5.0) * 0.55;
+    vec3 middaySun = vec3(1.18, 1.12, 0.98);
+
+    vec3 col;
+    float alpha;
+
+    if (vIsDrop > 0.5) {
+        // Crisp glistening water droplet with bright solar specular glint
+        float core = smoothstep(1.0, 0.25, r2);
+        float rim  = smoothstep(0.35, 0.88, r2) * (1.0 - smoothstep(0.88, 1.0, r2));
+        float glint = pow(clamp(1.0 - length(uv - vec2(-0.30, -0.32)) * 1.65, 0.0, 1.0), 3.0);
+
+        col = mix(vec3(0.76, 0.92, 0.99), vec3(1.04, 1.06, 1.08), core * 0.65) * vTint;
+        col += middaySun * (glint * 0.95 + forwardScatter * 0.70);
+        alpha = clamp((core * 0.68 + rim * 0.45 + glint * 0.45) * vAlpha, 0.0, 0.96);
+    } else {
+        // Soft sunlit mist / whale blow vapour puff broken up by rotated noise
+        float ang = vSeed * 6.2831853 + uTime * 0.25 * (vSeed - 0.5);
+        float c = cos(ang), s = sin(ang);
+        vec2 rotUV = mat2(c, -s, s, c) * (uv * 0.32) + vec2(vSeed, fract(vSeed * 7.13));
+        float n = texture(uRockTex, rotUV).a;
+
+        float radial = (1.0 - r2);
+        float puff = radial * radial * smoothstep(0.18, 0.86, n * 0.65 + radial * 0.55);
+        if (puff <= 0.005) discard;
+
+        // Subtle vertical sky/shadow gradient across the puff
+        float topShade = clamp(0.78 - uv.y * 0.22, 0.55, 1.05);
+        col = mix(vec3(0.78, 0.89, 0.96), vec3(1.06, 1.07, 1.05), topShade) * vTint;
+        col += middaySun * (forwardScatter * 0.65);
+        alpha = clamp(puff * vAlpha * 0.78, 0.0, 0.85);
+    }
+
+    // Subtle daylight aerial fade for distant whale blow spouts
+    float airFog = 1.0 - exp(-dist * 0.00145);
+    vec3 horizonHaze = vec3(0.75, 0.91, 0.99);
+    col = mix(col, horizonHaze, clamp(airFog * 0.68, 0.0, 0.78));
+
+    FragColor = vec4(clamp(col, 0.0, 6.0), alpha);
 }
 )";
 
