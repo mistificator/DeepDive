@@ -8,7 +8,7 @@ namespace Shaders {
 
 inline const char* ShadowEnvVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 3) in vec2 aParam; // x: 0=rock, 1=wood, 2=reef/grass, 3=kelp, 4=abyssalGlow, 5=kelpVesicle; y: sway
+layout(location = 3) in vec2 aParam; // x: 0=rock, 1=wood, 2=reef/grass, 3=kelp, 4=abyssalGlow, 5=kelpVesicle, 6=cliffGrass; y: sway
 
 uniform mat4 uLightSpaceMatrix;
 uniform float uTime;
@@ -16,7 +16,7 @@ uniform float uTime;
 void main() {
     vec3 pos = aPos;
 
-    if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
+    if (aParam.x > 4.5 && aParam.x < 5.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.15 + pos.x * 0.12 + pos.z * 0.10;
         float hCurve = h * sqrt(h);
@@ -25,12 +25,12 @@ void main() {
         float flutter = sin(uTime * 2.8 + pos.y * 1.1 + pos.x * 0.5) * 0.14 * h;
         pos.x += swayX + flutter;
         pos.z += swayZ + flutter;
-    } else if (aParam.x > 3.5) {
+    } else if (aParam.x > 3.5 && aParam.x < 4.5) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.45 + pos.x * 0.25 + pos.z * 0.22;
         pos.x += sin(phase + h * 2.4) * 0.24 * (h * h);
         pos.z += cos(phase * 0.85 + h * 2.8) * 0.20 * (h * h);
-    } else if (aParam.x > 1.5 && aParam.y > 0.01) {
+    } else if (aParam.x > 1.5 && aParam.x < 2.5 && aParam.y > 0.01) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.85 + pos.x * 0.28 + pos.z * 0.24;
         float bend = h * sqrt(h);
@@ -71,7 +71,21 @@ void main() {
 
     vec3 pos = (rotY * rotX * rotZ) * localPos + aInstPosScaleXZ.xyz;
 
-    if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
+    if (aParam.x > 5.5) {
+        // Above-water coastal grass swaying in travelling sea-breeze gusts
+        float h = clamp(aParam.y, 0.0, 1.0);
+        float bend = h * h;
+        vec2 windDir = vec2(0.84, 0.54);
+        float gustPhase = dot(pos.xz, vec2(0.085, 0.062)) - uTime * 2.15;
+        float gust = 0.55 + 0.45 * sin(gustPhase) + 0.22 * sin(gustPhase * 1.73 + 1.4);
+        float localPhase = uTime * 3.8 + aInstPosScaleXZ.x * 0.45 + aInstPosScaleXZ.z * 0.37 + aPos.x * 1.9;
+        float flutter = sin(localPhase) * 0.14 * h;
+        vec2 swayXZ = windDir * (0.48 * gust * bend)
+                    + vec2(-windDir.y, windDir.x) * (flutter * 0.65 + sin(localPhase * 0.7) * 0.10 * bend);
+        pos.x += swayXZ.x;
+        pos.z += swayXZ.y;
+        pos.y -= length(swayXZ) * 0.24 * h;
+    } else if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.10 + aInstPosScaleXZ.x * 0.11 + aInstPosScaleXZ.z * 0.09;
         float hCurve = h * sqrt(h);
@@ -180,7 +194,7 @@ void main() {
     vec3 pos = aPos;
     vec3 norm = aNormal;
 
-    if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
+    if ((aParam.x > 4.5 && aParam.x < 5.5) || (aParam.x > 2.5 && aParam.x < 3.5)) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.15 + pos.x * 0.12 + pos.z * 0.10;
         float hCurve = h * sqrt(h);
@@ -190,7 +204,7 @@ void main() {
         pos.x += swayX + flutter;
         pos.z += swayZ + flutter;
         norm = normalize(norm + vec3(swayX * 0.15, 0.0, swayZ * 0.15));
-    } else if (aParam.x > 3.5) {
+    } else if (aParam.x > 3.5 && aParam.x < 4.5) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.45 + pos.x * 0.25 + pos.z * 0.22;
         float swayX = sin(phase + h * 2.4) * 0.24 * (h * h);
@@ -198,7 +212,7 @@ void main() {
         pos.x += swayX;
         pos.z += swayZ;
         norm = normalize(norm + vec3(swayX * 0.25, 0.0, swayZ * 0.25));
-    } else if (aParam.x > 1.5 && aParam.y > 0.01) {
+    } else if (aParam.x > 1.5 && aParam.x < 2.5 && aParam.y > 0.01) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.85 + pos.x * 0.28 + pos.z * 0.24;
         float bend = h * sqrt(h);
@@ -262,7 +276,22 @@ void main() {
     vec3 pos  = rot * localPos + aInstPosScaleXZ.xyz;
     vec3 norm = normalize(rot * localN);
 
-    if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
+    if (aParam.x > 5.5) {
+        // Above-water coastal grass swaying in travelling sea-breeze gusts
+        float h = clamp(aParam.y, 0.0, 1.0);
+        float bend = h * h;
+        vec2 windDir = vec2(0.84, 0.54);
+        float gustPhase = dot(pos.xz, vec2(0.085, 0.062)) - uTime * 2.15;
+        float gust = 0.55 + 0.45 * sin(gustPhase) + 0.22 * sin(gustPhase * 1.73 + 1.4);
+        float localPhase = uTime * 3.8 + aInstPosScaleXZ.x * 0.45 + aInstPosScaleXZ.z * 0.37 + aPos.x * 1.9;
+        float flutter = sin(localPhase) * 0.14 * h;
+        vec2 swayXZ = windDir * (0.48 * gust * bend)
+                    + vec2(-windDir.y, windDir.x) * (flutter * 0.65 + sin(localPhase * 0.7) * 0.10 * bend);
+        pos.x += swayXZ.x;
+        pos.z += swayXZ.y;
+        pos.y -= length(swayXZ) * 0.24 * h;
+        norm = normalize(norm + vec3(swayXZ.x * 0.35, 0.0, swayXZ.y * 0.35));
+    } else if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.10 + aInstPosScaleXZ.x * 0.11 + aInstPosScaleXZ.z * 0.09;
         float hCurve = h * sqrt(h);
@@ -487,8 +516,10 @@ void main() {
     vec3 V = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
     vec3 L = normalize(uSunDir);
 
+    bool isCliffGrass = (vParam.x > 5.5);
+
     float waveSurfY = evalWaveSurfY(vWorldPos.xz, uTime);
-    float aboveWaterMask = smoothstep(waveSurfY - 0.16, waveSurfY + 0.28, vWorldPos.y);
+    float aboveWaterMask = isCliffGrass ? 1.0 : smoothstep(waveSurfY - 0.16, waveSurfY + 0.28, vWorldPos.y);
     float underwaterMask = 1.0 - aboveWaterMask;
 
     float vertexFlatness = (vParam.x < 0.5) ? clamp(1.0 - vParam.y, 0.0, 1.0) : 1.0;
@@ -505,10 +536,9 @@ void main() {
     blend /= (blend.x + blend.y + blend.z);
 
     vec3 N = geomN;
-    float vibStrength = (vParam.x > 1.5) ? uVibrance : mix(1.0, uVibrance, 0.50);
+    float vibStrength = isCliffGrass ? 1.10 : ((vParam.x > 1.5) ? uVibrance : mix(1.0, uVibrance, 0.50));
     vec3 baseCol = applyVibrance(clamp(vColor, 0.0, 1.0), vibStrength);
     float ao = 1.0;
-    float rockDetailH = 0.5;
 
     if (vParam.x < 1.5) {
         const mat2 rotA = mat2( 1.000,  0.000,  0.000,  1.000);
@@ -542,7 +572,6 @@ void main() {
         N = normalize(geomN + perturb * 0.92);
 
         float detailHeight = hMacro * 0.44 + hMicro * 0.38 + hFine * 0.18;
-        rockDetailH = detailHeight;
         float cavity       = cMacro * 0.50 + cMicro * 0.35 + cFine * 0.15;
         float crevice      = smoothstep(0.10, 0.78, cavity * 0.62 + detailHeight * 0.38);
         ao = crevice * 0.62 + 0.38;
@@ -580,6 +609,9 @@ void main() {
         N = normalize(geomN + pOrg * orgRelief);
         ao = 0.78 + hOrg * 0.22;
         baseCol *= (0.82 + hOrg * 0.36);
+    } else if (isCliffGrass) {
+        // Gentle root-to-tip ambient occlusion for coastal grass blades
+        ao = mix(0.48, 1.0, smoothstep(0.0, 0.58, clamp(vParam.y, 0.0, 1.0)));
     }
 
     float shadow = calcUnderwaterShadow(vLightSpacePos, geomN, L);
@@ -599,7 +631,7 @@ void main() {
     float rim = rimBase * rimBase * rimBase * 0.28 * mix(0.40, 1.0, shadow) * ambSurvival;
 
     float sss = 0.0;
-    if (vParam.x > 1.5 && vParam.x < 4.5) {
+    if ((vParam.x > 1.5 && vParam.x < 4.5) || isCliffGrass) {
         float backLight = clamp(dot(V, -L + N * 0.32), 0.0, 1.0);
         sss = ((backLight * backLight) * 0.85 + 0.16) * mix(0.35, 1.0, shadow) * sunSurvival;
     }
@@ -629,26 +661,31 @@ void main() {
         litColor += baseCol * 1.10 * sss * 0.72;
     }
 
-    // Midday sunlight, sky/ocean hemisphere fill & wet splash band for above-water cliffs
+    // Midday sunlight, sky/ocean hemisphere fill, grass translucency & wet splash band for above-water cliffs
     if (aboveWaterMask > 0.005) {
         float aboveH = max(vWorldPos.y - waveSurfY, 0.0);
-        float wetBand = (1.0 - smoothstep(0.15, 2.35, aboveH)) * smoothstep(-0.15, 0.08, vWorldPos.y - waveSurfY);
+        float wetBand = isCliffGrass ? 0.0
+                                     : ((1.0 - smoothstep(0.15, 2.35, aboveH)) * smoothstep(-0.15, 0.08, vWorldPos.y - waveSurfY));
 
         vec3 dayAlbedo = baseCol * mix(1.0, 0.56, wetBand * (vParam.x < 1.5 ? 1.0 : 0.2));
         float dayNdl = clamp(dot(N, L), 0.0, 1.0);
-        float dayShadow = mix(0.24, 1.0, shadow);
+        float dayShadow = mix(0.26, 1.0, shadow);
         vec3 middaySun = vec3(1.24, 1.16, 1.00);
         vec3 skyAmb = mix(vec3(0.20, 0.32, 0.38), vec3(0.44, 0.66, 0.92), hemi);
 
         float wetSpec = pow(max(specBase, 0.0001), mix(24.0, 72.0, wetBand)) * step(0.0002, specBase)
-                      * mix(0.08, 0.62, wetBand) * ao * shadow;
+                      * (isCliffGrass ? 0.14 : mix(0.08, 0.62, wetBand)) * ao * shadow;
         float dryRim = rimBase * rimBase * rimBase * mix(0.08, 0.24, wetBand);
 
         vec3 dayLit = dayAlbedo * ao * (skyAmb * 0.62 + middaySun * (dayNdl * 0.88 + wrapDiff * 0.22) * dayShadow)
                     + middaySun * wetSpec
                     + vec3(0.58, 0.78, 0.96) * dryRim;
 
-        if (vParam.x > 1.5 && vParam.x < 4.5) {
+        if (isCliffGrass) {
+            float tipGlow = smoothstep(0.25, 1.0, clamp(vParam.y, 0.0, 1.0));
+            vec3 grassTrans = mix(dayAlbedo * 1.25, vec3(0.68, 0.94, 0.24), 0.35);
+            dayLit += grassTrans * middaySun * (sss * (0.48 + 0.42 * tipGlow));
+        } else if (vParam.x > 1.5 && vParam.x < 4.5) {
             dayLit += dayAlbedo * middaySun * sss * 0.45;
         }
         litColor = mix(litColor, dayLit, aboveWaterMask);
@@ -688,16 +725,16 @@ void main() {
     }
 
     float bioFogScale = 1.0;
-    if (vParam.x > 4.5) {
+    if (vParam.x > 4.5 && vParam.x < 5.5) {
         float pulse = 0.72 + 0.28 * sin(uTime * 3.0 + vWorldPos.y * 1.3 + vWorldPos.x * 0.8 + vWorldPos.z * 0.7);
         litColor = vColor * (1.35 + 0.75 * pulse);
         bioFogScale = 0.58;
-    } else if (vParam.x > 3.5) {
+    } else if (vParam.x > 3.5 && vParam.x < 4.5) {
         float tip = clamp(vParam.y, 0.0, 1.0);
         float pulse = 0.68 + 0.32 * sin(uTime * 2.2 + vWorldPos.x * 0.35 + vWorldPos.z * 0.35 + tip * 3.0);
         litColor += vColor * (0.35 + tip * tip * 1.75) * pulse;
         bioFogScale = 1.0 - tip * 0.52;
-    } else if (vParam.x > 2.5) {
+    } else if (vParam.x > 2.5 && vParam.x < 3.5) {
         vec4 bioSample = sampleTriplanar(uRockTex, vWorldPos * 1.45, blend);
         float glowMask = smoothstep(0.78, 0.88, bioSample.a);
         float pulse = 0.55 + 0.45 * sin(uTime * 2.8 + vWorldPos.y * 1.5 + vWorldPos.x);
@@ -1056,7 +1093,21 @@ void main() {
             pos = mix(pLin, pPhong, 0.42 * creaseGuard * fade);
         }
 
-        if (param.x > 4.5 || (param.x > 2.5 && param.x < 3.5)) {
+        if (param.x > 5.5) {
+            float h = clamp(param.y, 0.0, 1.0);
+            float bend = h * h;
+            vec2 windDir = vec2(0.84, 0.54);
+            float gustPhase = dot(pos.xz, vec2(0.085, 0.062)) - uTime * 2.15;
+            float gust = 0.55 + 0.45 * sin(gustPhase) + 0.22 * sin(gustPhase * 1.73 + 1.4);
+            float localPhase = uTime * 3.8 + swayInfo.x * 0.45 + swayInfo.y * 0.37 + swayInfo.z * 1.9;
+            float flutter = sin(localPhase) * 0.14 * h;
+            vec2 swayXZ = windDir * (0.48 * gust * bend)
+                        + vec2(-windDir.y, windDir.x) * (flutter * 0.65 + sin(localPhase * 0.7) * 0.10 * bend);
+            pos.x += swayXZ.x;
+            pos.z += swayXZ.y;
+            pos.y -= length(swayXZ) * 0.24 * h;
+            norm = safeNorm(norm + vec3(swayXZ.x * 0.35, 0.0, swayXZ.y * 0.35));
+        } else if (param.x > 4.5 || (param.x > 2.5 && param.x < 3.5)) {
             float h = clamp(param.y, 0.0, 1.0);
             float phase = uTime * 1.10 + swayInfo.x * 0.11 + swayInfo.y * 0.09;
             float hCurve = h * sqrt(h);

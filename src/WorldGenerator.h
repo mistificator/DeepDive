@@ -10,7 +10,7 @@ struct EnvVertex {
     QVector3D pos;
     QVector3D normal;
     QVector3D color;
-    QVector2D param; // x: 0=rock/sand, 1=shipwood, 2=coral/grass/sponge, 3=kelp, 4=abyssalGlow, 5=kelpVesicle; y: sway/heightFactor
+    QVector2D param; // x: 0=rock/sand, 1=shipwood, 2=coral/grass/sponge, 3=kelp, 4=abyssalGlow, 5=kelpVesicle, 6=cliffGrass; y: sway/heightFactor
 };
 
 struct FaunaVertex {
@@ -32,11 +32,12 @@ enum PropArchetype : int {
     PROP_CLIFF_CRAG    = 1, // Выступающий скальный блок (встраивается прямо в крутые стены каньона и утёсов)
     PROP_KELP_COLUMN   = 2, // Пышная колонна ламинарии (спираль широких изогнутых листьев + светящиеся пузырьки)
     PROP_BARREL_SPONGE = 3, // Толстостенная полая бочкообразная / трубчатая губка с тёмным нутром
-    PROP_GROUND_CARPET = 4, // Плотный ковёр-куст придонной травы и водорослей (24 лезвия в кластере)
+    PROP_GROUND_CARPET = 4, // Плотный ковёр-куст придонной травы и водорослей (26 лезвий в кластере)
     PROP_CORAL_BUSH    = 5, // Пышный многоярусный ветвистый коралл (Staghorn / Acropora)
     PROP_TABLE_FAN     = 6, // Многоярусный пластинчатый коралл с волнистой кромкой / горгонария
     PROP_ANEMONE_PEN   = 7, // Кустистые водоросли / солнечная розетка плато / морской анемон
-    PROP_ARCHETYPE_COUNT = 8
+    PROP_CLIFF_GRASS   = 8, // Колышущаяся на ветру прибрежная трава на надводных скалах и кекурах
+    PROP_ARCHETYPE_COUNT = 9
 };
 
 // Компактный инстанс пропа окружения для GPU (48 байт)

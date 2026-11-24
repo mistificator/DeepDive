@@ -16,6 +16,13 @@ inline float samplePlateauIslandMask(float wx, float wz, uint32_t seed) {
     return ProcMath::smoothstep(0.02f, 0.30f, n1 * 0.78f + n2 * 0.22f);
 }
 
+// Маска естественных лужаек и карманов травы на надводных скалах и верхушках кекуров
+inline float sampleCliffGrassPatchMask(float wx, float wz, uint32_t seed) {
+    float n1 = ProcMath::fbm(wx * 0.024f - 4.7f, 0.6f, wz * 0.024f + 2.3f, 3, seed + 3701u);
+    float n2 = ProcMath::fbm(wx * 0.068f + 1.9f, 1.3f, wz * 0.068f - 5.1f, 2, seed + 3719u);
+    return ProcMath::smoothstep(-0.04f, 0.32f, n1 * 0.72f + n2 * 0.28f);
+}
+
 // Согласованная с InstPropVert ориентация: направляет локальную ось +Y вдоль единичного вектора dir
 inline void alignUpAxisToDir(const QVector3D& dir, float& outYaw, float& outPitch) {
     QVector3D d = dir.normalized();
@@ -232,7 +239,7 @@ void buildCliffCragPrototype(std::vector<EnvVertex>& verts, std::vector<uint32_t
 
             float crag = ProcMath::ridgedFbm(dir.x() * 2.4f + 3.1f, dir.y() * 3.1f, dir.z() * 2.3f, 3, cragSeed);
             float strata = std::sin(dir.y() * 12.5f + crag * 2.6f) * 0.085f
-                         + std::sin(dir.y() * 25.0f - dir.x() * 2.0f) * 0.030f;
+                           + std::sin(dir.y() * 25.0f - dir.x() * 2.0f) * 0.030f;
             float crack = ProcMath::voronoiCracks2D(dir.x() * 3.2f + dir.y(), dir.z() * 3.2f - dir.y(), cragSeed + 127u);
             float crackMask = ProcMath::smoothstep(0.03f, 0.22f, crack);
 
@@ -394,9 +401,9 @@ void buildKelpColumnPrototype(std::vector<EnvVertex>& verts, std::vector<uint32_
                 uint32_t r0 = vb + s * 3;
                 uint32_t r1 = r0 + 3;
                 inds.insert(inds.end(), {
-                    r0 + 0, r0 + 1, r1 + 0,  r0 + 1, r1 + 1, r1 + 0,
-                    r0 + 1, r0 + 2, r1 + 1,  r0 + 2, r1 + 2, r1 + 1
-                });
+                                            r0 + 0, r0 + 1, r1 + 0,  r0 + 1, r1 + 1, r1 + 0,
+                                            r0 + 1, r0 + 2, r1 + 1,  r0 + 2, r1 + 2, r1 + 1
+                                        });
             }
         } else {
             uint32_t vb = static_cast<uint32_t>(verts.size());
@@ -685,9 +692,9 @@ void buildTableFanPrototype(std::vector<EnvVertex>& verts, std::vector<uint32_t>
             inds.insert(inds.end(), {topC, topRim + s + 1, topRim + s});
             inds.insert(inds.end(), {botC, botRim + s,     botRim + s + 1});
             inds.insert(inds.end(), {
-                topRim + s,     topRim + s + 1, botRim + s,
-                topRim + s + 1, botRim + s + 1, botRim + s
-            });
+                                        topRim + s,     topRim + s + 1, botRim + s,
+                                        topRim + s + 1, botRim + s + 1, botRim + s
+                                    });
         }
     }
 }
@@ -729,6 +736,64 @@ void buildAnemoneBushPrototype(std::vector<EnvVertex>& verts, std::vector<uint32
             QVector3D col = ProcMath::mix(baseCol, tipCol, t);
             verts.push_back({p - side * w, norm, col, QVector2D(2.0f, t * 0.80f)});
             verts.push_back({p + side * w, norm, col, QVector2D(2.0f, t * 0.80f)});
+        }
+        for (int s = 0; s < segs; ++s) {
+            uint32_t i0 = vb + s * 2;
+            inds.insert(inds.end(), {i0, i0 + 1, i0 + 2, i0 + 1, i0 + 3, i0 + 2});
+        }
+    }
+}
+
+// ============================================================================
+// ПРОТОТИП 8: ПРИБРЕЖНАЯ НАДВОДНАЯ ТРАВА НА СКАЛАХ (PROP_CLIFF_GRASS, param.x = 6.0)
+// ============================================================================
+
+void buildCliffGrassPrototype(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds, bool highLod) {
+    const int blades = highLod ? 28 : 10;
+    const int segs   = highLod ? 4  : 2;
+
+    const QVector3D rootCol(0.14f, 0.30f, 0.10f);
+    const QVector3D midCol(0.28f, 0.56f, 0.16f);
+    const QVector3D tipCol(0.62f, 0.70f, 0.24f);
+    const QVector3D dryTipCol(0.74f, 0.68f, 0.30f);
+
+    for (int b = 0; b < blades; ++b) {
+        float h1 = ProcMath::hash3(b, 1, 17, 9103u);
+        float h2 = ProcMath::hash3(b, 2, 23, 9103u);
+        float h3 = ProcMath::hash3(b, 3, 29, 9103u);
+        float h4 = ProcMath::hash3(b, 4, 31, 9103u);
+
+        float posAng = (TWO_PI * static_cast<float>(b)) / static_cast<float>(blades) + (h1 - 0.5f) * 0.65f;
+        float posRad = std::sqrt((static_cast<float>(b) + 0.45f) / static_cast<float>(blades)) * 2.25f;
+        QVector3D root(std::cos(posAng) * posRad, -0.32f, std::sin(posAng) * posRad);
+
+        // Внешние травинки слегка расходятся веером, внутренние тянутся выше
+        float bladeAng = posAng + (h2 - 0.5f) * 1.15f;
+        bool tallPlume = (b % 4 == 0);
+        float height = tallPlume ? (1.45f + h3 * 0.85f) : (0.88f + h3 * 0.72f);
+        float width  = (highLod ? 0.125f : 0.25f) * (tallPlume ? 1.12f : 0.96f);
+        float lean   = (tallPlume ? 0.78f : 0.48f) + h4 * 0.42f;
+
+        QVector3D dir(std::cos(bladeAng), 0.0f, std::sin(bladeAng));
+        QVector3D side(-dir.z(), 0.0f, dir.x());
+        QVector3D endTipCol = (h4 > 0.68f) ? dryTipCol : tipCol;
+
+        uint32_t vb = static_cast<uint32_t>(verts.size());
+        for (int s = 0; s <= segs; ++s) {
+            float t = static_cast<float>(s) / static_cast<float>(segs);
+            float w = width * (1.0f - t * 0.92f);
+            float archY = height * (t * (1.22f - 0.28f * t));
+            float archR = lean * (t * t);
+
+            QVector3D p = root + dir * archR + QVector3D(0.0f, archY, 0.0f);
+            QVector3D col = (t < 0.52f)
+                                ? ProcMath::mix(rootCol, midCol, t / 0.52f)
+                                : ProcMath::mix(midCol, endTipCol, (t - 0.52f) / 0.48f);
+            col *= (0.86f + h1 * 0.26f);
+
+            QVector3D norm = (QVector3D(0.0f, 0.82f - t * 0.25f, 0.0f) + dir * (0.35f + t * 0.45f)).normalized();
+            verts.push_back({p - side * w, norm, col, QVector2D(6.0f, t)});
+            verts.push_back({p + side * w, norm, col, QVector2D(6.0f, t)});
         }
         for (int s = 0; s < segs; ++s) {
             uint32_t i0 = vb + s * 2;
@@ -861,7 +926,7 @@ void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
             wx + (outX * normalPush + tanX * tanPush) * maxPush * steep,
             wy + strataLedge * 0.20f * steep,
             wz + (outZ * normalPush + tanZ * tanPush) * maxPush * steep
-        );
+            );
     };
 
     auto evalTerrainColor = [&](float wx, float wy, float wz, const QVector3D& norm) -> QVector3D {
@@ -888,7 +953,7 @@ void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
 
         if (wy > 1.5f && wy < 26.5f && norm.y() > 0.56f && wallF < 0.78f) {
             float shallowMask = ProcMath::smoothstep(1.5f, 7.5f, wy)
-                              * (1.0f - ProcMath::smoothstep(24.5f, 27.0f, wy));
+            * (1.0f - ProcMath::smoothstep(24.5f, 27.0f, wy));
             float flatMask    = ProcMath::smoothstep(0.56f, 0.78f, norm.y());
             float islandMask  = samplePlateauIslandMask(wx, wz, seed);
             float mossBlend   = shallowMask * flatMask * islandMask;
@@ -1041,9 +1106,9 @@ void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
 
                         float wy = getH2(ix, iz);
                         float maxEdgeSlope = std::max({
-                            std::abs(wy - getH2(ix - 1, iz)), std::abs(wy - getH2(ix + 1, iz)),
-                            std::abs(wy - getH2(ix, iz - 1)), std::abs(wy - getH2(ix, iz + 1))
-                        }) / CELL_SZ;
+                                                 std::abs(wy - getH2(ix - 1, iz)), std::abs(wy - getH2(ix + 1, iz)),
+                                                 std::abs(wy - getH2(ix, iz - 1)), std::abs(wy - getH2(ix, iz + 1))
+                                             }) / CELL_SZ;
                         float localFlatness = 1.0f / std::sqrt(1.0f + maxEdgeSlope * maxEdgeSlope);
                         float steepness = ProcMath::clamp(1.0f - localFlatness, 0.0f, 1.0f);
 
@@ -1152,7 +1217,7 @@ void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
                             getGrad(ix, iz, gx0, gz0);         getGrad(ix + 1, iz, gx1, gz1);
                             getGrad(ix, iz + 1, gx2, gz2);     getGrad(ix + 1, iz + 1, gx3, gz3);
                             float stAvg = 0.25f * (tmp.verts[v00].param.y() + tmp.verts[v10].param.y()
-                                                 + tmp.verts[v01].param.y() + tmp.verts[v11].param.y());
+                                                   + tmp.verts[v01].param.y() + tmp.verts[v11].param.y());
                             uint32_t cMid = pushMidVertex(wx, wy, wz,
                                                           0.25f * (gx0 + gx1 + gx2 + gx3),
                                                           0.25f * (gz0 + gz1 + gz2 + gz3), stAvg);
@@ -1196,7 +1261,7 @@ void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
                                     getGrad(ix, iz, gx0, gz0);         getGrad(ix + 1, iz, gx1, gz1);
                                     getGrad(ix, iz + 1, gx2, gz2);     getGrad(ix + 1, iz + 1, gx3, gz3);
                                     float stAvg = 0.25f * (tmp.verts[v00].param.y() + tmp.verts[v10].param.y()
-                                                         + tmp.verts[v01].param.y() + tmp.verts[v11].param.y());
+                                                           + tmp.verts[v01].param.y() + tmp.verts[v11].param.y());
                                     uint32_t cMid = pushMidVertex(wx, wy, wz,
                                                                   0.25f * (gx0 + gx1 + gx2 + gx3),
                                                                   0.25f * (gz0 + gz1 + gz2 + gz3), stAvg);
@@ -1443,10 +1508,17 @@ void WorldGenerator::generatePropPrototypes(WorldData& data) {
     buildAnemoneBushPrototype(data.propPrototypes[PROP_ANEMONE_PEN].lod1Verts,
                               data.propPrototypes[PROP_ANEMONE_PEN].lod1Inds, false);
     data.propPrototypes[PROP_ANEMONE_PEN].baseRadius = 1.90f;
+
+    // 8: Колышущаяся на ветру прибрежная трава на надводных скалах и кекурах
+    buildCliffGrassPrototype(data.propPrototypes[PROP_CLIFF_GRASS].lod0Verts,
+                             data.propPrototypes[PROP_CLIFF_GRASS].lod0Inds, true);
+    buildCliffGrassPrototype(data.propPrototypes[PROP_CLIFF_GRASS].lod1Verts,
+                             data.propPrototypes[PROP_CLIFF_GRASS].lod1Inds, false);
+    data.propPrototypes[PROP_CLIFF_GRASS].baseRadius = 2.65f;
 }
 
 // ============================================================================
-// ПЛОТНОЕ ЭКОЛОГИЧЕСКОЕ ЗАСЕЛЕНИЕ ЧАНКОВ (СКАЛЫ, ЛАМИНАРИЯ, КОВЁР, ГУБКИ, КОРАЛЛЫ)
+// ПЛОТНОЕ ЭКОЛОГИЧЕСКОЕ ЗАСЕЛЕНИЕ ЧАНКОВ (СКАЛЫ, ЛАМИНАРИЯ, КОВЁР, ГУБКИ, КОРАЛЛЫ, НАДВОДНАЯ ТРАВА)
 // ============================================================================
 
 void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
@@ -1454,6 +1526,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
     constexpr int TOTAL_CHUNKS = C * C;
     constexpr float CHUNK_SZ = WorldData::CHUNK_SIZE;
     constexpr float HALF_W = ProcMath::WORLD_HALF_SIZE;
+    constexpr float MAX_UNDERWATER_FLORA_TOP_Y = ProcMath::WATER_SURFACE_Y - 1.65f;
     const auto& pits = ProcMath::getAbyssalPits(seed);
 
     struct ChunkPropTemp {
@@ -1560,11 +1633,11 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
 
                             QVector3D norm = data.collision.sampleNormal(wx, wz);
                             float hAvg = 0.25f * (
-                                data.collision.sampleHeight(wx - 2.6f, wz) +
-                                data.collision.sampleHeight(wx + 2.6f, wz) +
-                                data.collision.sampleHeight(wx, wz - 2.6f) +
-                                data.collision.sampleHeight(wx, wz + 2.6f)
-                            );
+                                             data.collision.sampleHeight(wx - 2.6f, wz) +
+                                             data.collision.sampleHeight(wx + 2.6f, wz) +
+                                             data.collision.sampleHeight(wx, wz - 2.6f) +
+                                             data.collision.sampleHeight(wx, wz + 2.6f)
+                                             );
                             float lipCurv = wy - hAvg;
 
                             bool isSteepWall = (norm.y() < 0.68f);
@@ -1598,7 +1671,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                             float roll = (hr - 0.5f) * 0.65f;
 
                             QVector3D pos = QVector3D(wx, wy - (isCliffLip ? 0.32f * scaleY : 0.0f), wz)
-                                          - norm * (scaleXZ * (isCliffLip ? 0.46f : 0.38f));
+                                            - norm * (scaleXZ * (isCliffLip ? 0.46f : 0.38f));
 
                             PropGpuInstance inst;
                             inst.posScaleXZ = QVector4D(pos.x(), pos.y(), pos.z(), scaleXZ);
@@ -1649,7 +1722,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                             QVector3D n = data.collision.sampleNormal(wx, wz);
                             if (n.y() < 0.56f) continue;
 
-                            float maxH = std::min(25.0f, (ProcMath::WATER_SURFACE_Y - 2.2f) - wy);
+                            float maxH = std::min(25.0f, (ProcMath::WATER_SURFACE_Y - 2.4f) - wy);
                             if (maxH < 7.5f) continue;
                             float height = 8.5f + kh3 * (maxH - 8.5f);
 
@@ -1684,7 +1757,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                         if (ProcMath::sampleBasinWallFactor(wx, wz, seed) > 0.62f) continue;
 
                         float wy = data.collision.sampleHeight(wx, wz);
-                        if (wy < -33.0f || wy > 23.5f) continue;
+                        if (wy < -33.0f || wy > 23.2f) continue;
 
                         QVector3D norm = data.collision.sampleNormal(wx, wz);
                         if (norm.y() < 0.64f) continue;
@@ -1695,6 +1768,8 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
 
                         float scaleXZ = 1.05f + hs * 0.85f;
                         float scaleY  = 0.72f + hr * 0.68f;
+                        if (wy + scaleY * 1.80f > MAX_UNDERWATER_FLORA_TOP_Y) continue;
+
                         QVector3D tint(0.84f + hs * 0.30f, 0.88f + hr * 0.24f, 0.84f + hx * 0.28f);
 
                         PropGpuInstance inst;
@@ -1721,23 +1796,26 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                         if (ProcMath::sampleBasinWallFactor(wx, wz, seed) > 0.64f) continue;
 
                         float wy = data.collision.sampleHeight(wx, wz);
-                        if (wy < -32.0f || wy > 23.0f) continue;
+                        if (wy < -32.0f || wy > 22.8f) continue;
 
                         QVector3D norm = data.collision.sampleNormal(wx, wz);
                         if (norm.y() < 0.50f) continue;
 
                         if (hk < 0.56f) {
+                            float sc = 0.75f + hs * 0.88f;
+                            float scY = sc * (0.85f + hk * 0.35f);
+                            if (wy + scY * 2.25f > MAX_UNDERWATER_FLORA_TOP_Y) continue;
+
                             QVector3D tint = (hc < 0.30f) ? QVector3D(0.98f, 0.42f, 0.58f)
                                              : (hc < 0.56f) ? QVector3D(0.98f, 0.72f, 0.28f)
                                              : (hc < 0.80f) ? QVector3D(0.76f, 0.40f, 0.96f)
                                                             : QVector3D(0.96f, 0.30f, 0.34f);
                             float yaw = 0.0f, pitch = 0.0f;
                             alignUpAxisToDir((norm * 0.55f + QVector3D(0.0f, 0.45f, 0.0f)).normalized(), yaw, pitch);
-                            float sc = 0.75f + hs * 0.88f;
 
                             PropGpuInstance inst;
                             inst.posScaleXZ = QVector4D(wx, wy - 0.18f, wz, sc);
-                            inst.rotScaleY  = QVector4D(yaw, pitch, 0.0f, sc * (0.85f + hk * 0.35f));
+                            inst.rotScaleY  = QVector4D(yaw, pitch, 0.0f, scY);
                             inst.tintFlags  = QVector4D(tint.x(), tint.y(), tint.z(), 0.0f);
                             chunk.propInstances[PROP_CORAL_BUSH].push_back(inst);
                         } else if (norm.y() >= 0.62f) {
@@ -1750,6 +1828,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                             float hU = data.collision.sampleHeight(wx, wz + footR);
                             float minFootY = std::min({wy, hL, hR, hD, hU});
                             if ((wy - minFootY) > 0.68f) continue;
+                            if (minFootY + sc * 1.45f > MAX_UNDERWATER_FLORA_TOP_Y) continue;
 
                             QVector3D tint = (hc < 0.35f) ? QVector3D(0.92f, 0.54f, 0.34f)
                                              : (hc < 0.70f) ? QVector3D(0.78f, 0.44f, 0.88f)
@@ -1791,7 +1870,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                             continue;
                         }
 
-                        if (wy > 24.0f) continue;
+                        if (wy > 22.8f) continue;
 
                         QVector3D cNorm = data.collision.sampleNormal(wx, wz);
                         if (cNorm.y() < 0.68f) continue;
@@ -1839,9 +1918,10 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                             float sx = wx + std::cos(ang) * offR;
                             float sz = wz + std::sin(ang) * offR;
                             float sy = data.collision.sampleHeight(sx, sz);
-                            if (sy > ProcMath::WATER_SURFACE_Y - 1.5f) continue;
 
                             float scY  = scYs[k];
+                            if (sy + scY * 1.50f > MAX_UNDERWATER_FLORA_TOP_Y) continue;
+
                             float scXZ = ProcMath::clamp(scY * (0.72f + kh2 * 0.26f), 0.42f, 1.32f);
 
                             float yaw = 0.0f, pitch = 0.0f;
@@ -1878,11 +1958,13 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                         QVector3D norm = data.collision.sampleNormal(wx, wz);
                         if (norm.y() < 0.58f) continue;
 
+                        float scXZ = 0.75f + hs * 0.85f;
+                        float scY  = 0.75f + hc * 0.85f;
+                        if (wy + scY * 1.95f > MAX_UNDERWATER_FLORA_TOP_Y) continue;
+
                         QVector3D tint = (hc < 0.42f) ? QVector3D(0.32f, 0.86f, 0.44f)
                                          : (hc < 0.72f) ? QVector3D(0.84f, 0.72f, 0.24f)
                                                         : QVector3D(0.92f, 0.42f, 0.76f);
-                        float scXZ = 0.75f + hs * 0.85f;
-                        float scY  = 0.75f + hc * 0.85f;
 
                         PropGpuInstance inst;
                         inst.posScaleXZ = QVector4D(wx, wy - 0.16f, wz, scXZ);
@@ -1902,7 +1984,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                             if (ProcMath::sampleBasinWallFactor(cxIsl, czIsl, seed) > 0.72f) continue;
 
                             float cyIsl = data.collision.sampleHeight(cxIsl, czIsl);
-                            if (cyIsl < 2.0f || cyIsl > 26.2f) continue;
+                            if (cyIsl < 2.0f || cyIsl > 25.4f) continue;
 
                             QVector3D cNorm = data.collision.sampleNormal(cxIsl, czIsl);
                             if (cNorm.y() < 0.56f) continue;
@@ -1920,14 +2002,14 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                                 float wx = cxIsl + std::cos(ang) * rad;
                                 float wz = czIsl + std::sin(ang) * rad;
                                 float wy = data.collision.sampleHeight(wx, wz);
-                                if (wy < 1.0f || wy > ProcMath::WATER_SURFACE_Y - 1.15f) continue;
+                                if (wy < 1.0f || wy > MAX_UNDERWATER_FLORA_TOP_Y - 0.55f) continue;
 
                                 QVector3D n = data.collision.sampleNormal(wx, wz);
                                 if (n.y() < 0.50f) continue;
 
-                                float clearance = (ProcMath::WATER_SURFACE_Y - 0.90f) - wy;
+                                float clearance = MAX_UNDERWATER_FLORA_TOP_Y - wy;
                                 float scXZ = (0.78f + th3 * 0.68f) * (1.12f - 0.30f * (rad / islandR));
-                                float scY  = std::min(scXZ * 1.05f, clearance / 1.65f);
+                                float scY  = std::min(scXZ * 1.05f, clearance / 1.85f);
                                 if (scY < 0.25f) continue;
 
                                 QVector3D lushTint = (th3 < 0.55f)
@@ -1940,6 +2022,82 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                                 inst.tintFlags  = QVector4D(lushTint.x(), lushTint.y(), lushTint.z(), 0.0f);
                                 chunk.propInstances[PROP_ANEMONE_PEN].push_back(inst);
                             }
+                        }
+                    }
+                }
+
+                // ------------------------------------------------------------
+                // 8. Надводная колышущаяся трава на уступах кекуров и скалах кальдеры (PROP_CLIFF_GRASS)
+                // ------------------------------------------------------------
+                // chunk.maxBounds.y() хранит maxY + 32.0f, поэтому порог +33.5f быстро отсекает чисто подводные чанки
+                if (chunk.maxBounds.y() > ProcMath::WATER_SURFACE_Y + 33.5f) {
+                    for (int p = 0; p < 28; ++p) {
+                        float hx = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 1, seed + 3907u);
+                        float hz = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 2, seed + 3907u);
+                        float hr = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 3, seed + 3907u);
+                        float hc = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 4, seed + 3907u);
+
+                        float cxP = originX + 4.0f + hx * (CHUNK_SZ - 8.0f);
+                        float czP = originZ + 4.0f + hz * (CHUNK_SZ - 8.0f);
+                        float cyP = data.collision.sampleHeight(cxP, czP);
+                        if (cyP < ProcMath::WATER_SURFACE_Y + 2.0f || cyP > 74.0f) continue;
+
+                        QVector3D cNorm = data.collision.sampleNormal(cxP, czP);
+                        if (cNorm.y() < 0.58f) continue;
+
+                        float patchMask = sampleCliffGrassPatchMask(cxP, czP, seed);
+                        if (patchMask < 0.22f) continue;
+
+                        int tufts = 4 + static_cast<int>(hr * 3.9f);
+                        float patchR = 3.2f + hr * 3.8f;
+
+                        for (int t = 0; t < tufts; ++t) {
+                            float th1 = ProcMath::hash3(ci, p * 17 + t, 1, seed + 3923u);
+                            float th2 = ProcMath::hash3(ci, p * 17 + t, 2, seed + 3923u);
+                            float th3 = ProcMath::hash3(ci, p * 17 + t, 3, seed + 3923u);
+                            float th4 = ProcMath::hash3(ci, p * 17 + t, 4, seed + 3923u);
+
+                            float ang = th1 * TWO_PI;
+                            float rad = std::sqrt(th2) * patchR;
+                            float wx = cxP + std::cos(ang) * rad;
+                            float wz = czP + std::sin(ang) * rad;
+                            float wy = data.collision.sampleHeight(wx, wz);
+                            if (wy < ProcMath::WATER_SURFACE_Y + 1.85f || wy > 74.0f) continue;
+
+                            QVector3D norm = data.collision.sampleNormal(wx, wz);
+                            if (norm.y() < 0.54f) continue;
+
+                            // Проверяем, чтобы куст не висел над самым краем отвесного обрыва
+                            float footR = 1.15f;
+                            float minFootY = std::min({
+                                wy,
+                                data.collision.sampleHeight(wx - footR, wz),
+                                data.collision.sampleHeight(wx + footR, wz),
+                                data.collision.sampleHeight(wx, wz - footR),
+                                data.collision.sampleHeight(wx, wz + footR)
+                            });
+                            if ((wy - minFootY) > 1.25f) continue;
+
+                            float edgeAtten = 1.08f - 0.30f * (rad / patchR);
+                            float scXZ = (0.88f + th3 * 0.78f) * edgeAtten;
+                            float scY  = (0.84f + th4 * 0.72f) * (0.78f + 0.42f * patchMask);
+
+                            float yaw = 0.0f, pitch = 0.0f;
+                            QVector3D tiltUp = (norm * 0.42f + QVector3D(0.0f, 0.58f, 0.0f)).normalized();
+                            alignUpAxisToDir(tiltUp, yaw, pitch);
+
+                            // Естественная палитра прибрежных скал: от сочной зелени до подсушенной солнцем оливы
+                            QVector3D tint = (hc < 0.52f)
+                                                 ? QVector3D(0.86f + th3 * 0.24f, 0.96f + th4 * 0.18f, 0.78f + th1 * 0.18f)
+                                                 : QVector3D(1.04f + th3 * 0.18f, 0.96f + th4 * 0.14f, 0.72f + th1 * 0.16f);
+
+                            float sink = 0.16f + (1.0f - norm.y()) * 0.55f;
+
+                            PropGpuInstance inst;
+                            inst.posScaleXZ = QVector4D(wx, wy - sink, wz, scXZ);
+                            inst.rotScaleY  = QVector4D(yaw + th1 * TWO_PI, pitch, 0.0f, scY);
+                            inst.tintFlags  = QVector4D(tint.x(), tint.y(), tint.z(), 0.0f);
+                            chunk.propInstances[PROP_CLIFF_GRASS].push_back(inst);
                         }
                     }
                 }

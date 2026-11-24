@@ -59,12 +59,13 @@ inline bool isTessellatedPropArchetype(int archetype) {
     case PROP_ANEMONE_PEN:
         return true;
     case PROP_GROUND_CARPET:
+    case PROP_CLIFF_GRASS:
     default:
         return false;
     }
 }
 
-// LOD transition thresholds for each of the 8 instanced prop archetypes (LOD0 -> LOD1 -> Cull)
+// LOD transition thresholds for each of the 9 instanced prop archetypes (LOD0 -> LOD1 -> Cull)
 struct PropLodConfig {
     float lod0Dist;
     float maxDist;
@@ -90,7 +91,9 @@ constexpr std::array<PropLodConfig, PROP_ARCHETYPE_COUNT> PROP_LOD_CFG = {{
     // PROP_TABLE_FAN
     {140.0f, 265.0f,  8.0f, true,   75.0f, 115.0f},
     // PROP_ANEMONE_PEN
-    {120.0f, 230.0f,  8.0f, false,   0.0f,   0.0f}
+    {120.0f, 230.0f,  8.0f, false,   0.0f,   0.0f},
+    // PROP_CLIFF_GRASS
+    {185.0f, 380.0f, 12.0f, false,   0.0f,   0.0f}
 }};
 } // namespace
 
