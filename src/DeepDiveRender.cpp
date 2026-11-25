@@ -65,6 +65,107 @@ inline bool isTessellatedPropArchetype(int archetype) {
     }
 }
 
+inline float cloudRemap(float v, float lo1, float hi1, float lo2, float hi2) {
+    return lo2 + (v - lo1) * (hi2 - lo2) / std::max(hi1 - lo1, 1e-5f);
+}
+
+// 3D tileable gradient Perlin noise (C2 quintic fade, power-of-two period)
+inline float tileablePerlin3D(float u, float v, float w, int period, uint32_t seed) {
+    const float x = u * static_cast<float>(period);
+    const float y = v * static_cast<float>(period);
+    const float z = w * static_cast<float>(period);
+    const int ix = static_cast<int>(std::floor(x));
+    const int iy = static_cast<int>(std::floor(y));
+    const int iz = static_cast<int>(std::floor(z));
+    const float fx = x - std::floor(x);
+    const float fy = y - std::floor(y);
+    const float fz = z - std::floor(z);
+
+    const float ux = fx * fx * fx * (fx * (fx * 6.0f - 15.0f) + 10.0f);
+    const float uy = fy * fy * fy * (fy * (fy * 6.0f - 15.0f) + 10.0f);
+    const float uz = fz * fz * fz * (fz * (fz * 6.0f - 15.0f) + 10.0f);
+
+    const int mask = period - 1;
+    auto gradDot = [&](int dx, int dy, int dz) -> float {
+        const uint32_t h = ProcMath::hashInt(
+                               static_cast<uint32_t>((ix + dx) & mask),
+                               static_cast<uint32_t>((iy + dy) & mask),
+                               static_cast<uint32_t>((iz + dz) & mask), seed) & 15u;
+        const float gx = fx - static_cast<float>(dx);
+        const float gy = fy - static_cast<float>(dy);
+        const float gz = fz - static_cast<float>(dz);
+        const float a = (h < 8u) ? gx : gy;
+        const float b = (h < 4u) ? gy : ((h == 12u || h == 14u) ? gx : gz);
+        return ((h & 1u) ? -a : a) + ((h & 2u) ? -b : b);
+    };
+
+    const float nx00 = ProcMath::mix(gradDot(0, 0, 0), gradDot(1, 0, 0), ux);
+    const float nx10 = ProcMath::mix(gradDot(0, 1, 0), gradDot(1, 1, 0), ux);
+    const float nx01 = ProcMath::mix(gradDot(0, 0, 1), gradDot(1, 0, 1), ux);
+    const float nx11 = ProcMath::mix(gradDot(0, 1, 1), gradDot(1, 1, 1), ux);
+
+    const float nxy0 = ProcMath::mix(nx00, nx10, uy);
+    const float nxy1 = ProcMath::mix(nx01, nx11, uy);
+    return ProcMath::clamp(ProcMath::mix(nxy0, nxy1, uz) * 0.72f + 0.5f, 0.0f, 1.0f);
+}
+
+// 2D tileable inverted Worley noise (1 - F1): distinct rounded cumulus clusters
+inline float tileableWorley2D(float u, float v, int period, uint32_t seed) {
+    const float x = u * static_cast<float>(period);
+    const float y = v * static_cast<float>(period);
+    const int ix = static_cast<int>(std::floor(x));
+    const int iy = static_cast<int>(std::floor(y));
+    const float fx = x - std::floor(x);
+    const float fy = y - std::floor(y);
+
+    const int mask = period - 1;
+    float minD2 = 10.0f;
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        const int cy = (iy + dy) & mask;
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int cx = (ix + dx) & mask;
+            const float rx = static_cast<float>(dx) + ProcMath::hash3(cx, cy, 3, seed) - fx;
+            const float ry = static_cast<float>(dy) + ProcMath::hash3(cx, cy, 7, seed + 29u) - fy;
+            const float d2 = rx * rx + ry * ry;
+            if (d2 < minD2) minD2 = d2;
+        }
+    }
+    return ProcMath::clamp(1.0f - std::sqrt(minD2), 0.0f, 1.0f);
+}
+
+// 3D tileable inverted Worley noise (1 - F1): billowing cauliflower lobes
+inline float tileableWorley3D(float u, float v, float w, int period, uint32_t seed) {
+    const float x = u * static_cast<float>(period);
+    const float y = v * static_cast<float>(period);
+    const float z = w * static_cast<float>(period);
+    const int ix = static_cast<int>(std::floor(x));
+    const int iy = static_cast<int>(std::floor(y));
+    const int iz = static_cast<int>(std::floor(z));
+    const float fx = x - std::floor(x);
+    const float fy = y - std::floor(y);
+    const float fz = z - std::floor(z);
+
+    const int mask = period - 1;
+    float minD2 = 10.0f;
+
+    for (int dz = -1; dz <= 1; ++dz) {
+        const int cz = (iz + dz) & mask;
+        for (int dy = -1; dy <= 1; ++dy) {
+            const int cy = (iy + dy) & mask;
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int cx = (ix + dx) & mask;
+                const float rx = static_cast<float>(dx) + ProcMath::hash3(cx, cy, cz, seed)       - fx;
+                const float ry = static_cast<float>(dy) + ProcMath::hash3(cx, cy, cz, seed + 19u) - fy;
+                const float rz = static_cast<float>(dz) + ProcMath::hash3(cx, cy, cz, seed + 43u) - fz;
+                const float d2 = rx * rx + ry * ry + rz * rz;
+                if (d2 < minD2) minD2 = d2;
+            }
+        }
+    }
+    return ProcMath::clamp(1.0f - std::sqrt(minD2), 0.0f, 1.0f);
+}
+
 // LOD transition thresholds for each of the 9 instanced prop archetypes (LOD0 -> LOD1 -> Cull)
 struct PropLodConfig {
     float lod0Dist;
@@ -93,8 +194,7 @@ constexpr std::array<PropLodConfig, PROP_ARCHETYPE_COUNT> PROP_LOD_CFG = {{
     // PROP_ANEMONE_PEN
     {120.0f, 230.0f,  8.0f, false,   0.0f,   0.0f},
     // PROP_CLIFF_GRASS
-    {185.0f, 380.0f, 12.0f, false,   0.0f,   0.0f}
-}};
+    {130.0f, 420.0f, 12.0f, false,   0.0f,   0.0f}}};
 } // namespace
 
 // ============================================================================
@@ -338,6 +438,7 @@ void DeepDiveRender::compilePostProcessShaders() {
 
 void DeepDiveRender::initRenderBuffers(int physW, int physH) {
     createWaterSurfaceMesh();
+    createCloudNoiseTextures();
     resizePostProcessBuffers(physW, physH);
 }
 
@@ -360,6 +461,9 @@ void DeepDiveRender::cleanup() {
     if (m_shadowFBO) { glDeleteFramebuffers(1, &m_shadowFBO); m_shadowFBO = 0; }
     if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex); m_shadowDepthTex = 0; }
     if (m_rockTex) { glDeleteTextures(1, &m_rockTex); m_rockTex = 0; }
+    if (m_cloudShapeTex)   { glDeleteTextures(1, &m_cloudShapeTex);   m_cloudShapeTex = 0; }
+    if (m_cloudDetailTex)  { glDeleteTextures(1, &m_cloudDetailTex);  m_cloudDetailTex = 0; }
+    if (m_cloudWeatherTex) { glDeleteTextures(1, &m_cloudWeatherTex); m_cloudWeatherTex = 0; }
 
     if (m_terrainVAO) { glDeleteVertexArrays(1, &m_terrainVAO); m_terrainVAO = 0; }
     if (m_terrainVBO) { glDeleteBuffers(1, &m_terrainVBO); m_terrainVBO = 0; }
@@ -513,6 +617,177 @@ void DeepDiveRender::createWaterSurfaceMesh() {
     glBindVertexArray(0);
 }
 
+void DeepDiveRender::createCloudNoiseTextures() {
+    const unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
+
+    // 1. Low-frequency 3D Base Shape Texture (64^3 RGBA8):
+    //    R = Perlin-Worley, G/B/A = 3 contrast-boosted octaves of inverted Worley (billowing cumulus lobes)
+    {
+        constexpr int N = 64;
+        std::vector<uint8_t> vol(static_cast<size_t>(N) * N * N * 4);
+        std::vector<std::thread> workers;
+        workers.reserve(numThreads);
+
+        for (unsigned int t = 0; t < numThreads; ++t) {
+            const int zStart = (t * N) / numThreads;
+            const int zEnd   = ((t + 1) * N) / numThreads;
+            workers.emplace_back([&, zStart, zEnd]() {
+                for (int z = zStart; z < zEnd; ++z) {
+                    const float w = (static_cast<float>(z) + 0.5f) / N;
+                    for (int y = 0; y < N; ++y) {
+                        const float v = (static_cast<float>(y) + 0.5f) / N;
+                        for (int x = 0; x < N; ++x) {
+                            const float u = (static_cast<float>(x) + 0.5f) / N;
+
+                            const float pFbm = tileablePerlin3D(u, v, w,  4, 6101u) * 0.55f
+                                               + tileablePerlin3D(u, v, w,  8, 6133u) * 0.30f
+                                               + tileablePerlin3D(u, v, w, 16, 6173u) * 0.15f;
+
+                            // Stretch Worley 3D dynamic range to full [0..1] for bold cauliflower domes
+                            const float w4  = ProcMath::clamp(cloudRemap(tileableWorley3D(u, v, w,  4, 6203u), 0.18f, 0.85f, 0.0f, 1.0f), 0.0f, 1.0f);
+                            const float w8  = ProcMath::clamp(cloudRemap(tileableWorley3D(u, v, w,  8, 6247u), 0.18f, 0.85f, 0.0f, 1.0f), 0.0f, 1.0f);
+                            const float w16 = ProcMath::clamp(cloudRemap(tileableWorley3D(u, v, w, 16, 6287u), 0.18f, 0.85f, 0.0f, 1.0f), 0.0f, 1.0f);
+
+                            const float wFbm = w4 * 0.625f + w8 * 0.25f + w16 * 0.125f;
+                            const float perlinWorley = ProcMath::clamp(
+                                cloudRemap(pFbm, (1.0f - wFbm) * 0.32f, 0.86f, 0.0f, 1.0f), 0.0f, 1.0f);
+
+                            const size_t idx = (static_cast<size_t>(z) * N * N + static_cast<size_t>(y) * N + x) * 4;
+                            vol[idx + 0] = static_cast<uint8_t>(perlinWorley * 255.0f);
+                            vol[idx + 1] = static_cast<uint8_t>(w4  * 255.0f);
+                            vol[idx + 2] = static_cast<uint8_t>(w8  * 255.0f);
+                            vol[idx + 3] = static_cast<uint8_t>(w16 * 255.0f);
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& th : workers) th.join();
+
+        if (m_cloudShapeTex == 0) glGenTextures(1, &m_cloudShapeTex);
+        glBindTexture(GL_TEXTURE_3D, m_cloudShapeTex);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, N, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol.data());
+        glGenerateMipmap(GL_TEXTURE_3D);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+
+    // 2. High-frequency 3D Detail Erosion Texture (32^3 RGBA8):
+    //    R/G/B = 3 crisp octaves of fine inverted Worley noise
+    {
+        constexpr int N = 32;
+        std::vector<uint8_t> vol(static_cast<size_t>(N) * N * N * 4);
+        std::vector<std::thread> workers;
+        workers.reserve(numThreads);
+
+        for (unsigned int t = 0; t < numThreads; ++t) {
+            const int zStart = (t * N) / numThreads;
+            const int zEnd   = ((t + 1) * N) / numThreads;
+            workers.emplace_back([&, zStart, zEnd]() {
+                for (int z = zStart; z < zEnd; ++z) {
+                    const float w = (static_cast<float>(z) + 0.5f) / N;
+                    for (int y = 0; y < N; ++y) {
+                        const float v = (static_cast<float>(y) + 0.5f) / N;
+                        for (int x = 0; x < N; ++x) {
+                            const float u = (static_cast<float>(x) + 0.5f) / N;
+                            const float d4  = ProcMath::clamp(cloudRemap(tileableWorley3D(u, v, w,  4, 6421u), 0.18f, 0.85f, 0.0f, 1.0f), 0.0f, 1.0f);
+                            const float d8  = ProcMath::clamp(cloudRemap(tileableWorley3D(u, v, w,  8, 6469u), 0.18f, 0.85f, 0.0f, 1.0f), 0.0f, 1.0f);
+                            const float d16 = ProcMath::clamp(cloudRemap(tileableWorley3D(u, v, w, 16, 6521u), 0.18f, 0.85f, 0.0f, 1.0f), 0.0f, 1.0f);
+
+                            const size_t idx = (static_cast<size_t>(z) * N * N + static_cast<size_t>(y) * N + x) * 4;
+                            vol[idx + 0] = static_cast<uint8_t>(d4  * 255.0f);
+                            vol[idx + 1] = static_cast<uint8_t>(d8  * 255.0f);
+                            vol[idx + 2] = static_cast<uint8_t>(d16 * 255.0f);
+                            vol[idx + 3] = 255u;
+                        }
+                    }
+                }
+            });
+        }
+        for (auto& th : workers) th.join();
+
+        if (m_cloudDetailTex == 0) glGenTextures(1, &m_cloudDetailTex);
+        glBindTexture(GL_TEXTURE_3D, m_cloudDetailTex);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, N, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, vol.data());
+        glGenerateMipmap(GL_TEXTURE_3D);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+
+    // 3. 2D Tileable Weather Map (256^2 RGBA8):
+    //    R = sparse cumulus coverage (~25% sky), G = tower height (tall cores, tapered rims), B = cirrus, A = density
+    {
+        constexpr int N = 256;
+        std::vector<uint8_t> map(static_cast<size_t>(N) * N * 4);
+        std::vector<std::thread> workers;
+        workers.reserve(numThreads);
+
+        for (unsigned int t = 0; t < numThreads; ++t) {
+            const int yStart = (t * N) / numThreads;
+            const int yEnd   = ((t + 1) * N) / numThreads;
+            workers.emplace_back([&, yStart, yEnd]() {
+                for (int y = yStart; y < yEnd; ++y) {
+                    const float v = (static_cast<float>(y) + 0.5f) / N;
+                    for (int x = 0; x < N; ++x) {
+                        const float u = (static_cast<float>(x) + 0.5f) / N;
+
+                        const float wu = ProcMath::fract(u + (tileablePerlin3D(u, v, 0.1f, 4, 7001u) - 0.5f) * 0.12f + 1.0f);
+                        const float wv = ProcMath::fract(v + (tileablePerlin3D(u, v, 0.7f, 4, 7013u) - 0.5f) * 0.12f + 1.0f);
+
+                        // True 2D Worley islands gated by macro Perlin -> crisp scattered cumulus groups
+                        const float pMacro = tileablePerlin3D(wu, wv, 0.25f, 4, 7103u) * 0.65f
+                                             + tileablePerlin3D(wu, wv, 0.25f, 8, 7127u) * 0.35f;
+                        const float wCell  = tileableWorley2D(wu, wv, 8,  7187u) * 0.68f
+                                            + tileableWorley2D(wu, wv, 16, 7193u) * 0.32f;
+                        const float covRaw = pMacro * 0.44f + wCell * 0.56f;
+                        const float coverage = ProcMath::smoothstep(0.55f, 0.80f, covRaw);
+
+                        // Tall billowing towers at the core of each cloud, lower rounded shoulders at edges
+                        const float typeNoise = tileablePerlin3D(wu, wv, 0.65f, 4, 7211u) * 0.55f
+                                                + tileableWorley2D(wu, wv, 8, 7237u) * 0.45f;
+                        const float cloudType = ProcMath::clamp(coverage * 0.62f + typeNoise * 0.42f, 0.15f, 1.0f);
+
+                        // Faint high-altitude cirrus wisps
+                        const float cu = ProcMath::fract(u + (tileablePerlin3D(u, v, 0.3f, 8, 7307u) - 0.5f) * 0.20f + 1.0f);
+                        const float cv = ProcMath::fract(v + (tileablePerlin3D(u, v, 0.8f, 4, 7321u) - 0.5f) * 0.10f + 1.0f);
+                        const float cirrusRaw = tileablePerlin3D(cu, cv, 0.5f,  8, 7333u) * 0.55f
+                                                + tileablePerlin3D(cu, cv, 0.5f, 16, 7349u) * 0.30f
+                                                + tileablePerlin3D(cu, cv, 0.5f, 32, 7369u) * 0.15f;
+                        const float cirrus = ProcMath::smoothstep(0.66f, 0.88f, cirrusRaw);
+
+                        const float moisture = 0.72f + 0.28f * tileablePerlin3D(wu, wv, 0.9f, 8, 7411u);
+
+                        const size_t idx = (static_cast<size_t>(y) * N + x) * 4;
+                        map[idx + 0] = static_cast<uint8_t>(ProcMath::clamp(coverage,  0.0f, 1.0f) * 255.0f);
+                        map[idx + 1] = static_cast<uint8_t>(ProcMath::clamp(cloudType, 0.0f, 1.0f) * 255.0f);
+                        map[idx + 2] = static_cast<uint8_t>(ProcMath::clamp(cirrus,    0.0f, 1.0f) * 255.0f);
+                        map[idx + 3] = static_cast<uint8_t>(ProcMath::clamp(moisture,  0.0f, 1.0f) * 255.0f);
+                    }
+                }
+            });
+        }
+        for (auto& th : workers) th.join();
+
+        if (m_cloudWeatherTex == 0) glGenTextures(1, &m_cloudWeatherTex);
+        glBindTexture(GL_TEXTURE_2D, m_cloudWeatherTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, N, N, 0, GL_RGBA, GL_UNSIGNED_BYTE, map.data());
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+
+    glBindTexture(GL_TEXTURE_3D, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 std::vector<uint8_t> DeepDiveRender::generateRockTextureData(int size) {
     const int N = size;
     std::vector<float> heightMap(static_cast<size_t>(N) * N);
@@ -546,8 +821,8 @@ std::vector<uint8_t> DeepDiveRender::generateRockTextureData(int size) {
                     fbmVal += 0.09f * ProcMath::tileableNoise2D(u,  v,  128, 505u);
                     fbmVal += 0.06f * ProcMath::tileableNoise2D(u,  v,  256, 606u);
 
-                    float strata = 0.5f + 0.5f * std::sin((wv * 16.0f + fbmVal * 2.4f) * TWO_PI * 0.25f);
-                    strata = ProcMath::smoothstep(0.15f, 0.85f, strata);
+                    const float grain = ProcMath::tileableNoise2D(wu, wv, 12, 653u) * 0.65f
+                                        + ProcMath::tileableNoise2D(u,  v,  48, 677u) * 0.35f;
 
                     const float vor1 = ProcMath::tileableVoronoi2D(wu, wv, 4,  707u);
                     const float vor2 = ProcMath::tileableVoronoi2D(wu, wv, 12, 808u);
@@ -557,7 +832,7 @@ std::vector<uint8_t> DeepDiveRender::generateRockTextureData(int size) {
                     const float crackFine = ProcMath::smoothstep(0.02f,  0.18f, vor3);
 
                     const float cavity = ProcMath::clamp(crackMain * 0.52f + crackMed * 0.30f + crackFine * 0.18f, 0.0f, 1.0f);
-                    const float h = ProcMath::clamp(fbmVal * 0.54f + strata * 0.18f + cavity * 0.28f, 0.0f, 1.0f);
+                    const float h = ProcMath::clamp(fbmVal * 0.56f + grain * 0.16f + cavity * 0.28f, 0.0f, 1.0f);
 
                     const size_t idx = static_cast<size_t>(y) * N + x;
                     heightMap[idx] = h;
@@ -1375,16 +1650,25 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     glBindTexture(GL_TEXTURE_2D, m_rockTex);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, m_shadowDepthTex);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_3D, m_cloudShapeTex);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_3D, m_cloudDetailTex);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D, m_cloudWeatherTex);
 
     glDepthFunc(GL_LEQUAL);
     m_skyShader.bind();
-    m_skyShader.setUniformValue("uRockTex", 0);
+    m_skyShader.setUniformValue("uCloudShapeTex", 4);
+    m_skyShader.setUniformValue("uCloudDetailTex", 5);
+    m_skyShader.setUniformValue("uCloudWeatherTex", 6);
     m_skyShader.setUniformValue("uInvViewProj", invViewProj);
     m_skyShader.setUniformValue("uCamPos", camPos);
     m_skyShader.setUniformValue("uSunDir", visuals.sunDir);
     m_skyShader.setUniformValue("uSunColor", visuals.sunColor);
     m_skyShader.setUniformValue("uWaterColorDeep", visuals.waterDeep);
     m_skyShader.setUniformValue("uWaterColorShallow", visuals.waterShallow);
+    m_skyShader.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
     m_skyShader.setUniformValue("uTime", simTime);
     m_skyShader.setUniformValue("uCamAboveWater", camAboveInt);
     glBindVertexArray(m_skyVAO);
@@ -1551,6 +1835,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     activeWaterShader.bind();
     activeWaterShader.setUniformValue("uRockTex", 0);
     activeWaterShader.setUniformValue("uSceneDepthTex", 1);
+    activeWaterShader.setUniformValue("uCloudWeatherTex", 6);
     activeWaterShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
     activeWaterShader.setUniformValue("uViewProj", viewProj);
     activeWaterShader.setUniformValue("uWaterCenter", waterCenter);

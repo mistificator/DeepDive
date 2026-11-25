@@ -115,6 +115,7 @@ private:
     void queryOpenGLCapabilities(const std::vector<AdapterCapability>& adapters);
     void createShadowMapBuffer();
     void createWaterSurfaceMesh();
+    void createCloudNoiseTextures();
     void resizePostProcessBuffers(int physW, int physH);
     void destroyPostProcessBuffers();
 
@@ -190,6 +191,9 @@ private:
 
     // Textures & static/dynamic geometry buffers
     GLuint m_rockTex = 0;
+    GLuint m_cloudShapeTex = 0;
+    GLuint m_cloudDetailTex = 0;
+    GLuint m_cloudWeatherTex = 0;
     GLuint m_terrainVAO = 0, m_terrainVBO = 0, m_terrainEBO = 0;
     GLuint m_propVAO = 0, m_propVBO = 0, m_propEBO = 0;
 

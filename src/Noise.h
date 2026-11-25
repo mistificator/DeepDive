@@ -9,7 +9,7 @@ namespace ProcMath {
 
 inline constexpr float WORLD_HALF_SIZE      = 800.0f; // Мир 1600 x 1600 м
 inline constexpr float WATER_SURFACE_Y      = 28.0f;  // Уровень водной глади
-inline constexpr float WATER_MAX_WAVE_AMP   = 0.65f;  // Максимальная амплитуда гребня волны
+inline constexpr float WATER_MAX_WAVE_AMP   = 0.85f;  // Максимальная амплитуда гребня волны
 inline constexpr float BASIN_INNER_RADIUS   = 500.0f; // Начало подъема кольцевых утесов
 inline constexpr float BASIN_RIM_RADIUS     = 670.0f; // Гребень замкнутых скал
 inline constexpr float PLAYABLE_HARD_RADIUS = 720.0f; // Страховочный лимит за видимыми утесами
@@ -205,10 +205,10 @@ inline float tileableVoronoi2D(float u, float v, int period, uint32_t seed) {
 
 // Синхронизированное с шейдером воды вертикальное смещение волн (4 направленных гармоники)
 inline float sampleWaterWaveOffset(float x, float z, float t) {
-    const float w1 = std::sin(x *  0.048f + z *  0.032f + t * 1.15f) * 0.26f;
-    const float w2 = std::sin(x * -0.062f + z *  0.054f + t * 1.48f) * 0.18f;
-    const float w3 = std::cos(x *  0.115f - z *  0.095f + t * 2.05f) * 0.11f;
-    const float w4 = std::sin(x *  0.185f + z *  0.165f - t * 2.75f) * 0.06f;
+    const float w1 = std::sin(x *  0.112f + z *  0.068f + t * 2.10f) * 0.36f;
+    const float w2 = std::sin(x *  0.082f + z *  0.165f + t * 2.65f) * 0.24f;
+    const float w3 = std::cos(x *  0.255f - z *  0.035f + t * 3.25f) * 0.14f;
+    const float w4 = std::sin(x * -0.125f + z *  0.370f - t * 4.10f) * 0.07f;
     return w1 + w2 + w3 + w4;
 }
 
@@ -217,13 +217,13 @@ inline float sampleWaterWaveHeight(float x, float z, float t) {
 }
 
 inline QVector3D sampleWaterWaveNormal(float x, float z, float t) {
-    const float c1 = std::cos(x *  0.048f + z *  0.032f + t * 1.15f) * 0.26f;
-    const float c2 = std::cos(x * -0.062f + z *  0.054f + t * 1.48f) * 0.18f;
-    const float s3 = -std::sin(x * 0.115f - z *  0.095f + t * 2.05f) * 0.11f;
-    const float c4 = std::cos(x *  0.185f + z *  0.165f - t * 2.75f) * 0.06f;
+    const float c1 =  std::cos(x *  0.112f + z *  0.068f + t * 2.10f) * 0.36f;
+    const float c2 =  std::cos(x *  0.082f + z *  0.165f + t * 2.65f) * 0.24f;
+    const float s3 = -std::sin(x *  0.255f - z *  0.035f + t * 3.25f) * 0.14f;
+    const float c4 =  std::cos(x * -0.125f + z *  0.370f - t * 4.10f) * 0.07f;
 
-    const float dhdx = c1 * 0.048f + c2 * (-0.062f) + s3 * 0.115f + c4 * 0.185f;
-    const float dhdz = c1 * 0.032f + c2 *   0.054f  + s3 * (-0.095f) + c4 * 0.165f;
+    const float dhdx = c1 *  0.112f + c2 * 0.082f + s3 *  0.255f  + c4 * (-0.125f);
+    const float dhdz = c1 *  0.068f + c2 * 0.165f + s3 * (-0.035f) + c4 *   0.370f;
     return QVector3D(-dhdx, 1.0f, -dhdz).normalized();
 }
 
@@ -375,9 +375,9 @@ inline float sampleTerrainHeight(float x, float z, uint32_t seed) {
                 float peakDome = t * t * (3.0f - 2.0f * t);
                 float shoulder = smoothstep(0.0f, 0.78f, t);
                 float peakShape = mix(peakDome, shoulder, 0.32f);
-                float facet = ridgedFbm(x * 0.034f, 2.0f, z * 0.034f, 2, seed + 887u) * 7.2f * peakDome;
-                float spireLift = sp.height * peakShape + facet;
-                spireLift = mix(spireLift, terraceHeight(spireLift, 6.8f, 0.30f), 0.38f);
+                float cragRidge = ridgedFbm(x * 0.034f, 2.0f, z * 0.034f, 3, seed + 887u) * 9.5f * peakDome;
+                float sideShelf = fbm(x * 0.048f + 3.7f, 0.6f, z * 0.048f - 2.1f, 2, seed + 971u) * 5.2f * peakDome;
+                float spireLift = sp.height * peakShape + cragRidge + sideShelf;
                 interiorHeight += spireLift;
             }
         }
@@ -414,7 +414,7 @@ inline float sampleTerrainHeight(float x, float z, uint32_t seed) {
     float wallFactor = sampleBasinWallFactor(x, z, seed);
     float crags = ridgedFbm(x * 0.024f, 2.4f, z * 0.024f, 3, seed + 919u) * 26.0f
                   + fbm(x * 0.052f, 0.0f, z * 0.052f, 2, seed + 313u) * 6.0f;
-    float cliffHeight = terraceHeight(42.0f + crags, 8.5f, 0.30f);
+    float cliffHeight = 42.0f + crags;
 
     float steepBlend = wallFactor * wallFactor * (3.0f - 2.0f * wallFactor);
     float h = mix(interiorHeight, cliffHeight, steepBlend);

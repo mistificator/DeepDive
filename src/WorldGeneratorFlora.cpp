@@ -18,9 +18,9 @@ inline float samplePlateauIslandMask(float wx, float wz, uint32_t seed) {
 
 // Маска естественных лужаек и карманов травы на надводных скалах и верхушках кекуров
 inline float sampleCliffGrassPatchMask(float wx, float wz, uint32_t seed) {
-    float n1 = ProcMath::fbm(wx * 0.024f - 4.7f, 0.6f, wz * 0.024f + 2.3f, 3, seed + 3701u);
-    float n2 = ProcMath::fbm(wx * 0.068f + 1.9f, 1.3f, wz * 0.068f - 5.1f, 2, seed + 3719u);
-    return ProcMath::smoothstep(-0.04f, 0.32f, n1 * 0.72f + n2 * 0.28f);
+    float n1 = ProcMath::fbm(wx * 0.022f - 4.7f, 0.6f, wz * 0.022f + 2.3f, 3, seed + 3701u);
+    float n2 = ProcMath::fbm(wx * 0.064f + 1.9f, 1.3f, wz * 0.064f - 5.1f, 2, seed + 3719u);
+    return ProcMath::smoothstep(-0.36f, 0.16f, n1 * 0.72f + n2 * 0.28f);
 }
 
 // Согласованная с InstPropVert ориентация: направляет локальную ось +Y вдоль единичного вектора dir
@@ -749,13 +749,14 @@ void buildAnemoneBushPrototype(std::vector<EnvVertex>& verts, std::vector<uint32
 // ============================================================================
 
 void buildCliffGrassPrototype(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds, bool highLod) {
-    const int blades = highLod ? 28 : 10;
-    const int segs   = highLod ? 4  : 2;
+    // Плотная прибрежная кочка из тонких травинок (верхний ярус + густой подшёрсток)
+    const int blades = highLod ? 76 : 26;
+    const int segs   = highLod ? 3  : 2;
 
-    const QVector3D rootCol(0.14f, 0.30f, 0.10f);
-    const QVector3D midCol(0.28f, 0.56f, 0.16f);
-    const QVector3D tipCol(0.62f, 0.70f, 0.24f);
-    const QVector3D dryTipCol(0.74f, 0.68f, 0.30f);
+    const QVector3D rootCol(0.09f, 0.22f, 0.06f);
+    const QVector3D midCol(0.22f, 0.50f, 0.13f);
+    const QVector3D tipCol(0.54f, 0.67f, 0.20f);
+    const QVector3D dryTipCol(0.74f, 0.65f, 0.25f);
 
     for (int b = 0; b < blades; ++b) {
         float h1 = ProcMath::hash3(b, 1, 17, 9103u);
@@ -763,16 +764,19 @@ void buildCliffGrassPrototype(std::vector<EnvVertex>& verts, std::vector<uint32_
         float h3 = ProcMath::hash3(b, 3, 29, 9103u);
         float h4 = ProcMath::hash3(b, 4, 31, 9103u);
 
-        float posAng = (TWO_PI * static_cast<float>(b)) / static_cast<float>(blades) + (h1 - 0.5f) * 0.65f;
-        float posRad = std::sqrt((static_cast<float>(b) + 0.45f) / static_cast<float>(blades)) * 2.25f;
-        QVector3D root(std::cos(posAng) * posRad, -0.32f, std::sin(posAng) * posRad);
+        float posAng = (TWO_PI * static_cast<float>(b)) / static_cast<float>(blades) + (h1 - 0.5f) * 0.55f;
+        float posRad = std::sqrt((static_cast<float>(b) + 0.30f) / static_cast<float>(blades)) * 0.95f;
+        // Внешние корни уходят глубже, чтобы края дернины плотно сидели даже на выпуклой скале
+        float rootY  = -0.32f - posRad * 0.26f;
+        QVector3D root(std::cos(posAng) * posRad, rootY, std::sin(posAng) * posRad);
 
-        // Внешние травинки слегка расходятся веером, внутренние тянутся выше
-        float bladeAng = posAng + (h2 - 0.5f) * 1.15f;
-        bool tallPlume = (b % 4 == 0);
-        float height = tallPlume ? (1.45f + h3 * 0.85f) : (0.88f + h3 * 0.72f);
-        float width  = (highLod ? 0.125f : 0.25f) * (tallPlume ? 1.12f : 0.96f);
-        float lean   = (tallPlume ? 0.78f : 0.48f) + h4 * 0.42f;
+        float bladeAng = posAng + (h2 - 0.5f) * 1.55f;
+        bool tallPlume  = (b % 5 == 0);
+        bool underbrush = (b % 3 == 1);
+        float height = tallPlume ? (1.72f + h3 * 0.72f)
+                                 : (underbrush ? (0.98f + h3 * 0.45f) : (1.28f + h3 * 0.58f));
+        float width  = (highLod ? (0.022f + h2 * 0.014f) : (0.044f + h2 * 0.018f)) * (tallPlume ? 1.08f : 0.96f);
+        float lean   = (tallPlume ? 0.66f : 0.38f) + h4 * 0.36f;
 
         QVector3D dir(std::cos(bladeAng), 0.0f, std::sin(bladeAng));
         QVector3D side(-dir.z(), 0.0f, dir.x());
@@ -781,17 +785,17 @@ void buildCliffGrassPrototype(std::vector<EnvVertex>& verts, std::vector<uint32_
         uint32_t vb = static_cast<uint32_t>(verts.size());
         for (int s = 0; s <= segs; ++s) {
             float t = static_cast<float>(s) / static_cast<float>(segs);
-            float w = width * (1.0f - t * 0.92f);
-            float archY = height * (t * (1.22f - 0.28f * t));
+            float w = std::max(0.002f, width * (1.0f - t * 0.94f));
+            float archY = height * (t * (1.18f - 0.24f * t));
             float archR = lean * (t * t);
 
             QVector3D p = root + dir * archR + QVector3D(0.0f, archY, 0.0f);
-            QVector3D col = (t < 0.52f)
-                                ? ProcMath::mix(rootCol, midCol, t / 0.52f)
-                                : ProcMath::mix(midCol, endTipCol, (t - 0.52f) / 0.48f);
-            col *= (0.86f + h1 * 0.26f);
+            QVector3D col = (t < 0.48f)
+                                ? ProcMath::mix(rootCol, midCol, t / 0.48f)
+                                : ProcMath::mix(midCol, endTipCol, (t - 0.48f) / 0.52f);
+            col *= (0.84f + h1 * 0.28f);
 
-            QVector3D norm = (QVector3D(0.0f, 0.82f - t * 0.25f, 0.0f) + dir * (0.35f + t * 0.45f)).normalized();
+            QVector3D norm = (QVector3D(0.0f, 0.85f - t * 0.25f, 0.0f) + dir * (0.32f + t * 0.45f)).normalized();
             verts.push_back({p - side * w, norm, col, QVector2D(6.0f, t)});
             verts.push_back({p + side * w, norm, col, QVector2D(6.0f, t)});
         }
@@ -908,23 +912,20 @@ void WorldGenerator::generateTerrainChunks(WorldData& data, uint32_t seed) {
         float tanX = -outZ;
         float tanZ =  outX;
 
-        float strataWarp  = ProcMath::fbm(wx * 0.032f, wy * 0.018f, wz * 0.032f, 2, seed + 5113u) * 3.0f;
-        float strataPhase = wy * 0.88f + strataWarp;
-        float strataLedge = std::sin(strataPhase) * 0.56f + std::sin(strataPhase * 2.25f + 0.8f) * 0.24f;
-
-        float crag3D     = ProcMath::fbm(wx * 0.115f, wy * 0.135f, wz * 0.115f, 3, seed + 5231u);
-        float crack3D    = ProcMath::voronoiCracks2D(wx * 0.072f + wy * 0.044f, wz * 0.072f - wy * 0.038f, seed + 5309u);
-        float fractureIn = (1.0f - ProcMath::smoothstep(0.04f, 0.23f, crack3D)) * -0.45f;
-        float tanJitter  = ProcMath::fbm(wx * 0.15f + 9.3f, wy * 0.11f, wz * 0.15f - 4.7f, 2, seed + 5417u);
+        float macroBlock = ProcMath::fbm(wx * 0.052f, wy * 0.048f, wz * 0.052f, 3, seed + 5113u);
+        float crag3D     = ProcMath::fbm(wx * 0.115f, wy * 0.115f, wz * 0.115f, 3, seed + 5231u);
+        float crack3D    = ProcMath::voronoiCracks2D(wx * 0.068f + wy * 0.055f, wz * 0.068f - wy * 0.048f, seed + 5309u);
+        float fractureIn = (1.0f - ProcMath::smoothstep(0.04f, 0.24f, crack3D)) * -0.48f;
+        float tanJitter  = ProcMath::fbm(wx * 0.14f + 9.3f, wy * 0.12f, wz * 0.14f - 4.7f, 2, seed + 5417u);
 
         // Запас от схлопывания полуячеек LOD0 (шаг 0.5 * CELL_SZ)
         float maxPush    = 0.24f * CELL_SZ;
-        float normalPush = ProcMath::clamp((strataLedge * 0.52f + crag3D * 0.72f + fractureIn) * 0.68f, -1.0f, 1.0f);
+        float normalPush = ProcMath::clamp((macroBlock * 0.58f + crag3D * 0.68f + fractureIn) * 0.72f, -1.0f, 1.0f);
         float tanPush    = ProcMath::clamp(tanJitter, -0.75f, 0.75f) * 0.36f;
 
         return QVector3D(
             wx + (outX * normalPush + tanX * tanPush) * maxPush * steep,
-            wy + strataLedge * 0.20f * steep,
+            wy + (macroBlock * 0.18f + fractureIn * 0.12f) * steep,
             wz + (outZ * normalPush + tanZ * tanPush) * maxPush * steep
             );
     };
@@ -1514,7 +1515,7 @@ void WorldGenerator::generatePropPrototypes(WorldData& data) {
                              data.propPrototypes[PROP_CLIFF_GRASS].lod0Inds, true);
     buildCliffGrassPrototype(data.propPrototypes[PROP_CLIFF_GRASS].lod1Verts,
                              data.propPrototypes[PROP_CLIFF_GRASS].lod1Inds, false);
-    data.propPrototypes[PROP_CLIFF_GRASS].baseRadius = 2.65f;
+    data.propPrototypes[PROP_CLIFF_GRASS].baseRadius = 1.15f;
 }
 
 // ============================================================================
@@ -1528,6 +1529,7 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
     constexpr float HALF_W = ProcMath::WORLD_HALF_SIZE;
     constexpr float MAX_UNDERWATER_FLORA_TOP_Y = ProcMath::WATER_SURFACE_Y - 1.65f;
     const auto& pits = ProcMath::getAbyssalPits(seed);
+    const auto& spires = ProcMath::getCentralSpires(seed);
 
     struct ChunkPropTemp {
         std::vector<EnvVertex> detailVerts;
@@ -2027,77 +2029,126 @@ void WorldGenerator::generateChunkProps(WorldData& data, uint32_t seed) {
                 }
 
                 // ------------------------------------------------------------
-                // 8. Надводная колышущаяся трава на уступах кекуров и скалах кальдеры (PROP_CLIFF_GRASS)
+                // 8. Надводная густая колышущаяся трава на кекурах, уступах и скалах кальдеры (PROP_CLIFF_GRASS)
                 // ------------------------------------------------------------
-                // chunk.maxBounds.y() хранит maxY + 32.0f, поэтому порог +33.5f быстро отсекает чисто подводные чанки
-                if (chunk.maxBounds.y() > ProcMath::WATER_SURFACE_Y + 33.5f) {
-                    for (int p = 0; p < 28; ++p) {
-                        float hx = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 1, seed + 3907u);
-                        float hz = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 2, seed + 3907u);
-                        float hr = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 3, seed + 3907u);
-                        float hc = ProcMath::hash3(chunk.cx, chunk.cz, p * 5 + 4, seed + 3907u);
+                if (chunk.maxBounds.y() > ProcMath::WATER_SURFACE_Y + 32.5f) {
+                    auto tryPlaceGrassTuft = [&](float wx, float wz, float patchMask,
+                                                 float hScaleXZ, float hScaleY, float hTint) {
+                        if (wx < originX || wx >= originX + CHUNK_SZ ||
+                            wz < originZ || wz >= originZ + CHUNK_SZ) {
+                            return;
+                        }
+                        float wy = data.collision.sampleHeight(wx, wz);
+                        if (wy < ProcMath::WATER_SURFACE_Y + 0.95f || wy > 78.0f) return;
 
-                        float cxP = originX + 4.0f + hx * (CHUNK_SZ - 8.0f);
-                        float czP = originZ + 4.0f + hz * (CHUNK_SZ - 8.0f);
-                        float cyP = data.collision.sampleHeight(cxP, czP);
-                        if (cyP < ProcMath::WATER_SURFACE_Y + 2.0f || cyP > 74.0f) continue;
+                        QVector3D norm = data.collision.sampleNormal(wx, wz);
+                        if (norm.y() < 0.30f) return;
 
-                        QVector3D cNorm = data.collision.sampleNormal(cxP, czP);
-                        if (cNorm.y() < 0.58f) continue;
+                        float scXZ = 0.85f + hScaleXZ * 0.65f;
+                        float scY  = (0.76f + hScaleY * 0.72f) * (0.80f + 0.38f * patchMask);
 
-                        float patchMask = sampleCliffGrassPatchMask(cxP, czP, seed);
-                        if (patchMask < 0.22f) continue;
+                        float footR = 0.88f * scXZ;
+                        float hL = data.collision.sampleHeight(wx - footR, wz);
+                        float hR = data.collision.sampleHeight(wx + footR, wz);
+                        float hD = data.collision.sampleHeight(wx, wz - footR);
+                        float hU = data.collision.sampleHeight(wx, wz + footR);
+                        float avgFootY = 0.25f * (hL + hR + hD + hU);
+                        float curvDrop = std::max(0.0f, wy - avgFootY);
+                        if (curvDrop > 1.55f) return;
 
-                        int tufts = 4 + static_cast<int>(hr * 3.9f);
-                        float patchR = 3.2f + hr * 3.8f;
+                        float yaw = 0.0f, pitch = 0.0f;
+                        QVector3D tiltUp = (norm * 0.70f + QVector3D(0.0f, 0.30f, 0.0f)).normalized();
+                        alignUpAxisToDir(tiltUp, yaw, pitch);
 
-                        for (int t = 0; t < tufts; ++t) {
-                            float th1 = ProcMath::hash3(ci, p * 17 + t, 1, seed + 3923u);
-                            float th2 = ProcMath::hash3(ci, p * 17 + t, 2, seed + 3923u);
-                            float th3 = ProcMath::hash3(ci, p * 17 + t, 3, seed + 3923u);
-                            float th4 = ProcMath::hash3(ci, p * 17 + t, 4, seed + 3923u);
+                        float sinkAlongN = 0.18f + curvDrop * 0.90f + (1.0f - norm.y()) * 0.44f;
+                        QVector3D pos = QVector3D(wx, wy, wz) - norm * sinkAlongN;
 
-                            float ang = th1 * TWO_PI;
-                            float rad = std::sqrt(th2) * patchR;
-                            float wx = cxP + std::cos(ang) * rad;
-                            float wz = czP + std::sin(ang) * rad;
-                            float wy = data.collision.sampleHeight(wx, wz);
-                            if (wy < ProcMath::WATER_SURFACE_Y + 1.85f || wy > 74.0f) continue;
+                        QVector3D tint = (hTint < 0.58f)
+                                             ? QVector3D(0.84f + hScaleXZ * 0.22f, 0.96f + hScaleY * 0.16f, 0.72f + hTint * 0.20f)
+                                             : QVector3D(1.02f + hScaleXZ * 0.16f, 0.95f + hScaleY * 0.14f, 0.66f + hTint * 0.18f);
 
-                            QVector3D norm = data.collision.sampleNormal(wx, wz);
-                            if (norm.y() < 0.54f) continue;
+                        PropGpuInstance inst;
+                        inst.posScaleXZ = QVector4D(pos.x(), pos.y(), pos.z(), scXZ);
+                        inst.rotScaleY  = QVector4D(yaw, pitch, 0.0f, scY);
+                        inst.tintFlags  = QVector4D(tint.x(), tint.y(), tint.z(), 0.0f);
+                        chunk.propInstances[PROP_CLIFF_GRASS].push_back(inst);
+                    };
 
-                            // Проверяем, чтобы куст не висел над самым краем отвесного обрыва
-                            float footR = 1.15f;
-                            float minFootY = std::min({
-                                wy,
-                                data.collision.sampleHeight(wx - footR, wz),
-                                data.collision.sampleHeight(wx + footR, wz),
-                                data.collision.sampleHeight(wx, wz - footR),
-                                data.collision.sampleHeight(wx, wz + footR)
-                            });
-                            if ((wy - minFootY) > 1.25f) continue;
+                    // 8.1. Плотная сетка по всем надводным скалам кальдеры и крупным массивам
+                    constexpr int GRASS_GRID = 28;
+                    for (int gz = 0; gz < GRASS_GRID; ++gz) {
+                        for (int gx = 0; gx < GRASS_GRID; ++gx) {
+                            int idx = gz * GRASS_GRID + gx;
+                            float jx = ProcMath::hash3(chunk.cx, chunk.cz, idx * 4 + 1, seed + 3907u);
+                            float jz = ProcMath::hash3(chunk.cx, chunk.cz, idx * 4 + 2, seed + 3907u);
+                            float hr = ProcMath::hash3(chunk.cx, chunk.cz, idx * 4 + 3, seed + 3907u);
+                            float hc = ProcMath::hash3(chunk.cx, chunk.cz, idx * 4 + 4, seed + 3907u);
 
-                            float edgeAtten = 1.08f - 0.30f * (rad / patchR);
-                            float scXZ = (0.88f + th3 * 0.78f) * edgeAtten;
-                            float scY  = (0.84f + th4 * 0.72f) * (0.78f + 0.42f * patchMask);
+                            float cxP = originX + ((static_cast<float>(gx) + 0.08f + jx * 0.84f) / GRASS_GRID) * CHUNK_SZ;
+                            float czP = originZ + ((static_cast<float>(gz) + 0.08f + jz * 0.84f) / GRASS_GRID) * CHUNK_SZ;
+                            float cyP = data.collision.sampleHeight(cxP, czP);
+                            if (cyP < ProcMath::WATER_SURFACE_Y + 1.00f || cyP > 78.0f) continue;
 
-                            float yaw = 0.0f, pitch = 0.0f;
-                            QVector3D tiltUp = (norm * 0.42f + QVector3D(0.0f, 0.58f, 0.0f)).normalized();
-                            alignUpAxisToDir(tiltUp, yaw, pitch);
+                            QVector3D cNorm = data.collision.sampleNormal(cxP, czP);
+                            if (cNorm.y() < 0.30f) continue;
 
-                            // Естественная палитра прибрежных скал: от сочной зелени до подсушенной солнцем оливы
-                            QVector3D tint = (hc < 0.52f)
-                                                 ? QVector3D(0.86f + th3 * 0.24f, 0.96f + th4 * 0.18f, 0.78f + th1 * 0.18f)
-                                                 : QVector3D(1.04f + th3 * 0.18f, 0.96f + th4 * 0.14f, 0.72f + th1 * 0.16f);
+                            float patchMask = sampleCliffGrassPatchMask(cxP, czP, seed);
+                            if (patchMask < 0.10f) continue;
 
-                            float sink = 0.16f + (1.0f - norm.y()) * 0.55f;
+                            // Густая поляна из 4–7 перекрывающихся дернин
+                            int tufts = 4 + static_cast<int>(hr * 3.9f);
+                            float spreadR = 1.65f + hr * 1.65f;
+                            for (int t = 0; t < tufts; ++t) {
+                                float th1 = ProcMath::hash3(ci, idx * 11 + t, 1, seed + 3923u);
+                                float th2 = ProcMath::hash3(ci, idx * 11 + t, 2, seed + 3923u);
+                                float th3 = ProcMath::hash3(ci, idx * 11 + t, 3, seed + 3923u);
+                                float th4 = ProcMath::hash3(ci, idx * 11 + t, 4, seed + 3923u);
 
-                            PropGpuInstance inst;
-                            inst.posScaleXZ = QVector4D(wx, wy - sink, wz, scXZ);
-                            inst.rotScaleY  = QVector4D(yaw + th1 * TWO_PI, pitch, 0.0f, scY);
-                            inst.tintFlags  = QVector4D(tint.x(), tint.y(), tint.z(), 0.0f);
-                            chunk.propInstances[PROP_CLIFF_GRASS].push_back(inst);
+                                float ang = th1 * TWO_PI;
+                                float rad = (t == 0) ? 0.0f : (std::sqrt(th2) * spreadR);
+                                tryPlaceGrassTuft(cxP + std::cos(ang) * rad,
+                                                  czP + std::sin(ang) * rad,
+                                                  patchMask, th3, th4, hc);
+                            }
+                        }
+                    }
+
+                    // 8.2. Густое озеленение шапок, плеч и уступов всех надводных центральных кекуров
+                    for (size_t sIdx = 0; sIdx < spires.size(); ++sIdx) {
+                        const auto& sp = spires[sIdx];
+                        float padR = sp.radius * 1.35f;
+                        if (sp.x + padR < originX || sp.x - padR > originX + CHUNK_SZ ||
+                            sp.z + padR < originZ || sp.z - padR > originZ + CHUNK_SZ) {
+                            continue;
+                        }
+
+                        constexpr int SPIRE_TUFT_PROBES = 140;
+                        for (int k = 0; k < SPIRE_TUFT_PROBES; ++k) {
+                            float h1 = ProcMath::hash3(static_cast<int>(sIdx), k, 1, seed + 4019u);
+                            float h2 = ProcMath::hash3(static_cast<int>(sIdx), k, 2, seed + 4019u);
+                            float h3 = ProcMath::hash3(static_cast<int>(sIdx), k, 3, seed + 4019u);
+                            float h4 = ProcMath::hash3(static_cast<int>(sIdx), k, 4, seed + 4019u);
+
+                            float ang = (TWO_PI * static_cast<float>(k)) / SPIRE_TUFT_PROBES + (h1 - 0.5f) * 0.35f;
+                            float rad = std::sqrt(h2) * (sp.radius * 1.02f);
+                            float baseX = sp.x + std::cos(ang) * rad;
+                            float baseZ = sp.z + std::sin(ang) * rad;
+
+                            float patchMask = sampleCliffGrassPatchMask(baseX, baseZ, seed);
+                            if (patchMask < 0.04f && h3 < 0.25f) continue;
+
+                            // 2–3 плотно сцепленных куста в каждой точке для сплошного ковра
+                            int subTufts = (h4 > 0.45f) ? 3 : 2;
+                            for (int st = 0; st < subTufts; ++st) {
+                                float sh1 = ProcMath::hash3(static_cast<int>(sIdx), k * 5 + st, 1, seed + 4057u);
+                                float sh2 = ProcMath::hash3(static_cast<int>(sIdx), k * 5 + st, 2, seed + 4057u);
+                                float sh3 = ProcMath::hash3(static_cast<int>(sIdx), k * 5 + st, 3, seed + 4057u);
+                                float offA = sh1 * TWO_PI;
+                                float offR = (st == 0) ? 0.0f : (0.55f + sh2 * 0.95f);
+                                tryPlaceGrassTuft(baseX + std::cos(offA) * offR,
+                                                  baseZ + std::sin(offA) * offR,
+                                                  std::max(patchMask, 0.42f), sh2, sh3, h1);
+                            }
                         }
                     }
                 }

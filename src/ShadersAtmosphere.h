@@ -26,32 +26,32 @@ void main() {
     float h = 0.0;
     vec2 grad = vec2(0.0);
 
-    // 4 directional harmonics synchronized 1:1 with ProcMath::sampleWaterWaveOffset
+    // 4 non-orthogonal wind-fanned ocean swells synchronized 1:1 with ProcMath::sampleWaterWaveOffset
     {
-        vec2 k = vec2(0.048, 0.032);
-        float a = 0.26 * edgeDamp;
-        float ph = dot(wxz, k) + uTime * 1.15;
+        vec2 k = vec2(0.112, 0.068);
+        float a = 0.36 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 2.10;
         h += sin(ph) * a;
         grad += k * (cos(ph) * a);
     }
     {
-        vec2 k = vec2(-0.062, 0.054);
-        float a = 0.18 * edgeDamp;
-        float ph = dot(wxz, k) + uTime * 1.48;
+        vec2 k = vec2(0.082, 0.165);
+        float a = 0.24 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 2.65;
         h += sin(ph) * a;
         grad += k * (cos(ph) * a);
     }
     {
-        vec2 k = vec2(0.115, -0.095);
-        float a = 0.11 * edgeDamp;
-        float ph = dot(wxz, k) + uTime * 2.05;
+        vec2 k = vec2(0.255, -0.035);
+        float a = 0.14 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 3.25;
         h += cos(ph) * a;
         grad += k * (-sin(ph) * a);
     }
     {
-        vec2 k = vec2(0.185, 0.165);
-        float a = 0.06 * edgeDamp;
-        float ph = dot(wxz, k) - uTime * 2.75;
+        vec2 k = vec2(-0.125, 0.370);
+        float a = 0.07 * edgeDamp;
+        float ph = dot(wxz, k) - uTime * 4.10;
         h += sin(ph) * a;
         grad += k * (cos(ph) * a);
     }
@@ -132,55 +132,55 @@ void main() {
     float r = length(localXZ);
     float edgeDamp = 1.0 - smoothstep(340.0, 445.0, r);
     float camDist = length(uCamPos - vec3(wxz.x, uWaterY, wxz.y));
-    float nearChop = (1.0 - smoothstep(18.0, 120.0, camDist)) * edgeDamp;
+    float nearChop = (1.0 - smoothstep(20.0, 130.0, camDist)) * edgeDamp;
 
     float h = 0.0;
     vec2 grad = vec2(0.0);
 
-    // 4 directional harmonics synchronized 1:1 with ProcMath::sampleWaterWaveOffset
+    // 4 non-orthogonal wind-fanned ocean swells synchronized 1:1 with ProcMath::sampleWaterWaveOffset
     {
-        vec2 k = vec2(0.048, 0.032);
-        float a = 0.26 * edgeDamp;
-        float ph = dot(wxz, k) + uTime * 1.15;
+        vec2 k = vec2(0.112, 0.068);
+        float a = 0.36 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 2.10;
         h += sin(ph) * a;
         grad += k * (cos(ph) * a);
     }
     {
-        vec2 k = vec2(-0.062, 0.054);
-        float a = 0.18 * edgeDamp;
-        float ph = dot(wxz, k) + uTime * 1.48;
+        vec2 k = vec2(0.082, 0.165);
+        float a = 0.24 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 2.65;
         h += sin(ph) * a;
         grad += k * (cos(ph) * a);
     }
     {
-        vec2 k = vec2(0.115, -0.095);
-        float a = 0.11 * edgeDamp;
-        float ph = dot(wxz, k) + uTime * 2.05;
+        vec2 k = vec2(0.255, -0.035);
+        float a = 0.14 * edgeDamp;
+        float ph = dot(wxz, k) + uTime * 3.25;
         h += cos(ph) * a;
         grad += k * (-sin(ph) * a);
     }
     {
-        vec2 k = vec2(0.185, 0.165);
-        float a = 0.06 * edgeDamp;
-        float ph = dot(wxz, k) - uTime * 2.75;
+        vec2 k = vec2(-0.125, 0.370);
+        float a = 0.07 * edgeDamp;
+        float ph = dot(wxz, k) - uTime * 4.10;
         h += sin(ph) * a;
         grad += k * (cos(ph) * a);
     }
-    // High-frequency geometric chop for tessellated near-field surface
+    // Near-field oblique geometric chop for tessellated 3D crests
     if (nearChop > 0.005) {
         {
-            vec2 d = vec2(0.55, -0.83);
-            float k = 1.28, a = 0.024 * nearChop;
-            float ph = dot(wxz, d) * k + uTime * 2.95;
+            vec2 k = vec2(0.52, 0.34);
+            float a = 0.042 * nearChop;
+            float ph = dot(wxz, k) + uTime * 4.40;
             h += sin(ph) * a;
-            grad += d * (cos(ph) * a * k);
+            grad += k * (cos(ph) * a);
         }
         {
-            vec2 d = vec2(-0.78, -0.62);
-            float k = 1.85, a = 0.015 * nearChop;
-            float ph = dot(wxz, d) * k - uTime * 3.40;
+            vec2 k = vec2(0.24, -0.78);
+            float a = 0.026 * nearChop;
+            float ph = dot(wxz, k) - uTime * 5.20;
             h += sin(ph) * a;
-            grad += d * (cos(ph) * a * k);
+            grad += k * (cos(ph) * a);
         }
     }
 
@@ -199,6 +199,7 @@ in float vWaveH;
 
 uniform sampler2D uRockTex;
 uniform sampler2D uSceneDepthTex;
+uniform sampler2D uCloudWeatherTex;
 uniform vec2 uInvResolution;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
@@ -244,21 +245,21 @@ vec3 sampleDaySkyWater(vec3 dir, vec3 L, bool includeSunDisc) {
 
     float sunDot = clamp(dot(dir, L), 0.0, 1.0);
     vec3 middaySun = vec3(1.18, 1.10, 0.94);
-    sky += middaySun * (pow(sunDot, 5.0) * 0.18 + pow(sunDot, 42.0) * 0.42);
+    sky += middaySun * (pow(sunDot, 5.0) * 0.16 + pow(sunDot, 48.0) * 0.34);
     if (includeSunDisc) {
-        sky += middaySun * (smoothstep(0.9975, 0.9994, sunDot) * 3.8);
+        sky += middaySun * (smoothstep(0.9988, 0.9996, sunDot) * 2.2);
     }
 
-    // Distant clouds reflected on the water surface
-    if (elev > 0.03) {
-        vec2 cloudUV = dir.xz / (elev + 0.18);
-        float c1 = texture(uRockTex, cloudUV * 0.075 + vec2(uTime * 0.0032, uTime * 0.0014)).a;
-        float c2 = texture(uRockTex, cloudUV * 0.165 + vec2(-uTime * 0.0020, uTime * 0.0042)).a;
-        float cloud = smoothstep(0.54, 0.82, c1 * 0.65 + c2 * 0.35);
-        float cloudMask = cloud * smoothstep(0.03, 0.20, elev) * (1.0 - smoothstep(0.75, 0.98, elev) * 0.35);
-        vec3 cloudCol = mix(vec3(0.76, 0.85, 0.94), vec3(1.12, 1.10, 1.06), smoothstep(0.3, 0.85, c1));
-        cloudCol += middaySun * pow(sunDot, 12.0) * 0.35;
-        sky = mix(sky, cloudCol, cloudMask * 0.72);
+    // Distant clouds reflected on the water surface (matched to the volumetric weather map)
+    if (elev > 0.025) {
+        vec2 cloudUV = dir.xz / (elev + 0.14);
+        vec2 wUV = cloudUV * 0.145 + vec2(uTime * 0.0014, uTime * 0.0009);
+        vec4 wMap = texture(uCloudWeatherTex, wUV);
+        float puff = smoothstep(0.18, 0.72, wMap.r);
+        float cloudMask = puff * smoothstep(0.025, 0.18, elev);
+        vec3 cloudCol = mix(vec3(0.68, 0.80, 0.94), vec3(1.18, 1.15, 1.09), 0.45 + 0.55 * wMap.g);
+        cloudCol += middaySun * pow(sunDot, 10.0) * 0.35;
+        sky = mix(sky, cloudCol, cloudMask * 0.78);
     }
     return sky;
 }
@@ -276,13 +277,18 @@ void main() {
     mat2 rot1 = mat2(0.80, -0.60, 0.60, 0.80);
     mat2 rot2 = mat2(-0.60, -0.80, 0.80, -0.60);
 
-    vec4 s1 = texture(uRockTex, p * 0.055 + vec2(uTime * 0.026, -uTime * 0.019));
-    vec4 s2 = texture(uRockTex, (rot1 * p) * 0.135 + vec2(-uTime * 0.034, uTime * 0.028));
-    vec4 s3 = texture(uRockTex, (rot2 * p) * 0.310 + vec2(uTime * 0.052, uTime * 0.044));
+    // Living liquid domain-warping: large drifting eddies continuously morph the finer swirl layers
+    vec2 warpA = texture(uRockTex, p * 0.032 + vec2( uTime * 0.048,  uTime * 0.029)).rg * 2.0 - 1.0;
+    vec2 warpB = texture(uRockTex, (rot1 * p) * 0.046 + vec2(-uTime * 0.038, uTime * 0.052)).rg * 2.0 - 1.0;
+    vec2 pMorph = p + (warpA + warpB * 0.70) * 1.55;
 
-    float fineWeight = exp(-dist * 0.032);
+    vec4 s1 = texture(uRockTex, pMorph * 0.056 + vec2( uTime * 0.092,  uTime * 0.054));
+    vec4 s2 = texture(uRockTex, (rot1 * pMorph) * 0.128 + vec2(-uTime * 0.078, uTime * 0.108));
+    vec4 s3 = texture(uRockTex, (rot2 * (p + warpA * 0.85)) * 0.285 + vec2( uTime * 0.145, -uTime * 0.105));
+
+    float fineWeight = exp(-dist * 0.026);
     vec4 s4 = (fineWeight > 0.02)
-                  ? texture(uRockTex, (rot1 * p) * 0.72 + vec2(-uTime * 0.085, uTime * 0.072))
+                  ? texture(uRockTex, (rot1 * (p - warpB * 0.55)) * 0.64 + vec2(-uTime * 0.195, uTime * 0.172))
                   : s3;
 
     vec2 screenUV = clamp(gl_FragCoord.xy * uInvResolution, 0.001, 0.999);
@@ -355,18 +361,18 @@ void main() {
         float tightSeam = 1.0 - smoothstep(0.0, 1.25, dist3D);
 
         if (shoreZone > 0.005) {
-            vec4 f1 = texture(uRockTex, p * 0.36 + vec2(uTime * 0.035, -uTime * 0.028));
-            vec4 f2 = texture(uRockTex, (rot1 * p) * 0.95 + vec2(-uTime * 0.062, uTime * 0.048));
-            vec4 f3 = texture(uRockTex, (rot2 * p) * 2.15 + vec2(uTime * 0.095, uTime * 0.075));
+            vec4 f1 = texture(uRockTex, p * 0.36 + vec2(uTime * 0.045, -uTime * 0.036));
+            vec4 f2 = texture(uRockTex, (rot1 * p) * 0.95 + vec2(-uTime * 0.075, uTime * 0.058));
+            vec4 f3 = texture(uRockTex, (rot2 * p) * 2.15 + vec2(uTime * 0.115, uTime * 0.092));
 
             float swirl = f1.a * 0.58 + f2.a * 0.42;
-            float ripplePhase = dist3D * 6.4 - uTime * 3.6 + swirl * 4.8;
+            float ripplePhase = dist3D * 6.4 - uTime * 4.2 + swirl * 4.8;
             float rippleRing = sin(ripplePhase) * 0.5 + 0.5;
 
             vec2 radialXZ = p - contactOriginXZ;
             float radLen = length(radialXZ);
             vec2 rDir = (radLen > 0.01) ? (radialXZ / radLen) : vec2(1.0, 0.0);
-            shoreRippleGrad = rDir * (cos(ripplePhase) * 0.38 * shoreZone);
+            shoreRippleGrad = rDir * (cos(ripplePhase) * 0.34 * shoreZone);
 
             float laceMask = smoothstep(0.46 - tightSeam * 0.34, 0.74 - tightSeam * 0.24, swirl) * shoreZone;
             float ringMask = smoothstep(0.42, 0.92, rippleRing) * shoreZone * smoothstep(0.28, 0.68, f1.a) * 0.68;
@@ -375,56 +381,69 @@ void main() {
         }
     }
 
-    vec2 texSlope = (s1.rg * 2.0 - 1.0) * 0.32
-                  + (s2.rg * 2.0 - 1.0) * 0.26
+    vec2 texSlope = (s1.rg * 2.0 - 1.0) * 0.30
+                  + (s2.rg * 2.0 - 1.0) * 0.25
                   + (s3.rg * 2.0 - 1.0) * (0.18 * (0.35 + 0.65 * fineWeight))
-                  + (s4.rg * 2.0 - 1.0) * (0.14 * fineWeight);
+                  + (s4.rg * 2.0 - 1.0) * (0.13 * fineWeight);
 
-    vec2 totalSlope = vWaveGrad * 1.90 + texSlope * 0.85 + shoreRippleGrad;
-    float waveCrest = clamp(0.5 + vWaveH * 0.95 + (s1.a - 0.5) * 0.45 + (s2.a - 0.5) * 0.35, 0.0, 1.0);
+    float waveCrest = clamp(0.46 + vWaveH * 0.78 + (s1.a - 0.5) * 0.42 + (s2.a - 0.5) * 0.34, 0.0, 1.0);
 
     // ========================================================================
-    // ABOVE-WATER VIEW: Sunlit ocean surface, sky/cloud reflection & shoals
+    // ABOVE-WATER VIEW: Rolling 3D swells + morphing organic swirls & dancing glints
     // ========================================================================
     if (uCamAboveWater == 1) {
-        vec3 Nup = normalize(vec3(-totalSlope.x, 1.0, -totalSlope.y));
+        vec2 swellSlope  = vWaveGrad * 2.05 + (warpA * 0.14 + warpB * 0.11);
+        vec2 rippleSlope = swellSlope + texSlope * 0.68 + shoreRippleGrad * 0.85;
+
+        vec3 Nswell = normalize(vec3(-swellSlope.x, 1.0, -swellSlope.y));
+        vec3 Nup    = normalize(vec3(-rippleSlope.x, 1.0, -rippleSlope.y));
+
         float cosV = clamp(dot(Nup, V), 0.0, 1.0);
         float fresnel = 0.02 + 0.98 * pow(1.0 - cosV, 5.0);
 
         vec3 R = reflect(rayDir, Nup);
-        R.y = max(R.y, 0.025);
+        R.y = max(R.y, 0.02);
         vec3 reflCol = sampleDaySkyWater(normalize(R), L, true);
 
-        // Refracted water body: shallow turquoise glow over nearby reefs -> deep ocean blue
-        float waterThickness = (rawSceneDepth < 0.9992) ? max(sceneLin - waterLin, 0.0) : 80.0;
-        float shallowMask = exp(-waterThickness * 0.048);
-        vec3 deepOcean = mix(uWaterColorDeep * 0.72, vec3(0.012, 0.11, 0.24), 0.48);
-        vec3 shallowTurq = mix(uWaterColorShallow * 1.18, vec3(0.08, 0.62, 0.72), 0.35);
-        vec3 waterBody = mix(deepOcean, shallowTurq, shallowMask);
+        // Refract underwater depth lookup along live wave normals so reefs shimmer beneath the waves
+        vec2 refractOff = Nup.xz * (0.026 * clamp(1.0 - dist * 0.012, 0.15, 1.0));
+        vec2 refrUV = clamp(screenUV + refractOff, 0.001, 0.999);
+        float rawRefrDepth = texture(uSceneDepthTex, refrUV).r;
+        float refrLin = linearizeDepth(rawRefrDepth);
+        bool validRefr = (rawRefrDepth < 0.9992 && refrLin > waterLin);
+        float useSceneLin = validRefr ? refrLin : sceneLin;
 
-        // Sunlit subsurface scatter through translucent wave crests
-        float sss = pow(clamp(dot(V, -L + Nup * 0.45), 0.0, 1.0), 3.0) * waveCrest;
-        float crestScatter = smoothstep(0.45, 0.95, waveCrest) * clamp(dot(Nup, L) * 0.5 + 0.5, 0.0, 1.0);
-        waterBody += shallowTurq * (sss * 0.55 + crestScatter * 0.18);
+        float waterThickness = (rawSceneDepth < 0.9992 && useSceneLin > waterLin)
+                                   ? max(useSceneLin - waterLin, 0.0) : 80.0;
+        float shallowMask = exp(-waterThickness * 0.052);
+        vec3 deepOcean   = mix(uWaterColorDeep * 0.70, vec3(0.010, 0.10, 0.24), 0.50);
+        vec3 shallowTurq = mix(uWaterColorShallow * 1.18, vec3(0.06, 0.60, 0.72), 0.35);
+        vec3 waterBody   = mix(deepOcean, shallowTurq, shallowMask);
 
-        vec3 surfaceCol = mix(waterBody, reflCol, clamp(fresnel * 1.05, 0.02, 0.96));
+        // Translucent emerald-turquoise subsurface glow through sunlit rolling crests
+        float sss = pow(clamp(dot(V, -L + Nswell * 0.52), 0.0, 1.0), 2.8) * smoothstep(0.35, 0.95, waveCrest);
+        float crestLight = smoothstep(0.42, 0.94, waveCrest) * clamp(dot(Nswell, L) * 0.5 + 0.5, 0.0, 1.0);
+        waterBody += shallowTurq * (sss * 0.62 + crestLight * 0.20);
 
-        // Midday solar glitter path across wave facets
+        vec3 surfaceCol = mix(waterBody, reflCol, clamp(fresnel * 1.02, 0.02, 0.95));
+
+        // Dual-scale moving solar specular: broad rolling swell sheen + dancing fine sparkles
         vec3 H = normalize(L + V + vec3(0.0001));
-        float ndh = clamp(dot(Nup, H), 0.0, 1.0);
-        vec3 sunGlintCol = vec3(1.22, 1.14, 0.96);
-        float glintSharp = pow(max(ndh, 0.0001), 420.0) * 5.2;
-        float glintBroad = pow(max(ndh, 0.0001), 48.0)  * 0.36;
-        surfaceCol += sunGlintCol * (glintSharp + glintBroad);
+        float ndhSwell  = clamp(dot(Nswell, H), 0.0, 1.0);
+        float ndhRipple = clamp(dot(Nup, H), 0.0, 1.0);
+        vec3 sunGlintCol = vec3(1.24, 1.15, 0.96);
+        float glintSparkle = pow(max(ndhRipple, 0.0001), 220.0) * 3.8 * (0.45 + 0.55 * s3.a);
+        float glintSheen   = pow(max(ndhSwell,  0.0001), 28.0)  * 0.28;
+        surfaceCol += sunGlintCol * (glintSparkle + glintSheen);
 
-        // Subtle wind whitecaps on high crests + bright shoreline / whale foam
-        float whitecap = smoothstep(0.80, 0.96, waveCrest) * smoothstep(0.55, 0.85, s2.a) * 0.38;
-        float totalFoam = clamp(shoreFoam * 0.92 + whitecap, 0.0, 1.0);
-        vec3 dayFoamCol = vec3(0.96, 0.99, 1.02) * (0.86 + 0.26 * clamp(dot(Nup, L), 0.0, 1.0));
+        // White shoreline / whale foam + wind-swept crest foam wisps
+        float crestFoam = smoothstep(0.76, 0.96, waveCrest) * smoothstep(0.48, 0.84, s2.a * 0.6 + s3.a * 0.4) * 0.44;
+        float totalFoam = clamp(shoreFoam * 0.92 + crestFoam, 0.0, 1.0);
+        vec3 dayFoamCol = vec3(0.97, 0.99, 1.02) * (0.86 + 0.24 * clamp(dot(Nup, L), 0.0, 1.0));
         surfaceCol = mix(surfaceCol, dayFoamCol, totalFoam);
         surfaceCol += vec3(1.0, 1.04, 1.08) * shoreBubbles * 0.35;
 
-        // Crisp daylight aerial perspective toward the horizon
+        // Daylight aerial perspective toward the horizon
         float airFog = 1.0 - exp(-dist * 0.00145);
         vec3 hazeDir = normalize(vec3(rayDir.x, 0.04, rayDir.z));
         vec3 horizonCol = sampleDaySkyWater(hazeDir, L, false);
@@ -437,6 +456,7 @@ void main() {
     // ========================================================================
     // UNDERWATER VIEW: Snell's Window, TIR & Spectral Underwater Fog
     // ========================================================================
+    vec2 totalSlope = vWaveGrad * 1.90 + texSlope * 0.85 + shoreRippleGrad;
     vec3 N = normalize(vec3(totalSlope.x, -1.0, totalSlope.y));
 
     float causticNet = clamp(1.0 - abs(s1.a - s2.a) * 2.3, 0.0, 1.0);
@@ -538,17 +558,127 @@ void main() {
 
 inline const char* SkyboxFrag = R"(#version 330 core
 in vec2 vNDC;
-uniform sampler2D uRockTex;
+
+uniform sampler3D uCloudShapeTex;
+uniform sampler3D uCloudDetailTex;
+uniform sampler2D uCloudWeatherTex;
 uniform mat4 uInvViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
+uniform float uWaterY;
 uniform float uTime;
 uniform int uCamAboveWater;
 
 out vec4 FragColor;
+
+const float EARTH_RADIUS = 60000.0;
+const float CLOUD_BOTTOM = 1200.0;
+const float CLOUD_TOP    = 3200.0;
+
+float remap(float v, float lo1, float hi1, float lo2, float hi2) {
+    return lo2 + (v - lo1) * (hi2 - lo2) / max(hi1 - lo1, 1e-5);
+}
+
+// Dual-lobe Henyey-Greenstein phase function
+float henyeyGreenstein(float cosTheta, float g) {
+    float g2 = g * g;
+    float denom = max(1.0 + g2 - 2.0 * g * cosTheta, 0.0001);
+    return (1.0 - g2) / (4.0 * 3.14159265 * pow(denom, 1.5));
+}
+
+// Positive distance along ray (ro, rd) to sphere of radius R centered at origin
+float intersectSphereFar(vec3 ro, vec3 rd, float R) {
+    float b = dot(ro, rd);
+    float c = dot(ro, ro) - R * R;
+    float h = b * b - c;
+    if (h < 0.0) return -1.0;
+    return -b + sqrt(h);
+}
+
+// Tall cumulus tower profile: flat condensation base + rounded tapering dome
+float cloudHeightGradient(float h, float cloudType) {
+    float topH = mix(0.42, 0.98, cloudType);
+    float botFade = smoothstep(0.0, 0.08, h);
+    float topFade = 1.0 - smoothstep(topH * 0.36, topH, h);
+    return botFade * topFade;
+}
+
+// 3D volumetric cloud density (strictly textureLod to prevent mip-explosion blur)
+float sampleCloudDensity(vec3 pWorld, float h, float dist, float sunClear, bool highDetail) {
+    const vec2 windDir = vec2(0.84, 0.54);
+
+    // Subtle downwind shear gives towering cumulus natural vertical depth
+    vec3 p = pWorld;
+    p.xz += windDir * (h * 260.0 + uTime * 22.0);
+
+    vec2 weatherUV = p.xz * 0.000072 + vec2(0.18, 0.31);
+    vec4 weather = textureLod(uCloudWeatherTex, weatherUV, 0.0);
+    float coverage  = weather.r * sunClear;
+    float cloudType = weather.g;
+    float moisture  = weather.a;
+
+    if (coverage < 0.04) return 0.0;
+
+    float hGrad = cloudHeightGradient(h, cloudType);
+    if (hGrad <= 0.001) return 0.0;
+
+    // Taper horizontal footprint with altitude so clouds rise as 3D domes, not flat slabs
+    float effectiveCov = coverage * mix(1.0, 0.62, h * h);
+
+    float shapeLod = clamp((dist - 5500.0) * 0.00010, 0.0, 1.2);
+    vec4 shape = textureLod(uCloudShapeTex, p * 0.00055, shapeLod);
+    float lowFreqFBM = shape.g * 0.625 + shape.b * 0.25 + shape.a * 0.125;
+    float baseCloud = clamp(remap(shape.r, (1.0 - lowFreqFBM) * 0.44, 1.0, 0.0, 1.0), 0.0, 1.0);
+    baseCloud *= hGrad;
+
+    float covThresh = mix(0.76, 0.24, effectiveCov);
+    float cloudCov = clamp(remap(baseCloud, covThresh, 1.0, 0.0, 1.0), 0.0, 1.0);
+    if (cloudCov <= 0.001) return 0.0;
+
+    if (highDetail) {
+        // Crisp 3D cauliflower erosion along lobes and edges
+        float detailLod = clamp((dist - 3200.0) * 0.00016, 0.0, 1.6);
+        vec3 detailPos = p * 0.0029 - vec3(windDir.x, 0.12, windDir.y) * (uTime * 0.030);
+        vec3 detail = textureLod(uCloudDetailTex, detailPos, detailLod).rgb;
+        float highFreqFBM = detail.r * 0.625 + detail.g * 0.25 + detail.b * 0.125;
+        float highFreqMod = mix(highFreqFBM, 1.0 - highFreqFBM, clamp(h * 3.8, 0.0, 1.0));
+        cloudCov = clamp(remap(cloudCov, highFreqMod * 0.34, 1.0, 0.0, 1.0), 0.0, 1.0);
+    }
+
+    return cloudCov * moisture * mix(0.65, 1.15, smoothstep(0.0, 0.30, h));
+}
+
+// 6-step cone light marching toward the sun for sculpted 3D self-shadowing
+float marchCloudLight(vec3 pos, vec3 planetCenter, vec3 L, float viewDist, float sunClear) {
+    const vec3 coneOffsets[6] = vec3[6](
+        vec3( 0.16,  0.10, -0.12),
+        vec3(-0.20,  0.08,  0.17),
+        vec3( 0.09, -0.15,  0.22),
+        vec3(-0.12,  0.22, -0.10),
+        vec3( 0.22, -0.05, -0.18),
+        vec3( 0.00,  0.08,  0.00)
+    );
+
+    float lightStep = (CLOUD_TOP - CLOUD_BOTTOM) / 15.0;
+    float totalDensity = 0.0;
+    vec3 p = pos;
+
+    for (int i = 0; i < 6; ++i) {
+        float stepMul = (i == 5) ? 2.8 : 1.0;
+        p += (L + coneOffsets[i] * (0.18 * float(i + 1))) * (lightStep * stepMul);
+
+        float alt = length(p - planetCenter) - EARTH_RADIUS;
+        float h = (alt - CLOUD_BOTTOM) / (CLOUD_TOP - CLOUD_BOTTOM);
+        if (h < 0.0 || h > 1.0) break;
+
+        totalDensity += sampleCloudDensity(p, h, viewDist, sunClear, i < 2) * (lightStep * stepMul);
+    }
+
+    return totalDensity * 0.0085;
+}
 
 void main() {
     vec4 worldTarget = uInvViewProj * vec4(vNDC, 1.0, 1.0);
@@ -557,63 +687,139 @@ void main() {
 
     if (uCamAboveWater == 1) {
         float elev = clamp(dir.y, 0.0, 1.0);
-        vec3 zenith  = vec3(0.08, 0.34, 0.78);
-        vec3 midSky  = vec3(0.25, 0.62, 0.95);
+        vec3 zenith  = vec3(0.07, 0.32, 0.76);
+        vec3 midSky  = vec3(0.24, 0.60, 0.94);
         vec3 horizon = vec3(0.75, 0.91, 0.99);
 
-        vec3 col = mix(horizon, midSky, smoothstep(0.0, 0.26, elev));
-        col = mix(col, zenith, pow(elev, 0.58));
+        vec3 skyCol = mix(horizon, midSky, smoothstep(0.0, 0.26, elev));
+        skyCol = mix(skyCol, zenith, pow(elev, 0.58));
 
-        // Seamless ocean-horizon backdrop slightly below y = 0
         if (dir.y < 0.0) {
-            vec3 farOcean = mix(horizon * 0.86, vec3(0.06, 0.24, 0.42), smoothstep(0.0, -0.18, dir.y));
-            col = farOcean;
+            skyCol = mix(horizon * 0.86, vec3(0.06, 0.24, 0.42), smoothstep(0.0, -0.18, dir.y));
         }
 
-        // Bright midday sun disc, warm atmospheric glow & Mie scattering
+        // Midday sun glow, corona & crisp solar disc
         float sunDot = clamp(dot(dir, L), 0.0, 1.0);
-        vec3 middaySun = vec3(1.25, 1.14, 0.94);
-        float mieWide  = pow(sunDot, 4.0) * 0.20;
-        float mieTight = pow(sunDot, 36.0) * 0.55;
-        float sunHalo  = pow(sunDot, 220.0) * 1.45;
-        float sunDisc  = smoothstep(0.9986, 0.99945, sunDot) * 6.5;
-        col += middaySun * (mieWide + mieTight + sunHalo + sunDisc) * smoothstep(-0.04, 0.06, dir.y);
+        vec3 middaySun = vec3(1.24, 1.15, 0.96);
+        float mieWide  = pow(sunDot, 5.0)   * 0.16;
+        float mieTight = pow(sunDot, 32.0)  * 0.44;
+        float sunHalo  = pow(sunDot, 160.0) * 1.55;
+        float sunDisc  = smoothstep(0.9985, 0.99945, sunDot) * 8.5;
 
-        // Distant procedural cumulus & high cirrus clouds on a curved sky dome
-        if (dir.y > 0.015) {
-            vec2 domeUV = dir.xz / (dir.y + 0.14);
-            vec2 drift1 = vec2(uTime * 0.0028, uTime * 0.0012);
-            vec2 drift2 = vec2(-uTime * 0.0018, uTime * 0.0034);
+        vec3 col = skyCol + middaySun * (mieWide + mieTight) * smoothstep(-0.04, 0.06, dir.y);
 
-            float warp = (texture(uRockTex, domeUV * 0.045 + drift2).a - 0.5) * 0.38;
-            vec2 wUV = domeUV + vec2(warp, -warp * 0.7);
-
-            float cBase   = texture(uRockTex, wUV * 0.068 + drift1).a;
-            float cDetail = texture(uRockTex, wUV * 0.155 + drift2).a;
-            float cWisps  = texture(uRockTex, domeUV * 0.28 + drift1 * 1.6).a;
-
-            float density = cBase * 0.58 + cDetail * 0.28 + cWisps * 0.14;
-            float puffs   = smoothstep(0.55, 0.80, density);
-
-            // Soft sunlit top & silver-lining rim near the midday sun
-            vec2 sunStepUV = L.xz * 0.028;
-            float cTowardSun = texture(uRockTex, (wUV + sunStepUV) * 0.068 + drift1).a;
-            float lightShade = clamp(0.55 + (cBase - cTowardSun) * 2.2, 0.25, 1.0);
-            float silverLining = pow(sunDot, 10.0) * (1.0 - puffs * 0.65) * smoothstep(0.48, 0.72, density);
-
-            vec3 cloudShadow = vec3(0.66, 0.78, 0.90);
-            vec3 cloudLit    = vec3(1.14, 1.12, 1.07);
-            vec3 cloudCol = mix(cloudShadow, cloudLit, lightShade) + middaySun * silverLining * 0.55;
-
-            // Keep clouds cleanly distant near the horizon and softly tapered overhead
-            float horizonFade = smoothstep(0.015, 0.16, dir.y);
-            float zenithSoft  = 1.0 - smoothstep(0.68, 0.98, dir.y) * 0.25;
-            float cloudAlpha  = puffs * horizonFade * zenithSoft * 0.84;
-
-            // Gently blend distant clouds into horizon haze
-            cloudCol = mix(horizon, cloudCol, smoothstep(0.02, 0.22, dir.y));
-            col = mix(col, cloudCol, cloudAlpha);
+        // Subtle high-altitude cirrus streaks
+        if (dir.y > 0.03) {
+            vec2 cirrusUV = dir.xz / (dir.y + 0.16) * 0.12 + vec2(uTime * 0.00045, uTime * 0.00028);
+            float cirrus = textureLod(uCloudWeatherTex, cirrusUV, 0.0).b;
+            float cirrusMask = cirrus * smoothstep(0.03, 0.22, dir.y) * 0.14;
+            vec3 cirrusCol = mix(vec3(0.86, 0.93, 1.00), vec3(1.08, 1.06, 1.02), 0.5 + 0.5 * sunDot);
+            col = mix(col, cirrusCol, cirrusMask);
         }
+
+        // Volumetric HZD / Nubis cloud raymarching inside spherical atmospheric shell
+        float cloudTransmittance = 1.0;
+        if (dir.y > 0.010) {
+            vec3 planetCenter = vec3(0.0, uWaterY - EARTH_RADIUS, 0.0);
+            vec3 ro = uCamPos - planetCenter;
+
+            float tStart = intersectSphereFar(ro, dir, EARTH_RADIUS + CLOUD_BOTTOM);
+            float tEnd   = intersectSphereFar(ro, dir, EARTH_RADIUS + CLOUD_TOP);
+
+            if (tStart > 0.0 && tEnd > tStart) {
+                tEnd = min(tEnd, tStart + 22000.0);
+
+                int steps = int(mix(64.0, 48.0, smoothstep(0.08, 0.65, dir.y)));
+                float stepLen = (tEnd - tStart) / float(steps);
+
+                // Interleaved Gradient Noise ray jitter prevents slice banding
+                float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+                float t = tStart + ign * stepLen;
+
+                // Keep a soft organic opening around the midday sun so it gleams cleanly in zenith
+                float sunClear = mix(0.22, 1.0, smoothstep(0.996, 0.945, sunDot));
+
+                float cosTheta  = dot(dir, L);
+                float hgForward = henyeyGreenstein(cosTheta, 0.66);
+                float hgBack    = henyeyGreenstein(cosTheta, -0.25);
+                float phase     = clamp(mix(hgBack, hgForward, 0.62) * 3.14159265, 0.50, 1.75);
+                float silverRim = clamp(henyeyGreenstein(cosTheta, 0.86) * 0.45, 0.0, 0.85);
+
+                vec3 scatteredLight = vec3(0.0);
+                float firstHitT = tEnd;
+                bool hasHit = false;
+
+                for (int i = 0; i < 64; ++i) {
+                    if (i >= steps || cloudTransmittance < 0.015) break;
+
+                    vec3 pos = uCamPos + dir * t;
+                    float alt = length(pos - planetCenter) - EARTH_RADIUS;
+                    float h = clamp((alt - CLOUD_BOTTOM) / (CLOUD_TOP - CLOUD_BOTTOM), 0.0, 1.0);
+
+                    // Two-stage Nubis lookup: skip detail & light march in clear blue sky
+                    float baseCheck = sampleCloudDensity(pos, h, t, sunClear, false);
+                    if (baseCheck > 0.003) {
+                        float dens = sampleCloudDensity(pos, h, t, sunClear, true);
+                        if (dens > 0.003) {
+                            if (!hasHit) {
+                                firstHitT = t;
+                                hasHit = true;
+                            }
+
+                            float lightTau = marchCloudLight(pos, planetCenter, L, t, sunClear);
+
+                            // Calibrated Beer-Powder + multi-scattering (strong 3D shadow contrast, no white clip)
+                            float beer1  = exp(-lightTau);
+                            float beer2  = exp(-lightTau * 0.25);
+                            float powder = 1.0 - exp(-lightTau * 1.9);
+                            float powderFactor = mix(0.52 + 0.68 * powder, 1.0, clamp(cosTheta * 0.5 + 0.5, 0.0, 1.0));
+
+                            float directEnergy = beer1 * (phase * 0.72 + silverRim * 0.35) * powderFactor
+                                               + beer2 * 0.26;
+
+                            // Deep cool blue-grey shadowed undersides vs bright crisp sunlit upper domes
+                            vec3 ambBottom   = vec3(0.20, 0.34, 0.54);
+                            vec3 ambTop      = vec3(0.66, 0.78, 0.94);
+                            vec3 skyFill     = mix(ambBottom, ambTop, smoothstep(0.0, 0.85, h));
+                            vec3 oceanBounce = mix(uWaterColorShallow, vec3(0.18, 0.54, 0.68), 0.5) * (1.0 - h) * 0.08;
+                            float heightAO   = mix(0.34, 1.0, pow(h, 0.75));
+                            float depthAO    = mix(0.58, 1.0, exp(-dens * 1.6));
+
+                            vec3 lum = middaySun * (directEnergy * 0.92)
+                                     + (skyFill + oceanBounce) * (heightAO * depthAO * 0.48);
+
+                            float stepExt = dens * stepLen * 0.0068;
+                            float stepTrans = exp(-stepExt);
+
+                            scatteredLight += cloudTransmittance * lum * (1.0 - stepTrans);
+                            cloudTransmittance *= stepTrans;
+                        }
+                    }
+
+                    t += stepLen;
+                }
+
+                float cloudAlpha = 1.0 - cloudTransmittance;
+                if (cloudAlpha > 0.001) {
+                    vec3 cloudCol = scatteredLight / max(cloudAlpha, 0.0001);
+                    vec3 hazeCol  = mix(horizon, skyCol, smoothstep(0.02, 0.25, dir.y));
+
+                    float distVis   = exp(-max(firstHitT - 6000.0, 0.0) * 0.000038);
+                    float horizMask = smoothstep(0.012, 0.075, dir.y);
+
+                    cloudCol = mix(hazeCol, cloudCol, distVis);
+                    float effAlpha = clamp(cloudAlpha * horizMask, 0.0, 1.0);
+
+                    col = mix(col, cloudCol, effAlpha);
+                    cloudTransmittance = 1.0 - effAlpha;
+                }
+            }
+        }
+
+        // Midday sun disc & corona gleaming cleanly in the zenith
+        float sunVis = pow(clamp(cloudTransmittance, 0.0, 1.0), 0.75);
+        col += middaySun * (sunHalo * (0.28 + 0.72 * sunVis) + sunDisc * sunVis)
+             * smoothstep(-0.04, 0.06, dir.y);
 
         FragColor = vec4(clamp(col, 0.0, 8.0), 1.0);
         return;

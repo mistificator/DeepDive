@@ -75,16 +75,22 @@ void main() {
         // Above-water coastal grass swaying in travelling sea-breeze gusts
         float h = clamp(aParam.y, 0.0, 1.0);
         float bend = h * h;
-        vec2 windDir = vec2(0.84, 0.54);
-        float gustPhase = dot(pos.xz, vec2(0.085, 0.062)) - uTime * 2.15;
-        float gust = 0.55 + 0.45 * sin(gustPhase) + 0.22 * sin(gustPhase * 1.73 + 1.4);
-        float localPhase = uTime * 3.8 + aInstPosScaleXZ.x * 0.45 + aInstPosScaleXZ.z * 0.37 + aPos.x * 1.9;
-        float flutter = sin(localPhase) * 0.14 * h;
-        vec2 swayXZ = windDir * (0.48 * gust * bend)
-                    + vec2(-windDir.y, windDir.x) * (flutter * 0.65 + sin(localPhase * 0.7) * 0.10 * bend);
+        vec2 windDir  = vec2(0.84, 0.54);
+        vec2 crossDir = vec2(-windDir.y, windDir.x);
+
+        float gustWave1 = sin(dot(pos.xz, vec2(0.11, 0.08)) - uTime * 3.2);
+        float gustWave2 = sin(dot(pos.xz, vec2(-0.07, 0.15)) - uTime * 2.1 + 1.7);
+        float gust = 0.58 + 0.42 * gustWave1 + 0.24 * gustWave2;
+
+        float bladePhase = uTime * 5.4 + aPos.x * 5.7 + aPos.z * 6.3
+                         + aInstPosScaleXZ.x * 0.37 + aInstPosScaleXZ.z * 0.29;
+        float flutter = sin(bladePhase) * 0.18 * h + cos(bladePhase * 1.43) * 0.08 * bend;
+
+        vec2 swayXZ = windDir * (0.68 * gust * bend + flutter * 0.45)
+                    + crossDir * (flutter * 0.85 + sin(bladePhase * 0.55) * 0.16 * bend);
         pos.x += swayXZ.x;
         pos.z += swayXZ.y;
-        pos.y -= length(swayXZ) * 0.24 * h;
+        pos.y -= length(swayXZ) * 0.26 * h;
     } else if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.10 + aInstPosScaleXZ.x * 0.11 + aInstPosScaleXZ.z * 0.09;
@@ -296,17 +302,24 @@ void main() {
         // Above-water coastal grass swaying in travelling sea-breeze gusts
         float h = clamp(aParam.y, 0.0, 1.0);
         float bend = h * h;
-        vec2 windDir = vec2(0.84, 0.54);
-        float gustPhase = dot(pos.xz, vec2(0.085, 0.062)) - uTime * 2.15;
-        float gust = 0.55 + 0.45 * sin(gustPhase) + 0.22 * sin(gustPhase * 1.73 + 1.4);
-        float localPhase = uTime * 3.8 + aInstPosScaleXZ.x * 0.45 + aInstPosScaleXZ.z * 0.37 + aPos.x * 1.9;
-        float flutter = sin(localPhase) * 0.14 * h;
-        vec2 swayXZ = windDir * (0.48 * gust * bend)
-                    + vec2(-windDir.y, windDir.x) * (flutter * 0.65 + sin(localPhase * 0.7) * 0.10 * bend);
+        vec2 windDir  = vec2(0.84, 0.54);
+        vec2 crossDir = vec2(-windDir.y, windDir.x);
+
+        float gustWave1 = sin(dot(pos.xz, vec2(0.11, 0.08)) - uTime * 3.2);
+        float gustWave2 = sin(dot(pos.xz, vec2(-0.07, 0.15)) - uTime * 2.1 + 1.7);
+        float gust = 0.58 + 0.42 * gustWave1 + 0.24 * gustWave2;
+
+        // Per-blade phase variation so individual fine blades dance & ripple
+        float bladePhase = uTime * 5.4 + aPos.x * 5.7 + aPos.z * 6.3
+                         + aInstPosScaleXZ.x * 0.37 + aInstPosScaleXZ.z * 0.29;
+        float flutter = sin(bladePhase) * 0.18 * h + cos(bladePhase * 1.43) * 0.08 * bend;
+
+        vec2 swayXZ = windDir * (0.68 * gust * bend + flutter * 0.45)
+                    + crossDir * (flutter * 0.85 + sin(bladePhase * 0.55) * 0.16 * bend);
         pos.x += swayXZ.x;
         pos.z += swayXZ.y;
-        pos.y -= length(swayXZ) * 0.24 * h;
-        norm = normalize(norm + vec3(swayXZ.x * 0.35, 0.0, swayXZ.y * 0.35));
+        pos.y -= length(swayXZ) * 0.26 * h;
+        norm = normalize(norm + vec3(swayXZ.x * 0.42, 0.0, swayXZ.y * 0.42));
     } else if (aParam.x > 4.5 || (aParam.x > 2.5 && aParam.x < 3.5)) {
         float h = clamp(aParam.y, 0.0, 1.0);
         float phase = uTime * 1.10 + aInstPosScaleXZ.x * 0.11 + aInstPosScaleXZ.z * 0.09;
@@ -382,10 +395,10 @@ out vec4 FragColor;
 
 float evalWaveSurfY(vec2 wxz, float t) {
     return uWaterY
-         + sin(dot(wxz, vec2(0.048, 0.032)) + t * 1.15) * 0.26
-         + sin(dot(wxz, vec2(-0.062, 0.054)) + t * 1.48) * 0.18
-         + cos(dot(wxz, vec2(0.115, -0.095)) + t * 2.05) * 0.11
-         + sin(dot(wxz, vec2(0.185, 0.165)) - t * 2.75) * 0.06;
+         + sin(dot(wxz, vec2(0.112, 0.068)) + t * 2.10) * 0.36
+         + sin(dot(wxz, vec2(0.082, 0.165)) + t * 2.65) * 0.24
+         + cos(dot(wxz, vec2(0.255, -0.035)) + t * 3.25) * 0.14
+         + sin(dot(wxz, vec2(-0.125, 0.370)) - t * 4.10) * 0.07;
 }
 
 vec3 applyVibrance(vec3 col, float vib) {
@@ -579,10 +592,13 @@ void main() {
             cFine = cMicro;
         }
 
-        float strataCoord = vWorldPos.y * 1.55 + hMacro * 4.6 + hMicro * 1.3;
-        float strataWave  = sin(strataCoord);
-        float strataRidge = smoothstep(-0.35, 0.55, strataWave) * 0.14 - 0.06;
-        vec3 strataPerturb = vec3(0.0, cos(strataCoord) * 0.22 * (1.0 - abs(geomN.y)), 0.0);
+        // Subtle tilted non-periodic rock veins (no horizontal banding on vertical cliffs)
+        float tiltY = vWorldPos.y * 0.32 + vWorldPos.x * 0.11 - vWorldPos.z * 0.09;
+        float veinA = sin(tiltY + hMacro * 6.5 + hMicro * 2.4);
+        float veinB = sin(tiltY * 1.73 - vWorldPos.x * 0.17 + cMacro * 5.8);
+        float strataMask = smoothstep(0.32, 0.76, hMacro) * (1.0 - abs(geomN.y));
+        float strataRidge = (veinA * veinB) * 0.045 * strataMask;
+        vec3 strataPerturb = vec3(0.0, (veinA * 0.5 + veinB * 0.5) * 0.055 * strataMask, 0.0);
 
         vec3 perturb = pMacro * 0.52 + pMicro * 0.50 + pFine * (0.34 * fineWeight) + strataPerturb;
         N = normalize(geomN + perturb * 0.92);
@@ -607,10 +623,10 @@ void main() {
             // Sun-bleached coastal cliff tone on dry above-water rock faces
             if (aboveWaterMask > 0.01) {
                 vec3 coastalRock = mix(vec3(0.28, 0.30, 0.31), vec3(0.47, 0.46, 0.42), detailHeight);
-                float dryTop = smoothstep(0.55, 0.88, geomN.y) * smoothstep(waveSurfY + 1.8, waveSurfY + 4.8, vWorldPos.y);
-                vec3 mossySoil = mix(vec3(0.24, 0.34, 0.17), vec3(0.36, 0.44, 0.22), detailHeight);
-                coastalRock = mix(coastalRock, mossySoil, dryTop * 0.55);
-                baseCol = mix(baseCol, coastalRock, aboveWaterMask * 0.72);
+                float dryTop = smoothstep(0.36, 0.74, geomN.y) * smoothstep(waveSurfY + 1.0, waveSurfY + 3.2, vWorldPos.y);
+                vec3 mossySoil = mix(vec3(0.18, 0.32, 0.12), vec3(0.32, 0.45, 0.18), detailHeight);
+                coastalRock = mix(coastalRock, mossySoil, dryTop * 0.72);
+                baseCol = mix(baseCol, coastalRock, aboveWaterMask * 0.76);
             }
         }
 
@@ -935,7 +951,7 @@ out vec3 vPos_TCS;
 out vec3 vNormal_TCS;
 out vec3 vColor_TCS;
 out vec2 vParam_TCS;
-out vec3 vSwayInfo_TCS; // xy: instance root XZ, z: local aPos.x
+out vec4 vSwayInfo_TCS; // xy: instance root XZ, zw: local aPos.xz
 
 void main() {
     float sx = max(aInstPosScaleXZ.w, 0.01);
@@ -970,7 +986,7 @@ void main() {
     vNormal_TCS   = normalize(rot * localN);
     vColor_TCS    = col;
     vParam_TCS    = aParam;
-    vSwayInfo_TCS = vec3(aInstPosScaleXZ.x, aInstPosScaleXZ.z, aPos.x);
+    vSwayInfo_TCS = vec4(aInstPosScaleXZ.x, aInstPosScaleXZ.z, aPos.x, aPos.z);
 }
 )";
 
@@ -981,13 +997,13 @@ in vec3 vPos_TCS[];
 in vec3 vNormal_TCS[];
 in vec3 vColor_TCS[];
 in vec2 vParam_TCS[];
-in vec3 vSwayInfo_TCS[];
+in vec4 vSwayInfo_TCS[];
 
 out vec3 vPos_TES[];
 out vec3 vNormal_TES[];
 out vec3 vColor_TES[];
 out vec2 vParam_TES[];
-out vec3 vSwayInfo_TES[];
+out vec4 vSwayInfo_TES[];
 
 uniform vec3 uCamPos;
 uniform float uMaxTessLevel;
@@ -1031,7 +1047,7 @@ in vec3 vPos_TES[];
 in vec3 vNormal_TES[];
 in vec3 vColor_TES[];
 in vec2 vParam_TES[];
-in vec3 vSwayInfo_TES[];
+in vec4 vSwayInfo_TES[];
 
 uniform sampler2D uRockTex;
 uniform mat4 uViewProj;
@@ -1069,7 +1085,7 @@ void main() {
     vec3 norm     = safeNorm(b.x * n0 + b.y * n1 + b.z * n2);
     vec3 col      = b.x * vColor_TES[0] + b.y * vColor_TES[1] + b.z * vColor_TES[2];
     vec2 param    = b.x * vParam_TES[0] + b.y * vParam_TES[1] + b.z * vParam_TES[2];
-    vec3 swayInfo = b.x * vSwayInfo_TES[0] + b.y * vSwayInfo_TES[1] + b.z * vSwayInfo_TES[2];
+    vec4 swayInfo = b.x * vSwayInfo_TES[0] + b.y * vSwayInfo_TES[1] + b.z * vSwayInfo_TES[2];
 
     float dist = length(uCamPos - pLin);
     float minDot = min(min(dot(n0, n1), dot(n1, n2)), dot(n2, n0));
@@ -1112,17 +1128,23 @@ void main() {
         if (param.x > 5.5) {
             float h = clamp(param.y, 0.0, 1.0);
             float bend = h * h;
-            vec2 windDir = vec2(0.84, 0.54);
-            float gustPhase = dot(pos.xz, vec2(0.085, 0.062)) - uTime * 2.15;
-            float gust = 0.55 + 0.45 * sin(gustPhase) + 0.22 * sin(gustPhase * 1.73 + 1.4);
-            float localPhase = uTime * 3.8 + swayInfo.x * 0.45 + swayInfo.y * 0.37 + swayInfo.z * 1.9;
-            float flutter = sin(localPhase) * 0.14 * h;
-            vec2 swayXZ = windDir * (0.48 * gust * bend)
-                        + vec2(-windDir.y, windDir.x) * (flutter * 0.65 + sin(localPhase * 0.7) * 0.10 * bend);
+            vec2 windDir  = vec2(0.84, 0.54);
+            vec2 crossDir = vec2(-windDir.y, windDir.x);
+
+            float gustWave1 = sin(dot(pos.xz, vec2(0.11, 0.08)) - uTime * 3.2);
+            float gustWave2 = sin(dot(pos.xz, vec2(-0.07, 0.15)) - uTime * 2.1 + 1.7);
+            float gust = 0.58 + 0.42 * gustWave1 + 0.24 * gustWave2;
+
+            float bladePhase = uTime * 5.4 + swayInfo.z * 5.7 + swayInfo.w * 6.3
+                             + swayInfo.x * 0.37 + swayInfo.y * 0.29;
+            float flutter = sin(bladePhase) * 0.18 * h + cos(bladePhase * 1.43) * 0.08 * bend;
+
+            vec2 swayXZ = windDir * (0.68 * gust * bend + flutter * 0.45)
+                        + crossDir * (flutter * 0.85 + sin(bladePhase * 0.55) * 0.16 * bend);
             pos.x += swayXZ.x;
             pos.z += swayXZ.y;
-            pos.y -= length(swayXZ) * 0.24 * h;
-            norm = safeNorm(norm + vec3(swayXZ.x * 0.35, 0.0, swayXZ.y * 0.35));
+            pos.y -= length(swayXZ) * 0.26 * h;
+            norm = safeNorm(norm + vec3(swayXZ.x * 0.42, 0.0, swayXZ.y * 0.42));
         } else if (param.x > 4.5 || (param.x > 2.5 && param.x < 3.5)) {
             float h = clamp(param.y, 0.0, 1.0);
             float phase = uTime * 1.10 + swayInfo.x * 0.11 + swayInfo.y * 0.09;
@@ -1331,10 +1353,10 @@ out vec4 FragColor;
 
 float evalWaveSurfY(vec2 wxz, float t) {
     return uWaterY
-         + sin(dot(wxz, vec2(0.048, 0.032)) + t * 1.15) * 0.26
-         + sin(dot(wxz, vec2(-0.062, 0.054)) + t * 1.48) * 0.18
-         + cos(dot(wxz, vec2(0.115, -0.095)) + t * 2.05) * 0.11
-         + sin(dot(wxz, vec2(0.185, 0.165)) - t * 2.75) * 0.06;
+         + sin(dot(wxz, vec2(0.112, 0.068)) + t * 2.10) * 0.36
+         + sin(dot(wxz, vec2(0.082, 0.165)) + t * 2.65) * 0.24
+         + cos(dot(wxz, vec2(0.255, -0.035)) + t * 3.25) * 0.14
+         + sin(dot(wxz, vec2(-0.125, 0.370)) - t * 4.10) * 0.07;
 }
 
 vec4 sampleTriplanar(sampler2D tex, vec3 p, vec3 blend) {
