@@ -83,14 +83,6 @@ project(DeepDive
 
 message(STATUS "DeepDive version: ${PROJECT_VERSION} (tag: ${DEEPDIVE_GIT_TAG}, commit: ${DEEPDIVE_GIT_HASH})")
 
-project(DeepDive
-    VERSION "${DEEPDIVE_VERSION_MAJOR}.${DEEPDIVE_VERSION_MINOR}.${DEEPDIVE_VERSION_PATCH}.${DEEPDIVE_VERSION_TWEAK}"
-    DESCRIPTION "Procedural 3D Underwater World Tech Demo (Qt6 / OpenGL 3.3)"
-    LANGUAGES CXX
-)
-
-message(STATUS "DeepDive version: ${PROJECT_VERSION} (commit: ${DEEPDIVE_GIT_HASH})")
-
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -98,14 +90,56 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGL OpenGLWidgets Multimedia)
 
 # ==============================================================================
-# Генерация version.h и платформенных метаданных
+# Генерация version.h, иконок и платформенных метаданных
 # ==============================================================================
 set(DEEPDIVE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(DEEPDIVE_ICON_DIR "${DEEPDIVE_GENERATED_DIR}/icons")
+
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/.cmake/version.h.in"
     "${DEEPDIVE_GENERATED_DIR}/version.h"
     @ONLY
 )
+
+# Консольный генератор иконок и NSIS-баннеров (работает на этапе сборки, не попадает в пакет)
+add_executable(DeepDiveIconGen
+    tools/IconGenerator.cpp
+    src/AppIcon.h
+)
+target_include_directories(DeepDiveIconGen PRIVATE src)
+target_link_libraries(DeepDiveIconGen PRIVATE Qt6::Gui)
+
+set(DEEPDIVE_GENERATED_ICONS
+    "${DEEPDIVE_ICON_DIR}/deepdive.svg"
+    "${DEEPDIVE_ICON_DIR}/deepdive.ico"
+    "${DEEPDIVE_ICON_DIR}/deepdive.icns"
+    "${DEEPDIVE_ICON_DIR}/nsis_welcome.bmp"
+    "${DEEPDIVE_ICON_DIR}/nsis_header.bmp"
+    "${DEEPDIVE_ICON_DIR}/deepdive_16.png"
+    "${DEEPDIVE_ICON_DIR}/deepdive_32.png"
+    "${DEEPDIVE_ICON_DIR}/deepdive_48.png"
+    "${DEEPDIVE_ICON_DIR}/deepdive_64.png"
+    "${DEEPDIVE_ICON_DIR}/deepdive_128.png"
+    "${DEEPDIVE_ICON_DIR}/deepdive_256.png"
+    "${DEEPDIVE_ICON_DIR}/deepdive_512.png"
+)
+
+add_custom_command(
+    OUTPUT ${DEEPDIVE_GENERATED_ICONS}
+    COMMAND "${CMAKE_COMMAND}"
+            "-DICON_GEN=$<TARGET_FILE:DeepDiveIconGen>"
+            "-DQT_BIN_DIR=$<TARGET_FILE_DIR:Qt6::Core>"
+            "-DOUT_DIR=${DEEPDIVE_ICON_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/.cmake/RunIconGen.cmake"
+    DEPENDS
+        DeepDiveIconGen
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/AppIcon.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/IconGenerator.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.cmake/RunIconGen.cmake"
+    COMMENT "Generating DeepDive vector & platform icons"
+    VERBATIM
+)
+add_custom_target(DeepDiveIcons DEPENDS ${DEEPDIVE_GENERATED_ICONS})
 
 set(DEEPDIVE_PLATFORM_SOURCES "")
 if(WIN32)
@@ -114,8 +148,17 @@ if(WIN32)
         "${DEEPDIVE_GENERATED_DIR}/version.rc"
         @ONLY
     )
+    set_source_files_properties("${DEEPDIVE_GENERATED_DIR}/version.rc" PROPERTIES
+        OBJECT_DEPENDS "${DEEPDIVE_ICON_DIR}/deepdive.ico"
+    )
     list(APPEND DEEPDIVE_PLATFORM_SOURCES "${DEEPDIVE_GENERATED_DIR}/version.rc")
-elseif(UNIX AND NOT APPLE)
+elseif(APPLE)
+    set_source_files_properties("${DEEPDIVE_ICON_DIR}/deepdive.icns" PROPERTIES
+        GENERATED TRUE
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
+    list(APPEND DEEPDIVE_PLATFORM_SOURCES "${DEEPDIVE_ICON_DIR}/deepdive.icns")
+elseif(UNIX)
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/.cmake/deepdive.desktop.in"
         "${DEEPDIVE_GENERATED_DIR}/deepdive.desktop"
@@ -128,6 +171,7 @@ endif()
 # ==============================================================================
 add_executable(DeepDive WIN32 MACOSX_BUNDLE
     src/main.cpp
+    src/AppIcon.h
     src/GpuCapabilities.h
     src/Noise.h
     src/ShadersGeometry.h
@@ -151,6 +195,8 @@ add_executable(DeepDive WIN32 MACOSX_BUNDLE
     ${DEEPDIVE_PLATFORM_SOURCES}
 )
 
+add_dependencies(DeepDive DeepDiveIcons)
+
 target_include_directories(DeepDive PRIVATE
     src
     "${DEEPDIVE_GENERATED_DIR}"
@@ -170,6 +216,7 @@ elseif(APPLE)
     set_target_properties(DeepDive PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME "Deep Dive"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.deepdive.techdemo"
+        MACOSX_BUNDLE_ICON_FILE "deepdive.icns"
         MACOSX_BUNDLE_BUNDLE_VERSION "${DEEPDIVE_VERSION_TWEAK}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_INFO_STRING "Deep Dive ${PROJECT_VERSION}"
@@ -251,6 +298,17 @@ else()
         DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
     )
     install(
+        FILES "${DEEPDIVE_ICON_DIR}/deepdive.svg"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
+    )
+    foreach(_icon_sz 16 32 48 64 128 256 512)
+        install(
+            FILES "${DEEPDIVE_ICON_DIR}/deepdive_${_icon_sz}.png"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/${_icon_sz}x${_icon_sz}/apps"
+            RENAME "deepdive.png"
+        )
+    endforeach()
+    install(
         FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
         DESTINATION "${CMAKE_INSTALL_DOCDIR}"
         OPTIONAL
@@ -301,6 +359,7 @@ set(CPACK_NSIS_DISPLAY_NAME "Deep Dive")
 set(CPACK_NSIS_PACKAGE_NAME "Deep Dive ${PROJECT_VERSION}")
 set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES64")
 set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
+set(CPACK_NSIS_INSTALLED_ICON_NAME "DeepDive.exe")
 set(CPACK_PACKAGE_EXECUTABLES "DeepDive" "Deep Dive")
 set(CPACK_CREATE_DESKTOP_LINKS "DeepDive")
 set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
@@ -318,7 +377,7 @@ set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
 set(CPACK_DMG_VOLUME_NAME "Deep Dive ${PROJECT_VERSION}")
 set(CPACK_DMG_FORMAT "UDZO")
 
-# Персональные опции на каждый генератор (имена файлов и префиксы)
+# Персональные опции на каждый генератор (имена файлов, иконки NSIS/DMG и префиксы)
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/.cmake/CPackOptions.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/CPackOptions.cmake"

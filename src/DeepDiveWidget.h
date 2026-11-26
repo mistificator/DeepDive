@@ -48,6 +48,7 @@ private:
     void setHudVisible(bool visible);
     void updateHudOverlay();
     void createLoadingOverlay();
+    void updateLoadingIconPixmap();
     void setLoadingOverlayVisible(bool visible, const QString& text = {});
     void toggleFullscreen();
     void setMouseCapture(bool enable);
@@ -71,6 +72,7 @@ private:
 
     // Loading overlay (indeterminate progress bar) and background generation thread
     QWidget* m_loadingOverlay = nullptr;
+    QLabel* m_loadingIconLabel = nullptr;
     QLabel* m_loadingLabel = nullptr;
     QProgressBar* m_loadingBar = nullptr;
     std::thread m_loadThread;

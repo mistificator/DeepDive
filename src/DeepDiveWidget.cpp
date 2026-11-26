@@ -1,4 +1,5 @@
 #include "DeepDiveWidget.h"
+#include "AppIcon.h"
 #include "DeepDiveEngine.h"
 #include "DeepDiveRender.h"
 #include "WorldGenerator.h"
@@ -300,6 +301,11 @@ void DeepDiveWidget::createLoadingOverlay() {
     layout->setAlignment(Qt::AlignCenter);
     layout->setSpacing(14);
 
+    m_loadingIconLabel = new QLabel(m_loadingOverlay);
+    m_loadingIconLabel->setAlignment(Qt::AlignCenter);
+    m_loadingIconLabel->setFixedSize(112, 112);
+    updateLoadingIconPixmap();
+
     auto* title = new QLabel("Deep Dive", m_loadingOverlay);
     title->setAlignment(Qt::AlignCenter);
     title->setStyleSheet("font-size: 26px; font-weight: 600; letter-spacing: 2px;");
@@ -313,6 +319,7 @@ void DeepDiveWidget::createLoadingOverlay() {
     m_loadingBar->setTextVisible(false);
     m_loadingBar->setFixedWidth(360);
 
+    layout->addWidget(m_loadingIconLabel, 0, Qt::AlignCenter);
     layout->addWidget(title);
     layout->addWidget(m_loadingLabel);
     layout->addWidget(m_loadingBar, 0, Qt::AlignCenter);
@@ -320,6 +327,11 @@ void DeepDiveWidget::createLoadingOverlay() {
     m_loadingOverlay->setGeometry(rect());
     m_loadingOverlay->show();
     m_loadingOverlay->raise();
+}
+
+void DeepDiveWidget::updateLoadingIconPixmap() {
+    if (!m_loadingIconLabel) return;
+    m_loadingIconLabel->setPixmap(AppIcon::createPixmap(112, devicePixelRatioF()));
 }
 
 void DeepDiveWidget::setLoadingOverlayVisible(bool visible, const QString& text) {
@@ -330,6 +342,7 @@ void DeepDiveWidget::setLoadingOverlayVisible(bool visible, const QString& text)
     m_loadingOverlay->setGeometry(rect());
     m_loadingOverlay->setVisible(visible);
     if (visible) {
+        updateLoadingIconPixmap();
         m_loadingOverlay->raise();
     }
 }
@@ -572,6 +585,7 @@ void DeepDiveWidget::showEvent(QShowEvent* event) {
     if (m_loadingOverlay) {
         m_loadingOverlay->setGeometry(rect());
         if (m_loadingOverlay->isVisible()) {
+            updateLoadingIconPixmap();
             m_loadingOverlay->raise();
         }
     }

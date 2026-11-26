@@ -4,5 +4,6 @@ Version=1.0
 Name=Deep Dive
 Comment=@PROJECT_DESCRIPTION@
 Exec=DeepDive
+Icon=deepdive
 Terminal=false
 Categories=Graphics;3DGraphics;Game;

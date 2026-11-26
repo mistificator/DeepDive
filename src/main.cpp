@@ -3,6 +3,7 @@
 #include <QOpenGLContext>
 #include <QStringList>
 #include <QSurfaceFormat>
+#include "AppIcon.h"
 #include "DeepDiveWidget.h"
 #include "version.h"
 
@@ -53,6 +54,10 @@ int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("DeepDive");
     app.setApplicationVersion(DEEPDIVE_VERSION_STRING);
+    app.setDesktopFileName("deepdive");
+
+    const QIcon appIcon = AppIcon::createAppIcon();
+    app.setWindowIcon(appIcon);
 
     const bool forceGl33 = app.arguments().contains("--gl33");
     int glMajor = 3;
@@ -79,6 +84,7 @@ int main(int argc, char* argv[]) {
     QSurfaceFormat::setDefaultFormat(fmt);
 
     DeepDiveWidget window;
+    window.setWindowIcon(appIcon);
     window.setWindowTitle(
         QString("Deep Dive v%1 — Procedural Underwater World (Qt6 / OpenGL %2.%3)")
             .arg(DEEPDIVE_VERSION_STRING)
