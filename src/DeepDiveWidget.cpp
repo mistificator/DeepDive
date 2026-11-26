@@ -14,9 +14,100 @@
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QStyleHints>
+#include <QtGlobal>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <utility>
+
+namespace {
+
+int mapSet1ScanCodeToQtKey(quint32 sc) {
+    switch (sc) {
+    case 0x29: return Qt::Key_QuoteLeft; // ` / ~ / ё
+    case 0x0C: return Qt::Key_Minus;     // - / _
+    case 0x0D: return Qt::Key_Equal;     // = / +
+    case 0x11: return Qt::Key_W;
+    case 0x13: return Qt::Key_R;
+    case 0x14: return Qt::Key_T;
+    case 0x19: return Qt::Key_P;
+    case 0x1E: return Qt::Key_A;
+    case 0x1F: return Qt::Key_S;
+    case 0x20: return Qt::Key_D;
+    case 0x21: return Qt::Key_F;
+    case 0x25: return Qt::Key_K;
+    case 0x26: return Qt::Key_L;
+    case 0x2E: return Qt::Key_C;
+    case 0x30: return Qt::Key_B;
+    case 0x32: return Qt::Key_M;
+    default:   return 0;
+    }
+}
+
+int resolvePhysicalKey(const QKeyEvent* event) {
+    const int k = event->key();
+
+    // Pass through non-character special keys (Escape, Enter, Shift, Ctrl, Alt,
+    // arrows, F-keys, media/volume keys) as-is, while allowing dead keys and
+    // Qt::Key_unknown to be resolved by hardware scan code.
+    const bool isDeadKey = (k >= 0x01001250 && k <= 0x0100126F);
+    if (k == Qt::Key_Space ||
+        (k >= Qt::Key_Escape && k != Qt::Key_unknown && !isDeadKey)) {
+        return k;
+    }
+
+#if defined(Q_OS_WIN)
+    // Hardware PS/2 Set 1 scan code is independent of the active keyboard layout
+    if (const int mapped = mapSet1ScanCodeToQtKey(event->nativeScanCode())) {
+        return mapped;
+    }
+    // Fallback for virtual/RDP keyboards that omit hardware scan codes
+    const quint32 vk = event->nativeVirtualKey();
+    if (vk >= 'A' && vk <= 'Z') {
+        return static_cast<int>(vk); // Matches Qt::Key_A .. Qt::Key_Z
+    }
+    switch (vk) {
+    case 0xC0: return Qt::Key_QuoteLeft; // VK_OEM_3 (` / ~ / ё)
+    case 0xBB: return Qt::Key_Equal;     // VK_OEM_PLUS (= / +)
+    case 0xBD: return Qt::Key_Minus;     // VK_OEM_MINUS (- / _)
+    case 0x6B: return Qt::Key_Plus;      // VK_ADD (Numpad +)
+    case 0x6D: return Qt::Key_Minus;     // VK_SUBTRACT (Numpad -)
+    default:   break;
+    }
+#elif defined(Q_OS_LINUX)
+    // X11 and Wayland (xkbcommon) report evdev + 8; evdev matches Set 1
+    const quint32 sc = event->nativeScanCode();
+    if (sc >= 8u) {
+        if (const int mapped = mapSet1ScanCodeToQtKey(sc - 8u)) {
+            return mapped;
+        }
+    }
+#elif defined(Q_OS_MACOS)
+    // Physical ANSI keycodes (Carbon/HIToolbox), layout-independent
+    switch (event->nativeVirtualKey()) {
+    case 0x32: return Qt::Key_QuoteLeft; // kVK_ANSI_Grave
+    case 0x1B: return Qt::Key_Minus;     // kVK_ANSI_Minus
+    case 0x18: return Qt::Key_Equal;     // kVK_ANSI_Equal
+    case 0x0D: return Qt::Key_W;         // kVK_ANSI_W
+    case 0x0F: return Qt::Key_R;         // kVK_ANSI_R
+    case 0x11: return Qt::Key_T;         // kVK_ANSI_T
+    case 0x23: return Qt::Key_P;         // kVK_ANSI_P
+    case 0x00: return Qt::Key_A;         // kVK_ANSI_A
+    case 0x01: return Qt::Key_S;         // kVK_ANSI_S
+    case 0x02: return Qt::Key_D;         // kVK_ANSI_D
+    case 0x03: return Qt::Key_F;         // kVK_ANSI_F
+    case 0x28: return Qt::Key_K;         // kVK_ANSI_K
+    case 0x25: return Qt::Key_L;         // kVK_ANSI_L
+    case 0x08: return Qt::Key_C;         // kVK_ANSI_C
+    case 0x0B: return Qt::Key_B;         // kVK_ANSI_B
+    case 0x2E: return Qt::Key_M;         // kVK_ANSI_M
+    default:   break;
+    }
+#endif
+
+    return k;
+}
+
+} // namespace
 
 struct DeepDiveWidget::PendingWorldLoad {
     std::vector<AdapterCapability> adapters;
@@ -32,6 +123,7 @@ DeepDiveWidget::DeepDiveWidget(std::vector<AdapterCapability> adapters, QWidget*
     m_render(std::make_unique<DeepDiveRender>()),
     m_adapters(std::move(adapters)) {
     setFocusPolicy(Qt::StrongFocus);
+    setAttribute(Qt::WA_InputMethodEnabled, false);
     setMouseTracking(true);
     setMinimumSize(1280, 720);
 
@@ -632,20 +724,27 @@ void DeepDiveWidget::paintGL() {
 }
 
 void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
+    const int key = resolvePhysicalKey(event);
+
     if ((event->modifiers() & Qt::AltModifier) &&
-        (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
-        toggleFullscreen();
+        (key == Qt::Key_Return || key == Qt::Key_Enter)) {
+        if (!event->isAutoRepeat()) {
+            toggleFullscreen();
+        }
         event->accept();
         return;
     }
 
-    if (event->key() == Qt::Key_Escape) {
-        if (m_mouseCaptured) {
-            m_userReleasedMouse = true;
-            setMouseCapture(false);
-        } else {
-            close();
+    if (key == Qt::Key_Escape) {
+        if (!event->isAutoRepeat()) {
+            if (m_mouseCaptured) {
+                m_userReleasedMouse = true;
+                setMouseCapture(false);
+            } else {
+                close();
+            }
         }
+        event->accept();
         return;
     }
 
@@ -653,9 +752,32 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
+    m_pressedKeys.insert(key);
+
+    if (key == Qt::Key_Plus || key == Qt::Key_Equal) {
+        if (m_audioEngine) {
+            m_audioEngine->adjustVolume(0.05f);
+            m_lastHudUpdateNs = 0;
+        }
+        event->accept();
+        return;
+    }
+    if (key == Qt::Key_Minus) {
+        if (m_audioEngine) {
+            m_audioEngine->adjustVolume(-0.05f);
+            m_lastHudUpdateNs = 0;
+        }
+        event->accept();
+        return;
+    }
+
+    if (event->isAutoRepeat()) {
+        return;
+    }
+
     const QString txt = event->text();
-    const bool isHudToggle = (event->key() == Qt::Key_QuoteLeft ||
-                              event->key() == Qt::Key_AsciiTilde ||
+    const bool isHudToggle = (key == Qt::Key_QuoteLeft ||
+                              key == Qt::Key_AsciiTilde ||
                               txt == QLatin1String("`") ||
                               txt == QLatin1String("~") ||
                               (!txt.isEmpty() && (txt[0] == QChar(0x0451) || txt[0] == QChar(0x0401))));
@@ -664,51 +786,43 @@ void DeepDiveWidget::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
-    m_pressedKeys.insert(event->key());
-    if (event->key() == Qt::Key_C) {
+    if (key == Qt::Key_C) {
         m_engine->cycleCameraMode();
         m_lastHudUpdateNs = 0;
-    } else if (event->key() == Qt::Key_B) {
+    } else if (key == Qt::Key_B) {
         m_engine->cycleBiome();
         m_lastHudUpdateNs = 0;
-    } else if (event->key() == Qt::Key_R) {
+    } else if (key == Qt::Key_R) {
         m_seed += 17u;
         startAsyncWorldLoad(m_seed, false);
-    } else if (event->key() == Qt::Key_P) {
+    } else if (key == Qt::Key_P) {
         m_render->togglePostProcess();
         m_lastHudUpdateNs = 0;
-    } else if (event->key() == Qt::Key_L) {
+    } else if (key == Qt::Key_L) {
         m_render->toggleShadows();
         m_lastHudUpdateNs = 0;
-    } else if (event->key() == Qt::Key_F) {
+    } else if (key == Qt::Key_F) {
         m_render->toggleWireframe();
         m_lastHudUpdateNs = 0;
-    } else if (event->key() == Qt::Key_T) {
+    } else if (key == Qt::Key_T) {
         m_render->toggleTessellation();
         m_lastHudUpdateNs = 0;
-    } else if (event->key() == Qt::Key_M) {
+    } else if (key == Qt::Key_M) {
         if (m_audioEngine) {
             m_audioEngine->toggleMute();
             m_lastHudUpdateNs = 0;
         }
-    } else if (event->key() == Qt::Key_K) {
+    } else if (key == Qt::Key_K) {
         m_engine->summonWhaleNearPlayer();
         if (m_audioEngine) m_audioEngine->triggerWhaleCall();
-    } else if (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal) {
-        if (m_audioEngine) {
-            m_audioEngine->adjustVolume(0.05f);
-            m_lastHudUpdateNs = 0;
-        }
-    } else if (event->key() == Qt::Key_Minus) {
-        if (m_audioEngine) {
-            m_audioEngine->adjustVolume(-0.05f);
-            m_lastHudUpdateNs = 0;
-        }
     }
 }
 
 void DeepDiveWidget::keyReleaseEvent(QKeyEvent* event) {
-    m_pressedKeys.remove(event->key());
+    if (event->isAutoRepeat()) {
+        return;
+    }
+    m_pressedKeys.remove(resolvePhysicalKey(event));
 }
 
 void DeepDiveWidget::mousePressEvent(QMouseEvent* event) {
