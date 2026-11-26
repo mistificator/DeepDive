@@ -220,8 +220,10 @@ public:
 
 private:
     static void generateTerrainChunks(WorldData& data, uint32_t seed);
-    static void generatePropPrototypes(WorldData& data);
-    static void generateChunkProps(WorldData& data, uint32_t seed);
+    static void generateEnvironmentPrototypes(WorldData& data);
+    static void generateFloraPrototypes(WorldData& data);
+    static void generateChunkRocks(WorldData& data, uint32_t seed);
+    static void generateChunkFlora(WorldData& data, uint32_t seed);
     static void generateShipwrecks(WorldData& data, uint32_t seed);
     static void generateFaunaMeshes(WorldData& data);
     static void generateWhaleMeshes(WorldData& data);
@@ -229,6 +231,8 @@ private:
     static void generateSeagullMeshes(WorldData& data);
     static void generateFaunaAgents(WorldData& data, uint32_t seed);
     static void generateGodRaysAndParticles(WorldData& data, uint32_t seed);
+
+    static float samplePlateauIslandMask(float wx, float wz, uint32_t seed);
 
     static void appendBox(std::vector<EnvVertex>& verts, std::vector<uint32_t>& inds,
                           const QVector3D& center, const QVector3D& size,

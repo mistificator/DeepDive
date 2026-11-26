@@ -180,7 +180,7 @@ constexpr std::array<PropLodConfig, PROP_ARCHETYPE_COUNT> PROP_LOD_CFG = {{
     // PROP_BOULDER_CHUNK
     {225.0f, 420.0f, 10.0f, true,  105.0f, 155.0f},
     // PROP_CLIFF_CRAG
-    {235.0f, 430.0f, 10.0f, true,  105.0f, 155.0f},
+    {235.0f, 480.0f, 10.0f, true,  105.0f, 155.0f},
     // PROP_KELP_COLUMN
     {135.0f, 330.0f,  8.0f, true,   85.0f, 150.0f},
     // PROP_BARREL_SPONGE
@@ -194,7 +194,7 @@ constexpr std::array<PropLodConfig, PROP_ARCHETYPE_COUNT> PROP_LOD_CFG = {{
     // PROP_ANEMONE_PEN
     {120.0f, 230.0f,  8.0f, false,   0.0f,   0.0f},
     // PROP_CLIFF_GRASS
-    {130.0f, 420.0f, 12.0f, false,   0.0f,   0.0f}}};
+    {130.0f, 540.0f, 12.0f, false,   0.0f,   0.0f}}};
 } // namespace
 
 // ============================================================================
@@ -560,9 +560,9 @@ void DeepDiveRender::createShadowMapBuffer() {
 }
 
 void DeepDiveRender::createWaterSurfaceMesh() {
-    constexpr int RINGS = 72;
+    constexpr int RINGS = 88;
     constexpr int SECTORS = 96;
-    constexpr float RADIUS = 455.0f;
+    constexpr float RADIUS = 1650.0f;
 
     std::vector<QVector2D> verts;
     verts.reserve(1 + RINGS * SECTORS);
@@ -570,7 +570,7 @@ void DeepDiveRender::createWaterSurfaceMesh() {
 
     for (int r = 1; r <= RINGS; ++r) {
         const float t = static_cast<float>(r) / static_cast<float>(RINGS);
-        const float rad = RADIUS * std::pow(t, 2.2f);
+        const float rad = RADIUS * std::pow(t, 2.75f);
         for (int s = 0; s < SECTORS; ++s) {
             const float ang = (TWO_PI * static_cast<float>(s)) / static_cast<float>(SECTORS);
             verts.emplace_back(std::cos(ang) * rad, std::sin(ang) * rad);
@@ -1378,16 +1378,18 @@ void DeepDiveRender::cullAndUploadFauna(const DeepDiveEngine& engine, const Frus
     m_visSeagullLod0.clear();
     m_visSeagullLod1.clear();
 
+    const bool camAboveWater = engine.isCameraAboveWater();
+
     constexpr float FISH_LOD0_DIST    = 115.0f;
     constexpr float FISH_MAX_DIST     = 240.0f;
     constexpr float MANTA_LOD0_DIST   = 200.0f;
     constexpr float MANTA_MAX_DIST    = 350.0f;
     constexpr float WHALE_LOD0_DIST   = 330.0f;
-    constexpr float WHALE_MAX_DIST    = 460.0f;
+    const float     whaleMaxDist      = camAboveWater ? 900.0f : 460.0f;
     constexpr float ANGLER_LOD0_DIST  = 165.0f;
     constexpr float ANGLER_MAX_DIST   = 310.0f;
     constexpr float SEAGULL_LOD0_DIST = 165.0f;
-    constexpr float SEAGULL_MAX_DIST  = 450.0f;
+    const float     seagullMaxDist    = camAboveWater ? 950.0f : 450.0f;
 
     for (size_t i = 0; i < world.fishAgents.size(); ++i) {
         const auto& f = world.fishAgents[i];
@@ -1415,7 +1417,7 @@ void DeepDiveRender::cullAndUploadFauna(const DeepDiveEngine& engine, const Frus
 
     {
         const float whaleDist = (whale.pos - camPos).length();
-        if (whaleDist <= WHALE_MAX_DIST && frustum.intersectsSphere(whale.pos, whale.boundingRadius * 1.25f)) {
+        if (whaleDist <= whaleMaxDist && frustum.intersectsSphere(whale.pos, whale.boundingRadius * 1.25f)) {
             m_whaleLodState = updateBinaryLod(m_whaleLodState, whaleDist, WHALE_LOD0_DIST, 12.0f);
             if (m_whaleLodState == 0) m_visWhaleLod0.push_back(packFaunaInstance(whale));
             else                      m_visWhaleLod1.push_back(packFaunaInstance(whale));
@@ -1437,7 +1439,7 @@ void DeepDiveRender::cullAndUploadFauna(const DeepDiveEngine& engine, const Frus
     for (size_t i = 0; i < world.seagullAgents.size(); ++i) {
         const auto& g = world.seagullAgents[i];
         const float dist = (g.pos - camPos).length();
-        if (dist > SEAGULL_MAX_DIST) continue;
+        if (dist > seagullMaxDist) continue;
         if (!frustum.intersectsSphere(g.pos, g.boundingRadius * 1.8f)) continue;
 
         uint8_t& st = m_seagullLodState[i];
@@ -1507,10 +1509,14 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     const bool useTess = (m_tessSupported && m_tessEnabled && m_gl4 != nullptr);
     const float maxTessF = static_cast<float>(std::max(1, m_maxTessLevel));
 
+    constexpr float UNDERWATER_FAR_PLANE  = 460.0f;
+    constexpr float ABOVE_WATER_FAR_PLANE = 1700.0f;
+    const float zFar = camAboveWater ? ABOVE_WATER_FAR_PLANE : UNDERWATER_FAR_PLANE;
+
     QMatrix4x4 proj;
     const float aspect = static_cast<float>(physW) / static_cast<float>(physH);
     const float fovY = std::clamp(65.0f + engine.dynamicFovOffset(), 52.0f, 78.0f);
-    proj.perspective(fovY, aspect, 0.25f, 460.0f);
+    proj.perspective(fovY, aspect, 0.25f, zFar);
 
     QMatrix4x4 view;
     view.lookAt(camPos, camPos + camForward, QVector3D(0.0f, 1.0f, 0.0f));
@@ -1694,6 +1700,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         prog.setUniformValue("uTime", simTime);
         prog.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
         prog.setUniformValue("uCamAboveWater", camAboveInt);
+        prog.setUniformValue("uFarPlane", zFar);
         prog.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
         prog.setUniformValue("uLureCount", lureCount);
         if (lureCount > 0) {
@@ -1706,7 +1713,9 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     static constexpr float TERRAIN_LOD_THRESH[3] = {210.0f, 310.0f, 395.0f};
 
     std::vector<std::pair<int, float>> visibleChunks;
-    visibleChunks.reserve(128);
+    visibleChunks.reserve(camAboveWater ? 256 : 128);
+
+    const float chunkMaxDist = camAboveWater ? 1660.0f : UNDERWATER_FAR_PLANE;
 
     // 1.1. Seafloor & cliff walls (4-tier LOD; LOD0 uses hardware tessellation when enabled)
     for (int i = 0; i < static_cast<int>(world.chunks.size()); ++i) {
@@ -1714,7 +1723,13 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         if (!camFrustum.intersectsSphere(chunk.center, chunk.boundingRadius)) continue;
 
         const float d = distanceToAABB(camPos, chunk.minBounds, chunk.maxBounds);
-        if (d > 460.0f) continue;
+        if (d > chunkMaxDist) continue;
+
+        // Дальше 460 м над водой рисуем только чанки, чьи скалы выходят к/выше уровня воды
+        // (в WorldGeneratorEnvironment.cpp maxBounds.y = maxY + 32.0f)
+        if (d > UNDERWATER_FAR_PLANE && chunk.maxBounds.y() < ProcMath::WATER_SURFACE_Y + 29.0f) {
+            continue;
+        }
 
         ChunkLodState& st = m_chunkLodStates[i];
         st.terrainLod = updateLodWithHysteresis(st.terrainLod, d, TERRAIN_LOD_THRESH, 3, 8.0f);
@@ -1848,6 +1863,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     activeWaterShader.setUniformValue("uFogScale", visuals.fogScale);
     activeWaterShader.setUniformValue("uTime", simTime);
     activeWaterShader.setUniformValue("uCamAboveWater", camAboveInt);
+    activeWaterShader.setUniformValue("uFarPlane", zFar);
     activeWaterShader.setUniformValue("uWhaleSurfA",
                                       QVector4D(whale.pos.x(), whale.pos.y(), whale.pos.z(), whale.scale));
     activeWaterShader.setUniformValue("uWhaleSurfB",
@@ -1896,6 +1912,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
             m_rayShader.setUniformValue("uFogScale", visuals.fogScale);
             m_rayShader.setUniformValue("uTime", simTime);
             m_rayShader.setUniformValue("uEnableShadows", m_shadowsEnabled ? 1 : 0);
+            m_rayShader.setUniformValue("uFarPlane", zFar);
 
             glBindVertexArray(m_rayVAO);
             glDrawElementsInstanced(GL_TRIANGLES, m_rayIndexCount, GL_UNSIGNED_INT, nullptr, m_rayInstanceCount);
@@ -1951,6 +1968,8 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         m_sprayShader.setUniformValue("uSunDir", visuals.sunDir);
         m_sprayShader.setUniformValue("uViewportHeight", static_cast<float>(physH));
         m_sprayShader.setUniformValue("uTime", simTime);
+        m_sprayShader.setUniformValue("uWaterY", ProcMath::WATER_SURFACE_Y);
+        m_sprayShader.setUniformValue("uFarPlane", zFar);
 
         glBindVertexArray(m_sprayVAO);
         glDrawArrays(GL_POINTS, 0, sprayCount);
@@ -2034,6 +2053,7 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     m_postProcessShader.setUniformValue("uSplashAmount", engine.splashScreenAmount());
     m_postProcessShader.setUniformValue("uLensWetness", engine.lensWetness());
     m_postProcessShader.setUniformValue("uBulletTime", engine.bulletTimeFactor());
+    m_postProcessShader.setUniformValue("uFarPlane", zFar);
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
 

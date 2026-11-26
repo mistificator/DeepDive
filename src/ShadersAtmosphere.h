@@ -21,7 +21,7 @@ out float vWaveH;
 void main() {
     vec2 wxz = uWaterCenter + aLocalXZ;
     float r = length(aLocalXZ);
-    float edgeDamp = 1.0 - smoothstep(340.0, 445.0, r);
+    float edgeDamp = 1.0 - smoothstep(420.0, 1100.0, r);
 
     float h = 0.0;
     vec2 grad = vec2(0.0);
@@ -130,7 +130,7 @@ void main() {
     vec2 wxz = uWaterCenter + localXZ;
 
     float r = length(localXZ);
-    float edgeDamp = 1.0 - smoothstep(340.0, 445.0, r);
+    float edgeDamp = 1.0 - smoothstep(420.0, 1100.0, r);
     float camDist = length(uCamPos - vec3(wxz.x, uWaterY, wxz.y));
     float nearChop = (1.0 - smoothstep(20.0, 130.0, camDist)) * edgeDamp;
 
@@ -206,6 +206,8 @@ uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform vec3 uWaterColorDeep;
 uniform vec3 uWaterColorShallow;
+uniform float uWaterY;
+uniform float uFarPlane;
 uniform float uFogScale;
 uniform float uTime;
 uniform int uCamAboveWater;
@@ -216,7 +218,7 @@ out vec4 FragColor;
 
 float linearizeDepth(float d) {
     float zNear = 0.25;
-    float zFar  = 460.0;
+    float zFar  = max(uFarPlane, 10.0);
     float z_n = 2.0 * clamp(d, 0.0, 1.0) - 1.0;
     return (2.0 * zNear * zFar) / max(zFar + zNear - z_n * (zFar - zNear), 0.0001);
 }
@@ -443,12 +445,37 @@ void main() {
         surfaceCol = mix(surfaceCol, dayFoamCol, totalFoam);
         surfaceCol += vec3(1.0, 1.04, 1.08) * shoreBubbles * 0.35;
 
-        // Daylight aerial perspective toward the horizon
-        float airFog = 1.0 - exp(-dist * 0.00145);
-        vec3 hazeDir = normalize(vec3(rayDir.x, 0.04, rayDir.z));
-        vec3 horizonCol = sampleDaySkyWater(hazeDir, L, false);
-        vec3 outCol = mix(surfaceCol, horizonCol, clamp(airFog * 0.78, 0.0, 0.85));
+        // Height-integrated marine mist above the water surface + smooth horizon blend
+        float y0 = max(uCamPos.y - uWaterY, 0.0);
+        float y1 = max(vWorldPos.y - uWaterY, 0.0);
+        float dy = y1 - y0;
+        const float k = 0.05;
+        float heightIntegral = (abs(dy) > 0.02)
+            ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
+            : exp(-k * 0.5 * (y0 + y1));
 
+        float mistNoise = texture(uRockTex, vWorldPos.xz * 0.0026 + vec2(uTime * 0.0055, uTime * 0.0032)).a;
+        float mistMod = mix(0.84, 1.18, mistNoise);
+
+        float effDist = max(dist - 18.0, 0.0);
+        float tauAir  = dist * 0.00072;
+        float tauMist = effDist * 0.00165 * heightIntegral * mistMod;
+        float tauTotal = tauAir + tauMist;
+
+        float fogFactor = 1.0 - exp(-tauTotal);
+        float farFade = smoothstep(uFarPlane * 0.78, uFarPlane * 0.96, dist);
+        fogFactor = clamp(max(fogFactor, farFade), 0.0, 1.0);
+
+        float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
+        vec3 hazeDir = normalize(vec3(rayDir.x, 0.03, rayDir.z));
+        vec3 airHaze = sampleDaySkyWater(hazeDir, L, false);
+        vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + vec3(1.24, 1.15, 0.96) * (pow(sunDot, 5.0) * 0.24);
+
+        float mistShare = clamp(tauMist / max(tauTotal, 0.0001), 0.0, 1.0);
+        float colorBlend = mix(mistShare * 0.88, 0.76, farFade);
+        vec3 horizonCol = mix(airHaze, marineMistCol, colorBlend);
+
+        vec3 outCol = mix(surfaceCol, horizonCol, fogFactor);
         FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
         return;
     }
@@ -694,13 +721,19 @@ void main() {
         vec3 skyCol = mix(horizon, midSky, smoothstep(0.0, 0.26, elev));
         skyCol = mix(skyCol, zenith, pow(elev, 0.58));
 
-        if (dir.y < 0.0) {
-            skyCol = mix(horizon * 0.86, vec3(0.06, 0.24, 0.42), smoothstep(0.0, -0.18, dir.y));
-        }
-
         // Midday sun glow, corona & crisp solar disc
         float sunDot = clamp(dot(dir, L), 0.0, 1.0);
         vec3 middaySun = vec3(1.24, 1.15, 0.96);
+
+        // Soft marine mist band hovering along the ocean horizon
+        vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + middaySun * (pow(sunDot, 5.0) * 0.14);
+        if (dir.y < 0.0) {
+            skyCol = mix(marineMistCol, vec3(0.06, 0.24, 0.42), smoothstep(0.0, -0.22, dir.y));
+        } else {
+            float mistBand = exp(-pow(elev / 0.075, 1.35));
+            skyCol = mix(skyCol, marineMistCol, mistBand * 0.76);
+        }
+
         float mieWide  = pow(sunDot, 5.0)   * 0.16;
         float mieTight = pow(sunDot, 32.0)  * 0.44;
         float sunHalo  = pow(sunDot, 160.0) * 1.55;
@@ -802,7 +835,7 @@ void main() {
                 float cloudAlpha = 1.0 - cloudTransmittance;
                 if (cloudAlpha > 0.001) {
                     vec3 cloudCol = scatteredLight / max(cloudAlpha, 0.0001);
-                    vec3 hazeCol  = mix(horizon, skyCol, smoothstep(0.02, 0.25, dir.y));
+                    vec3 hazeCol  = mix(marineMistCol, skyCol, smoothstep(0.02, 0.25, dir.y));
 
                     float distVis   = exp(-max(firstHitT - 6000.0, 0.0) * 0.000038);
                     float horizMask = smoothstep(0.012, 0.075, dir.y);
@@ -907,6 +940,7 @@ uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform vec3 uWaterColorShallow;
+uniform float uFarPlane;
 uniform float uFogScale;
 uniform float uTime;
 uniform int uEnableShadows;
@@ -915,7 +949,7 @@ out vec4 FragColor;
 
 float linearizeDepth(float d) {
     float zNear = 0.25;
-    float zFar  = 460.0;
+    float zFar  = max(uFarPlane, 10.0);
     float z_n = 2.0 * clamp(d, 0.0, 1.0) - 1.0;
     return (2.0 * zNear * zFar) / max(zFar + zNear - z_n * (zFar - zNear), 0.0001);
 }
@@ -1153,6 +1187,8 @@ in float vSeed;
 uniform sampler2D uRockTex;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
+uniform float uWaterY;
+uniform float uFarPlane;
 uniform float uTime;
 
 out vec4 FragColor;
@@ -1203,10 +1239,19 @@ void main() {
         alpha = clamp(puff * vAlpha * 0.78, 0.0, 0.85);
     }
 
-    // Subtle daylight aerial fade for distant whale blow spouts
-    float airFog = 1.0 - exp(-dist * 0.00145);
-    vec3 horizonHaze = vec3(0.75, 0.91, 0.99);
-    col = mix(col, horizonHaze, clamp(airFog * 0.68, 0.0, 0.78));
+    // Height-integrated marine mist fade for distant spray and whale blow spouts
+    float y0 = max(uCamPos.y - uWaterY, 0.0);
+    float y1 = max(vWorldPos.y - uWaterY, 0.0);
+    float dy = y1 - y0;
+    const float k = 0.05;
+    float hInt = (abs(dy) > 0.02)
+        ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
+        : exp(-k * 0.5 * (y0 + y1));
+
+    float tau = dist * 0.00072 + max(dist - 18.0, 0.0) * 0.00165 * hInt;
+    float fogF = clamp(max(1.0 - exp(-tau), smoothstep(uFarPlane * 0.80, uFarPlane * 0.98, dist)), 0.0, 1.0);
+    vec3 horizonHaze = vec3(0.80, 0.92, 0.98) + middaySun * (pow(sunDot, 5.0) * 0.22);
+    col = mix(col, horizonHaze, fogF);
 
     FragColor = vec4(clamp(col, 0.0, 6.0), alpha);
 }
@@ -1275,6 +1320,7 @@ uniform vec2 uInvResolution;
 uniform vec3 uSunScreenPos;
 uniform vec3 uWaterTint;
 uniform float uSurfaceProximity;
+uniform float uFarPlane;
 uniform float uTime;
 uniform int uEnablePost;
 uniform int uCamAboveWater;
@@ -1291,7 +1337,7 @@ vec3 sanitizeHDR(vec3 c) {
 
 float linearizeDepth(float d) {
     float zNear = 0.25;
-    float zFar  = 460.0;
+    float zFar  = max(uFarPlane, 10.0);
     float z_n = 2.0 * clamp(d, 0.0, 1.0) - 1.0;
     return (2.0 * zNear * zFar) / max(zFar + zNear - z_n * (zFar - zNear), 0.0001);
 }

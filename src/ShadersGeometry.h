@@ -386,6 +386,7 @@ uniform float uVibrance;
 uniform float uFogScale;
 uniform float uTime;
 uniform float uWaterY;
+uniform float uFarPlane;
 uniform int uCamAboveWater;
 uniform int uEnableShadows;
 uniform int uLureCount;
@@ -429,6 +430,41 @@ vec3 computeDayAerialHaze(vec3 rayDir, vec3 L) {
     float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
     haze += vec3(1.15, 1.08, 0.92) * pow(sunDot, 5.0) * 0.16;
     return haze;
+}
+
+vec3 applyAboveWaterMist(vec3 litCol, vec3 worldPos, vec3 rayDir, float dist, vec3 L) {
+    float y0 = max(uCamPos.y - uWaterY, 0.0);
+    float y1 = max(worldPos.y - uWaterY, 0.0);
+    float dy = y1 - y0;
+
+    // Analytic integral of exponential marine mist hovering above the ocean surface (~20m scale height)
+    const float k = 0.05;
+    float heightIntegral = (abs(dy) > 0.02)
+        ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
+        : exp(-k * 0.5 * (y0 + y1));
+
+    // Gentle drifting evaporation variation over the waves
+    float mistNoise = texture(uRockTex, worldPos.xz * 0.0026 + vec2(uTime * 0.0055, uTime * 0.0032)).a;
+    float mistMod = mix(0.84, 1.18, mistNoise);
+
+    float effDist = max(dist - 18.0, 0.0);
+    float tauAir  = dist * 0.00072;
+    float tauMist = effDist * 0.00165 * heightIntegral * mistMod;
+    float tauTotal = tauAir + tauMist;
+
+    float fogFactor = 1.0 - exp(-tauTotal);
+    float farFade = smoothstep(uFarPlane * 0.80, uFarPlane * 0.98, dist);
+    fogFactor = clamp(max(fogFactor, farFade), 0.0, 1.0);
+
+    vec3 airHaze = computeDayAerialHaze(rayDir, L);
+    float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
+    vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + vec3(1.24, 1.15, 0.96) * (pow(sunDot, 5.0) * 0.24);
+
+    float mistShare = clamp(tauMist / max(tauTotal, 0.0001), 0.0, 1.0);
+    float colorBlend = mix(mistShare * 0.88, 0.76, farFade);
+    vec3 finalHazeCol = mix(airHaze, marineMistCol, colorBlend);
+
+    return mix(litCol, finalHazeCol, fogFactor);
 }
 
 vec4 sampleTriplanar(sampler2D tex, vec3 p, vec3 blend) {
@@ -775,9 +811,7 @@ void main() {
 
     vec3 outCol;
     if (uCamAboveWater == 1) {
-        float airFog = 1.0 - exp(-dist * 0.00145);
-        vec3 airHaze = computeDayAerialHaze(-V, L);
-        outCol = mix(litColor, airHaze, clamp(airFog * 0.76, 0.0, 0.85));
+        outCol = applyAboveWaterMist(litColor, vWorldPos, -V, dist, L);
     } else {
         float fogDensity = mix(0.0155 * uFogScale, 0.0220, abyssDark);
         vec3 transmittance = exp(-dist * bioFogScale * fogDensity * vec3(1.85, 1.06, 0.86));
@@ -1344,6 +1378,7 @@ uniform float uVibrance;
 uniform float uFogScale;
 uniform float uTime;
 uniform float uWaterY;
+uniform float uFarPlane;
 uniform int uCamAboveWater;
 uniform int uEnableShadows;
 uniform int uLureCount;
@@ -1394,6 +1429,41 @@ vec3 computeDayAerialHaze(vec3 rayDir, vec3 L) {
     float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
     haze += vec3(1.15, 1.08, 0.92) * pow(sunDot, 5.0) * 0.16;
     return haze;
+}
+
+vec3 applyAboveWaterMist(vec3 litCol, vec3 worldPos, vec3 rayDir, float dist, vec3 L) {
+    float y0 = max(uCamPos.y - uWaterY, 0.0);
+    float y1 = max(worldPos.y - uWaterY, 0.0);
+    float dy = y1 - y0;
+
+    // Analytic integral of exponential marine mist hovering above the ocean surface (~20m scale height)
+    const float k = 0.05;
+    float heightIntegral = (abs(dy) > 0.02)
+        ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
+        : exp(-k * 0.5 * (y0 + y1));
+
+    // Gentle drifting evaporation variation over the waves
+    float mistNoise = texture(uRockTex, worldPos.xz * 0.0026 + vec2(uTime * 0.0055, uTime * 0.0032)).a;
+    float mistMod = mix(0.84, 1.18, mistNoise);
+
+    float effDist = max(dist - 18.0, 0.0);
+    float tauAir  = dist * 0.00072;
+    float tauMist = effDist * 0.00165 * heightIntegral * mistMod;
+    float tauTotal = tauAir + tauMist;
+
+    float fogFactor = 1.0 - exp(-tauTotal);
+    float farFade = smoothstep(uFarPlane * 0.80, uFarPlane * 0.98, dist);
+    fogFactor = clamp(max(fogFactor, farFade), 0.0, 1.0);
+
+    vec3 airHaze = computeDayAerialHaze(rayDir, L);
+    float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
+    vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + vec3(1.24, 1.15, 0.96) * (pow(sunDot, 5.0) * 0.24);
+
+    float mistShare = clamp(tauMist / max(tauTotal, 0.0001), 0.0, 1.0);
+    float colorBlend = mix(mistShare * 0.88, 0.76, farFade);
+    vec3 finalHazeCol = mix(airHaze, marineMistCol, colorBlend);
+
+    return mix(litCol, finalHazeCol, fogFactor);
 }
 
 float sampleFaunaShadow(vec4 lightSpacePos, vec3 N, vec3 L) {
@@ -1451,9 +1521,7 @@ void main() {
                  + middaySun * softSpec
                  + vec3(0.85, 0.92, 1.00) * rimGlow;
 
-        float airFog = 1.0 - exp(-dist * 0.00135);
-        vec3 airHaze = computeDayAerialHaze(-V, L);
-        vec3 outCol = mix(lit, airHaze, clamp(airFog * 0.78, 0.0, 0.86));
+        vec3 outCol = applyAboveWaterMist(lit, vWorldPos, -V, dist, L);
         FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
         return;
     }
@@ -1544,9 +1612,7 @@ void main() {
 
     vec3 outCol;
     if (uCamAboveWater == 1) {
-        float airFog = 1.0 - exp(-dist * 0.00145);
-        vec3 airHaze = computeDayAerialHaze(-V, L);
-        outCol = mix(lit, airHaze, clamp(airFog * 0.76, 0.0, 0.85));
+        outCol = applyAboveWaterMist(lit, vWorldPos, -V, dist, L);
     } else {
         float fogDensity = mix(0.0155 * uFogScale, 0.0220, abyssDark);
         float emScale = mix(1.0, 0.38, vEmissive);

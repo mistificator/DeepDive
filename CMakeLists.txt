@@ -135,6 +135,7 @@ add_executable(DeepDive WIN32 MACOSX_BUNDLE
     src/WorldGenerator.h
     src/WorldGeneratorFlora.cpp
     src/WorldGeneratorFauna.cpp
+    src/WorldGeneratorEnvironment.cpp
     src/UnderwaterAudio.h
     src/UnderwaterAudio.cpp
     src/DeepDiveWidget.h
