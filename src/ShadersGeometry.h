@@ -422,13 +422,17 @@ vec3 computeUnderwaterFogColor(vec3 rayDir, vec3 L, float heightFactor, float ab
     return mix(fogCol, vec3(0.004, 0.014, 0.028), abyssMask * 0.92);
 }
 
+// Synchronized 1:1 with the HDR SkyboxFrag & WaterSurfaceFrag
 vec3 computeDayAerialHaze(vec3 rayDir, vec3 L) {
     float elev = clamp(rayDir.y, 0.0, 1.0);
-    vec3 horizon = vec3(0.74, 0.90, 0.99);
-    vec3 midSky  = vec3(0.32, 0.66, 0.95);
-    vec3 haze = mix(horizon, midSky, smoothstep(0.0, 0.35, elev));
+    vec3 zenith  = vec3(0.032, 0.175, 0.66);
+    vec3 midSky  = vec3(0.15,  0.49,  0.95);
+    vec3 horizon = vec3(0.74,  0.91,  1.04);
+
+    vec3 haze = mix(horizon, midSky, smoothstep(0.0, 0.24, elev));
+    haze = mix(haze, zenith, pow(elev, 0.56));
     float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
-    haze += vec3(1.15, 1.08, 0.92) * pow(sunDot, 5.0) * 0.16;
+    haze += vec3(2.75, 2.48, 2.02) * (pow(sunDot, 5.0) * 0.16);
     return haze;
 }
 
@@ -437,19 +441,18 @@ vec3 applyAboveWaterMist(vec3 litCol, vec3 worldPos, vec3 rayDir, float dist, ve
     float y1 = max(worldPos.y - uWaterY, 0.0);
     float dy = y1 - y0;
 
-    // Analytic integral of exponential marine mist hovering above the ocean surface (~20m scale height)
-    const float k = 0.05;
+    // Clean, crisp aerial perspective + subtle marine mist hovering over the waves
+    const float k = 0.055;
     float heightIntegral = (abs(dy) > 0.02)
         ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
         : exp(-k * 0.5 * (y0 + y1));
 
-    // Gentle drifting evaporation variation over the waves
     float mistNoise = texture(uRockTex, worldPos.xz * 0.0026 + vec2(uTime * 0.0055, uTime * 0.0032)).a;
     float mistMod = mix(0.84, 1.18, mistNoise);
 
-    float effDist = max(dist - 18.0, 0.0);
-    float tauAir  = dist * 0.00072;
-    float tauMist = effDist * 0.00165 * heightIntegral * mistMod;
+    float effDist  = max(dist - 32.0, 0.0);
+    float tauAir   = dist * 0.00046;
+    float tauMist  = effDist * 0.00092 * heightIntegral * mistMod;
     float tauTotal = tauAir + tauMist;
 
     float fogFactor = 1.0 - exp(-tauTotal);
@@ -458,10 +461,10 @@ vec3 applyAboveWaterMist(vec3 litCol, vec3 worldPos, vec3 rayDir, float dist, ve
 
     vec3 airHaze = computeDayAerialHaze(rayDir, L);
     float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
-    vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + vec3(1.24, 1.15, 0.96) * (pow(sunDot, 5.0) * 0.24);
+    vec3 marineMistCol = vec3(0.76, 0.91, 1.02) + vec3(2.75, 2.48, 2.02) * (pow(sunDot, 5.0) * 0.16);
 
     float mistShare = clamp(tauMist / max(tauTotal, 0.0001), 0.0, 1.0);
-    float colorBlend = mix(mistShare * 0.88, 0.76, farFade);
+    float colorBlend = mix(mistShare * 0.72, 0.74, farFade);
     vec3 finalHazeCol = mix(airHaze, marineMistCol, colorBlend);
 
     return mix(litCol, finalHazeCol, fogFactor);
@@ -601,9 +604,11 @@ void main() {
     blend /= (blend.x + blend.y + blend.z);
 
     vec3 N = geomN;
-    float vibStrength = isCliffGrass ? 1.10 : ((vParam.x > 1.5) ? uVibrance : mix(1.0, uVibrance, 0.50));
+    float vibStrength = isCliffGrass ? 1.24 : ((vParam.x > 1.5) ? uVibrance : mix(1.0, uVibrance, 0.50));
     vec3 baseCol = applyVibrance(clamp(vColor, 0.0, 1.0), vibStrength);
     float ao = 1.0;
+    float rockDetailH = 0.5;
+    float rockCrevice = 0.6;
 
     if (vParam.x < 1.5) {
         const mat2 rotA = mat2( 1.000,  0.000,  0.000,  1.000);
@@ -637,12 +642,14 @@ void main() {
         vec3 strataPerturb = vec3(0.0, (veinA * 0.5 + veinB * 0.5) * 0.055 * strataMask, 0.0);
 
         vec3 perturb = pMacro * 0.52 + pMicro * 0.50 + pFine * (0.34 * fineWeight) + strataPerturb;
-        N = normalize(geomN + perturb * 0.92);
+        N = normalize(geomN + perturb * mix(0.92, 1.12, aboveWaterMask));
 
         float detailHeight = hMacro * 0.44 + hMicro * 0.38 + hFine * 0.18;
         float cavity       = cMacro * 0.50 + cMicro * 0.35 + cFine * 0.15;
         float crevice      = smoothstep(0.10, 0.78, cavity * 0.62 + detailHeight * 0.38);
         ao = crevice * 0.62 + 0.38;
+        rockDetailH = detailHeight;
+        rockCrevice = crevice;
 
         if (vParam.x < 0.5) {
             float rockEdgeNoise = (detailHeight - 0.5) * 0.24 + (cavity - 0.5) * 0.16;
@@ -656,17 +663,23 @@ void main() {
             float edgeWear = smoothstep(0.68, 0.92, detailHeight) * wallMask * (1.0 - abyssM);
             baseCol += vec3(0.055, 0.068, 0.072) * edgeWear;
 
-            // Sun-bleached coastal cliff tone on dry above-water rock faces
+            // Rich volcanic basalt, sun-warmed ochre mineral ridges & lush mossy ledges above water
             if (aboveWaterMask > 0.01) {
-                vec3 coastalRock = mix(vec3(0.28, 0.30, 0.31), vec3(0.47, 0.46, 0.42), detailHeight);
-                float dryTop = smoothstep(0.36, 0.74, geomN.y) * smoothstep(waveSurfY + 1.0, waveSurfY + 3.2, vWorldPos.y);
-                vec3 mossySoil = mix(vec3(0.18, 0.32, 0.12), vec3(0.32, 0.45, 0.18), detailHeight);
-                coastalRock = mix(coastalRock, mossySoil, dryTop * 0.72);
-                baseCol = mix(baseCol, coastalRock, aboveWaterMask * 0.76);
+                vec3 darkBasalt  = vec3(0.13, 0.15, 0.17);
+                vec3 warmSandst  = vec3(0.42, 0.38, 0.31);
+                vec3 coastalRock = mix(darkBasalt, warmSandst, smoothstep(0.20, 0.85, detailHeight));
+                // Salt-bleached ridge highlights on exposed rock edges
+                float ridgeWear  = smoothstep(0.72, 0.94, detailHeight) * (1.0 - abs(geomN.y) * 0.5);
+                coastalRock += vec3(0.14, 0.13, 0.10) * ridgeWear;
+
+                float dryTop = smoothstep(0.32, 0.72, geomN.y) * smoothstep(waveSurfY + 0.9, waveSurfY + 3.0, vWorldPos.y);
+                vec3 lushMoss = mix(vec3(0.09, 0.26, 0.07), vec3(0.24, 0.44, 0.11), detailHeight);
+                coastalRock = mix(coastalRock, lushMoss, dryTop * 0.78);
+                baseCol = mix(baseCol, coastalRock, aboveWaterMask * 0.84);
             }
         }
 
-        vec3 creviceTint = mix(mix(uWaterColorDeep * 0.46, vec3(0.34, 0.36, 0.38), aboveWaterMask), vec3(1.0), crevice);
+        vec3 creviceTint = mix(mix(uWaterColorDeep * 0.46, vec3(0.18, 0.22, 0.28), aboveWaterMask), vec3(1.0), crevice);
         baseCol = clamp(baseCol * creviceTint * (0.70 + detailHeight * 0.54 + strataRidge), 0.0, 1.25);
     } else if (vParam.x < 4.5) {
         const mat2 rotOrg = mat2(0.800, -0.600, 0.600, 0.800);
@@ -678,8 +691,8 @@ void main() {
         ao = 0.78 + hOrg * 0.22;
         baseCol *= (0.82 + hOrg * 0.36);
     } else if (isCliffGrass) {
-        // Gentle root-to-tip ambient occlusion for coastal grass blades
-        ao = mix(0.48, 1.0, smoothstep(0.0, 0.58, clamp(vParam.y, 0.0, 1.0)));
+        // Rich root-to-tip ambient occlusion for sunlit coastal grass blades
+        ao = mix(0.34, 1.0, smoothstep(0.0, 0.62, clamp(vParam.y, 0.0, 1.0)));
     }
 
     float shadow = calcUnderwaterShadow(vLightSpacePos, geomN, L);
@@ -729,32 +742,46 @@ void main() {
         litColor += baseCol * 1.10 * sss * 0.72;
     }
 
-    // Midday sunlight, sky/ocean hemisphere fill, grass translucency & wet splash band for above-water cliffs
+    // True HDR daylight shading: crisp key-to-fill contrast, deep crevices, glossy wet shoreline & glowing grass
     if (aboveWaterMask > 0.005) {
         float aboveH = max(vWorldPos.y - waveSurfY, 0.0);
         float wetBand = isCliffGrass ? 0.0
-                                     : ((1.0 - smoothstep(0.15, 2.35, aboveH)) * smoothstep(-0.15, 0.08, vWorldPos.y - waveSurfY));
+                                     : ((1.0 - smoothstep(0.15, 2.55, aboveH)) * smoothstep(-0.15, 0.08, vWorldPos.y - waveSurfY));
 
-        vec3 dayAlbedo = baseCol * mix(1.0, 0.56, wetBand * (vParam.x < 1.5 ? 1.0 : 0.2));
-        float dayNdl = clamp(dot(N, L), 0.0, 1.0);
-        float dayShadow = mix(0.26, 1.0, shadow);
-        vec3 middaySun = vec3(1.24, 1.16, 1.00);
-        vec3 skyAmb = mix(vec3(0.20, 0.32, 0.38), vec3(0.44, 0.66, 0.92), hemi);
+        vec3 dayAlbedo = baseCol * mix(1.0, 0.38, wetBand * (vParam.x < 1.5 ? 1.0 : 0.25));
+        float dayAO = mix(ao, pow(max(ao, 0.01), 1.32), (vParam.x < 1.5) ? 0.85 : 0.45);
 
-        float wetSpec = pow(max(specBase, 0.0001), mix(24.0, 72.0, wetBand)) * step(0.0002, specBase)
-                      * (isCliffGrass ? 0.14 : mix(0.08, 0.62, wetBand)) * ao * shadow;
-        float dryRim = rimBase * rimBase * rimBase * mix(0.08, 0.24, wetBand);
+        float dayNdl    = clamp(dot(N, L), 0.0, 1.0);
+        float dayShadow = mix(0.08, 1.0, shadow);
+        vec3 hdrSun     = vec3(2.85, 2.54, 2.06);
 
-        vec3 dayLit = dayAlbedo * ao * (skyAmb * 0.62 + middaySun * (dayNdl * 0.88 + wrapDiff * 0.22) * dayShadow)
-                    + middaySun * wetSpec
-                    + vec3(0.58, 0.78, 0.96) * dryRim;
+        // Cool zenith sky fill from above + subtle turquoise ocean bounce from below
+        vec3 oceanBounce = vec3(0.07, 0.24, 0.34) * (1.0 - smoothstep(0.0, 18.0, aboveH) * 0.65);
+        vec3 skyTopAmb   = vec3(0.24, 0.46, 0.84);
+        vec3 skyAmb      = mix(oceanBounce, skyTopAmb, hemi);
+
+        // Dual-lobe specular: crisp sunlit wet rock sparkle + dry mineral micro-glint
+        float specTight = pow(max(specBase, 0.0001), mix(36.0, 128.0, wetBand)) * step(0.0002, specBase)
+                        * (isCliffGrass ? 0.14 : mix(0.09, 1.35, wetBand)) * dayAO * shadow;
+        float specBroad = pow(max(specBase, 0.0001), mix(14.0, 26.0, wetBand)) * step(0.0002, specBase)
+                        * (isCliffGrass ? 0.05 : mix(0.04, 0.34, wetBand)) * dayAO * shadow;
+
+        // Fresnel sky sheen on wet coastal stone
+        float wetFresnel = pow(rimBase, 4.0) * mix(0.05, 0.44, wetBand) * (0.4 + 0.6 * rockCrevice);
+
+        vec3 dayLit = dayAlbedo * dayAO * (skyAmb * 0.64 + hdrSun * (dayNdl * 0.92 + wrapDiff * 0.10) * dayShadow)
+                    + hdrSun * (specTight + specBroad)
+                    + mix(vec3(0.36, 0.62, 0.92), vec3(0.70, 0.88, 1.04), hemi) * wetFresnel;
 
         if (isCliffGrass) {
-            float tipGlow = smoothstep(0.25, 1.0, clamp(vParam.y, 0.0, 1.0));
-            vec3 grassTrans = mix(dayAlbedo * 1.25, vec3(0.68, 0.94, 0.24), 0.35);
-            dayLit += grassTrans * middaySun * (sss * (0.48 + 0.42 * tipGlow));
+            float bladeH = clamp(vParam.y, 0.0, 1.0);
+            float tipGlow = smoothstep(0.22, 1.0, bladeH);
+            vec3 grassTrans = mix(dayAlbedo * 1.25, vec3(0.64, 0.94, 0.18), 0.45);
+            dayLit += grassTrans * hdrSun * (sss * (0.36 + 0.56 * tipGlow));
+            // Subtle sunlit edge sheen on swaying grass tips
+            dayLit += hdrSun * (pow(rimBase, 3.0) * tipGlow * dayShadow * 0.18);
         } else if (vParam.x > 1.5 && vParam.x < 4.5) {
-            dayLit += dayAlbedo * middaySun * sss * 0.45;
+            dayLit += dayAlbedo * hdrSun * sss * 0.36;
         }
         litColor = mix(litColor, dayLit, aboveWaterMask);
     }
@@ -771,10 +798,10 @@ void main() {
             float microBubbles = smoothstep(0.76, 0.91, b2.a) * band * 1.15;
             float cliffFoam = clamp(foamRibbon * 0.90 + bubbleVeil * 0.72 + microBubbles, 0.0, 1.0);
 
-            vec3 uwFoamCol = mix(uWaterColorShallow * 1.30, vec3(0.95, 1.02, 1.05), 0.72) * mix(vec3(1.0), uSunColor, 0.55);
-            vec3 dayFoamCol = vec3(0.98, 1.00, 1.02) * (0.88 + 0.18 * clamp(dot(geomN, L), 0.0, 1.0));
+            vec3 uwFoamCol  = mix(uWaterColorShallow * 1.30, vec3(0.95, 1.02, 1.05), 0.72) * mix(vec3(1.0), uSunColor, 0.55);
+            vec3 dayFoamCol = mix(vec3(0.44, 0.62, 0.82), vec3(1.55, 1.60, 1.66), 0.35 + 0.65 * clamp(dot(geomN, L), 0.0, 1.0));
             vec3 surfFoamCol = mix(uwFoamCol, dayFoamCol, float(uCamAboveWater));
-            litColor = mix(litColor, surfFoamCol, cliffFoam * 0.80);
+            litColor = mix(litColor, surfFoamCol, cliffFoam * 0.82);
         }
     }
 
@@ -812,6 +839,7 @@ void main() {
     vec3 outCol;
     if (uCamAboveWater == 1) {
         outCol = applyAboveWaterMist(litColor, vWorldPos, -V, dist, L);
+        FragColor = vec4(clamp(outCol, 0.0, 32.0), 1.0);
     } else {
         float fogDensity = mix(0.0155 * uFogScale, 0.0220, abyssDark);
         vec3 transmittance = exp(-dist * bioFogScale * fogDensity * vec3(1.85, 1.06, 0.86));
@@ -821,9 +849,8 @@ void main() {
         vec3 fogColor = computeUnderwaterFogColor(-V, L, fogHeightFactor, abyssDark);
 
         outCol = litColor * transmittance + fogColor * (1.0 - transmittance);
+        FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
     }
-
-    FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
 }
 )"
 
@@ -1421,13 +1448,17 @@ vec3 computeUnderwaterFogColor(vec3 rayDir, vec3 L, float heightFactor, float ab
     return mix(fogCol, vec3(0.004, 0.014, 0.028), abyssMask * 0.92);
 }
 
+// Synchronized 1:1 with HDR SkyboxFrag & WaterSurfaceFrag
 vec3 computeDayAerialHaze(vec3 rayDir, vec3 L) {
     float elev = clamp(rayDir.y, 0.0, 1.0);
-    vec3 horizon = vec3(0.74, 0.90, 0.99);
-    vec3 midSky  = vec3(0.32, 0.66, 0.95);
-    vec3 haze = mix(horizon, midSky, smoothstep(0.0, 0.35, elev));
+    vec3 zenith  = vec3(0.032, 0.175, 0.66);
+    vec3 midSky  = vec3(0.15,  0.49,  0.95);
+    vec3 horizon = vec3(0.74,  0.91,  1.04);
+
+    vec3 haze = mix(horizon, midSky, smoothstep(0.0, 0.24, elev));
+    haze = mix(haze, zenith, pow(elev, 0.56));
     float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
-    haze += vec3(1.15, 1.08, 0.92) * pow(sunDot, 5.0) * 0.16;
+    haze += vec3(2.75, 2.48, 2.02) * (pow(sunDot, 5.0) * 0.16);
     return haze;
 }
 
@@ -1436,19 +1467,17 @@ vec3 applyAboveWaterMist(vec3 litCol, vec3 worldPos, vec3 rayDir, float dist, ve
     float y1 = max(worldPos.y - uWaterY, 0.0);
     float dy = y1 - y0;
 
-    // Analytic integral of exponential marine mist hovering above the ocean surface (~20m scale height)
-    const float k = 0.05;
+    const float k = 0.055;
     float heightIntegral = (abs(dy) > 0.02)
         ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
         : exp(-k * 0.5 * (y0 + y1));
 
-    // Gentle drifting evaporation variation over the waves
     float mistNoise = texture(uRockTex, worldPos.xz * 0.0026 + vec2(uTime * 0.0055, uTime * 0.0032)).a;
     float mistMod = mix(0.84, 1.18, mistNoise);
 
-    float effDist = max(dist - 18.0, 0.0);
-    float tauAir  = dist * 0.00072;
-    float tauMist = effDist * 0.00165 * heightIntegral * mistMod;
+    float effDist  = max(dist - 32.0, 0.0);
+    float tauAir   = dist * 0.00046;
+    float tauMist  = effDist * 0.00092 * heightIntegral * mistMod;
     float tauTotal = tauAir + tauMist;
 
     float fogFactor = 1.0 - exp(-tauTotal);
@@ -1457,10 +1486,10 @@ vec3 applyAboveWaterMist(vec3 litCol, vec3 worldPos, vec3 rayDir, float dist, ve
 
     vec3 airHaze = computeDayAerialHaze(rayDir, L);
     float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
-    vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + vec3(1.24, 1.15, 0.96) * (pow(sunDot, 5.0) * 0.24);
+    vec3 marineMistCol = vec3(0.76, 0.91, 1.02) + vec3(2.75, 2.48, 2.02) * (pow(sunDot, 5.0) * 0.16);
 
     float mistShare = clamp(tauMist / max(tauTotal, 0.0001), 0.0, 1.0);
-    float colorBlend = mix(mistShare * 0.88, 0.76, farFade);
+    float colorBlend = mix(mistShare * 0.72, 0.74, farFade);
     vec3 finalHazeCol = mix(airHaze, marineMistCol, colorBlend);
 
     return mix(litCol, finalHazeCol, fogFactor);
@@ -1499,30 +1528,29 @@ void main() {
     float specBase = clamp(dot(N, H), 0.0, 1.0);
     float rimBase  = clamp(1.0 - max(dot(N, V), 0.0), 0.0, 1.0);
 
-    // Matte sunlit feather shading for soaring seagulls
+    // True HDR sunlit feather shading for soaring seagulls (bright white dorsal, ocean-lit underside)
     if (isSeagull) {
         vec3 baseCol = clamp(vColor, 0.0, 1.05);
         float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-        float wrapSun = clamp((dot(N, L) + 0.35) / 1.35, 0.0, 1.0);
-        vec3 middaySun = vec3(1.18, 1.12, 0.98);
-        // Ocean turquoise bounce from below + crisp sky fill from above
-        vec3 oceanBounce = vec3(0.28, 0.52, 0.64);
-        vec3 skyTop      = vec3(0.56, 0.76, 0.98);
+        float wrapSun = clamp((dot(N, L) + 0.28) / 1.28, 0.0, 1.0);
+        vec3 hdrSun = vec3(2.65, 2.40, 1.98);
+        vec3 oceanBounce = vec3(0.11, 0.34, 0.48);
+        vec3 skyTop      = vec3(0.32, 0.58, 0.94);
         vec3 ambFill     = mix(oceanBounce, skyTop, hemi);
 
-        // Soft feather-edge backlight translucency against the midday sun
+        // Luminous feather-edge backlight translucency against the midday sun
         float backLight = clamp(dot(V, -L + N * 0.25), 0.0, 1.0);
-        float featherTrans = backLight * backLight * 0.26;
-        float softSpec = pow(max(specBase, 0.0001), 14.0) * step(0.0002, specBase) * 0.10;
-        float rimGlow = rimBase * rimBase * 0.18;
+        float featherTrans = backLight * backLight * 0.32;
+        float softSpec = pow(max(specBase, 0.0001), 18.0) * step(0.0002, specBase) * 0.14;
+        float rimGlow  = rimBase * rimBase * 0.24;
 
-        vec3 lit = baseCol * (ambFill * 0.68 + middaySun * wrapSun * 0.86)
-                 + baseCol * middaySun * featherTrans
-                 + middaySun * softSpec
-                 + vec3(0.85, 0.92, 1.00) * rimGlow;
+        vec3 lit = baseCol * (ambFill * 0.68 + hdrSun * wrapSun * 0.88)
+                 + baseCol * hdrSun * featherTrans
+                 + hdrSun * softSpec
+                 + vec3(0.86, 0.94, 1.06) * rimGlow;
 
         vec3 outCol = applyAboveWaterMist(lit, vWorldPos, -V, dist, L);
-        FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
+        FragColor = vec4(clamp(outCol, 0.0, 32.0), 1.0);
         return;
     }
 
@@ -1552,19 +1580,19 @@ void main() {
     vec3 baseCol = applyVibrance(clamp(vColor, 0.0, 1.0), uVibrance);
     vec3 lit = baseCol * (ambient * 0.78 + sunColor * diff * 0.98) + sunColor * (spec + rim + caust * 0.55);
 
-    // Glistening wet daylight shading for breaching fish/manta and surfacing whale
+    // Glistening HDR wet-skin daylight shading for breaching fish/manta and surfacing whale
     if (aboveWaterMask > 0.005) {
         float hemi = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-        vec3 middaySun = vec3(1.24, 1.15, 0.98);
-        vec3 skyFill = mix(vec3(0.16, 0.38, 0.52), vec3(0.48, 0.72, 0.96), hemi);
-        float dayDiff = clamp((dot(N, L) + 0.25) / 1.25, 0.0, 1.0) * mix(0.28, 1.0, shadow);
-        float wetGlint = pow(max(specBase, 0.0001), 64.0) * step(0.0002, specBase) * 1.05 * shadow;
-        float wetBroad = pow(max(specBase, 0.0001), 16.0) * step(0.0002, specBase) * 0.22 * shadow;
-        float wetFresnel = rimBase * rimBase * rimBase * 0.42;
+        vec3 hdrSun  = vec3(2.80, 2.50, 2.02);
+        vec3 skyFill = mix(vec3(0.08, 0.28, 0.44), vec3(0.30, 0.56, 0.92), hemi);
+        float dayDiff = clamp((dot(N, L) + 0.18) / 1.18, 0.0, 1.0) * mix(0.14, 1.0, shadow);
+        float wetGlint = pow(max(specBase, 0.0001), 110.0) * step(0.0002, specBase) * 2.65 * shadow;
+        float wetBroad = pow(max(specBase, 0.0001), 22.0)  * step(0.0002, specBase) * 0.38 * shadow;
+        float wetFresnel = pow(rimBase, 3.6) * 0.58;
 
-        vec3 dayLit = baseCol * (skyFill * 0.62 + middaySun * dayDiff * 0.95)
-                    + middaySun * (wetGlint + wetBroad)
-                    + vec3(0.72, 0.88, 1.00) * wetFresnel;
+        vec3 dayLit = baseCol * (skyFill * 0.64 + hdrSun * dayDiff * 0.92)
+                    + hdrSun * (wetGlint + wetBroad)
+                    + mix(vec3(0.42, 0.72, 0.96), vec3(0.84, 0.94, 1.06), hemi) * wetFresnel;
         lit = mix(lit, dayLit, aboveWaterMask);
     }
 
@@ -1599,11 +1627,11 @@ void main() {
         float microBubbles = smoothstep(0.76, 0.91, b2.a) * band * 1.15;
         float surfFoam     = clamp(foamRibbon * 0.90 + bubbleVeil * 0.72 + microBubbles, 0.0, 1.0);
 
-        vec3 uwFoamCol = mix(uWaterColorShallow * 1.30, vec3(0.95, 1.02, 1.05), 0.72)
-                       * mix(vec3(1.0), uSunColor, 0.55);
-        vec3 dayFoamCol = vec3(0.98, 1.00, 1.02) * (0.88 + 0.18 * clamp(dot(N, L), 0.0, 1.0));
+        vec3 uwFoamCol  = mix(uWaterColorShallow * 1.30, vec3(0.95, 1.02, 1.05), 0.72)
+                        * mix(vec3(1.0), uSunColor, 0.55);
+        vec3 dayFoamCol = mix(vec3(0.44, 0.62, 0.82), vec3(1.55, 1.60, 1.66), 0.35 + 0.65 * clamp(dot(N, L), 0.0, 1.0));
         vec3 surfFoamCol = mix(uwFoamCol, dayFoamCol, float(uCamAboveWater));
-        lit = mix(lit, surfFoamCol, surfFoam * 0.78);
+        lit = mix(lit, surfFoamCol, surfFoam * 0.80);
     }
 
     float pulse = 0.82 + 0.18 * sin(uTime * 3.4 + vWorldPos.x * 0.2);
@@ -1613,6 +1641,7 @@ void main() {
     vec3 outCol;
     if (uCamAboveWater == 1) {
         outCol = applyAboveWaterMist(lit, vWorldPos, -V, dist, L);
+        FragColor = vec4(clamp(outCol, 0.0, 32.0), 1.0);
     } else {
         float fogDensity = mix(0.0155 * uFogScale, 0.0220, abyssDark);
         float emScale = mix(1.0, 0.38, vEmissive);
@@ -1623,9 +1652,8 @@ void main() {
         vec3 fogColor = computeUnderwaterFogColor(-V, L, fogHeightFactor, abyssDark);
 
         outCol = lit * transmittance + fogColor * (1.0 - transmittance);
+        FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
     }
-
-    FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
 }
 )";
 

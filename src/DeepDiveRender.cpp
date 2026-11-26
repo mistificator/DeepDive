@@ -9,6 +9,7 @@
 #include <QSurfaceFormat>
 #include <QVector2D>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <thread>
@@ -194,7 +195,8 @@ constexpr std::array<PropLodConfig, PROP_ARCHETYPE_COUNT> PROP_LOD_CFG = {{
     // PROP_ANEMONE_PEN
     {120.0f, 230.0f,  8.0f, false,   0.0f,   0.0f},
     // PROP_CLIFF_GRASS
-    {130.0f, 540.0f, 12.0f, false,   0.0f,   0.0f}}};
+    {130.0f, 540.0f, 12.0f, false,   0.0f,   0.0f}
+}};
 } // namespace
 
 // ============================================================================
@@ -430,6 +432,18 @@ void DeepDiveRender::compilePostProcessShaders() {
     m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
     m_scatterBlurShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::ScatterBlurFrag);
     m_scatterBlurShader.link();
+
+    m_hdrBloomDownShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
+    m_hdrBloomDownShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::HdrBloomDownFrag);
+    m_hdrBloomDownShader.link();
+
+    m_hdrBloomUpShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
+    m_hdrBloomUpShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::HdrBloomUpFrag);
+    m_hdrBloomUpShader.link();
+
+    m_autoExposureShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
+    m_autoExposureShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::AutoExposureFrag);
+    m_autoExposureShader.link();
 
     m_postProcessShader.addShaderFromSourceCode(QOpenGLShader::Vertex, Shaders::PostQuadVert);
     m_postProcessShader.addShaderFromSourceCode(QOpenGLShader::Fragment, Shaders::PostProcessFrag);
@@ -915,9 +929,23 @@ void DeepDiveRender::destroyPostProcessBuffers() {
     if (m_bloomFBO[0]) glDeleteFramebuffers(2, m_bloomFBO);
     if (m_bloomTex[0]) glDeleteTextures(2, m_bloomTex);
 
+    if (m_hdrBloomFBO[0]) glDeleteFramebuffers(HDR_BLOOM_MIPS, m_hdrBloomFBO);
+    if (m_hdrBloomTex[0]) glDeleteTextures(HDR_BLOOM_MIPS, m_hdrBloomTex);
+
+    if (m_exposureFBO[0]) glDeleteFramebuffers(2, m_exposureFBO);
+    if (m_exposureTex[0]) glDeleteTextures(2, m_exposureTex);
+
     m_msaaFBO = m_msaaColorRBO = m_msaaDepthRBO = 0;
     m_resolveFBO = m_sceneColorTex = m_sceneDepthTex = 0;
     m_bloomFBO[0] = m_bloomFBO[1] = m_bloomTex[0] = m_bloomTex[1] = 0;
+    for (int i = 0; i < HDR_BLOOM_MIPS; ++i) {
+        m_hdrBloomFBO[i] = m_hdrBloomTex[i] = 0;
+        m_hdrBloomW[i] = m_hdrBloomH[i] = 0;
+    }
+    m_exposureFBO[0] = m_exposureFBO[1] = 0;
+    m_exposureTex[0] = m_exposureTex[1] = 0;
+    m_exposureIdx = 0;
+    m_exposureInitialized = false;
     m_fbWidth = m_fbHeight = 0;
 }
 
@@ -956,10 +984,11 @@ void DeepDiveRender::resizePostProcessBuffers(int physW, int physH) {
     glGenTextures(1, &m_sceneColorTex);
     glBindTexture(GL_TEXTURE_2D, m_sceneColorTex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, physW, physH, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenerateMipmap(GL_TEXTURE_2D);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_sceneColorTex, 0);
 
     glGenTextures(1, &m_sceneDepthTex);
@@ -971,6 +1000,7 @@ void DeepDiveRender::resizePostProcessBuffers(int physW, int physH) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_sceneDepthTex, 0);
 
+    // Underwater half-res scatter blur buffers
     const int halfW = std::max(32, physW / 2);
     const int halfH = std::max(32, physH / 2);
     glGenFramebuffers(2, m_bloomFBO);
@@ -985,6 +1015,43 @@ void DeepDiveRender::resizePostProcessBuffers(int physW, int physH) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomTex[i], 0);
     }
+
+    // Above-water 5-cascade HDR bloom pyramid
+    glGenFramebuffers(HDR_BLOOM_MIPS, m_hdrBloomFBO);
+    glGenTextures(HDR_BLOOM_MIPS, m_hdrBloomTex);
+    int mipW = physW;
+    int mipH = physH;
+    for (int i = 0; i < HDR_BLOOM_MIPS; ++i) {
+        mipW = std::max(8, mipW / 2);
+        mipH = std::max(8, mipH / 2);
+        m_hdrBloomW[i] = mipW;
+        m_hdrBloomH[i] = mipH;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, m_hdrBloomFBO[i]);
+        glBindTexture(GL_TEXTURE_2D, m_hdrBloomTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, mipW, mipH, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_hdrBloomTex[i], 0);
+    }
+
+    // 1x1 GPU ping-pong auto-exposure textures
+    glGenFramebuffers(2, m_exposureFBO);
+    glGenTextures(2, m_exposureTex);
+    for (int i = 0; i < 2; ++i) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_exposureFBO[i]);
+        glBindTexture(GL_TEXTURE_2D, m_exposureTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_exposureTex[i], 0);
+    }
+    m_exposureIdx = 0;
+    m_exposureInitialized = false;
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
 }
@@ -1725,8 +1792,8 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
         const float d = distanceToAABB(camPos, chunk.minBounds, chunk.maxBounds);
         if (d > chunkMaxDist) continue;
 
-        // Дальше 460 м над водой рисуем только чанки, чьи скалы выходят к/выше уровня воды
-        // (в WorldGeneratorEnvironment.cpp maxBounds.y = maxY + 32.0f)
+        // Beyond 460m above water, only keep chunks whose cliffs rise to/above water surface
+        // (in WorldGeneratorEnvironment.cpp maxBounds.y = maxY + 32.0f)
         if (d > UNDERWATER_FAR_PLANE && chunk.maxBounds.y() < ProcMath::WATER_SURFACE_Y + 29.0f) {
             continue;
         }
@@ -1979,37 +2046,119 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     }
 
     // ========================================================================
-    // PASS 2: Resolve MSAA + Optional Bloom + Final Composite
+    // PASS 2: Resolve MSAA + Auto-Exposure + HDR Bloom Pyramid + Composite
     // ========================================================================
     glBindFramebuffer(GL_READ_FRAMEBUFFER, m_msaaFBO);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_resolveFBO);
     glBlitFramebuffer(0, 0, physW, physH, 0, 0, physW, physH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBlitFramebuffer(0, 0, physW, physH, 0, 0, physW, physH, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
 
+    // Real frame delta time for smooth eye-adaptation (unaffected by bullet-time)
+    const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+    float realAdaptDt = 0.016f;
+    if (m_lastAdaptTimeNs > 0) {
+        realAdaptDt = std::clamp(static_cast<float>(nowNs - m_lastAdaptTimeNs) * 1e-9f, 0.001f, 0.1f);
+    }
+    m_lastAdaptTimeNs = nowNs;
+
+    // Generate mip chain for fast GPU log-average luminance sampling
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_sceneColorTex);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
     glBindVertexArray(m_skyVAO);
 
+    // 2.1. 1x1 GPU Auto-Exposure (kept warm in both media so breaching has natural iris adaptation)
+    const int nextExpIdx = 1 - m_exposureIdx;
+    const float maxMip = std::floor(std::log2(static_cast<float>(std::max(physW, physH))));
+    const float lumaMip = std::max(0.0f, maxMip - 4.0f);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, m_exposureFBO[nextExpIdx]);
+    glViewport(0, 0, 1, 1);
+    m_autoExposureShader.bind();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_sceneColorTex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_exposureTex[m_exposureIdx]);
+    m_autoExposureShader.setUniformValue("uSceneColorTex", 0);
+    m_autoExposureShader.setUniformValue("uPrevExposureTex", 1);
+    m_autoExposureShader.setUniformValue("uLumaMip", lumaMip);
+    m_autoExposureShader.setUniformValue("uRealDt", realAdaptDt);
+    m_autoExposureShader.setUniformValue("uCamAboveWater", camAboveInt);
+    m_autoExposureShader.setUniformValue("uResetExposure", m_exposureInitialized ? 0 : 1);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    m_exposureIdx = nextExpIdx;
+    m_exposureInitialized = true;
+
+    // 2.2. Bloom: above water -> 5-cascade Karis HDR pyramid; underwater -> original scatter-blur
     if (m_postProcessEnabled) {
-        const int halfW = std::max(32, physW / 2);
-        const int halfH = std::max(32, physH / 2);
-        glViewport(0, 0, halfW, halfH);
+        if (camAboveWater) {
+            m_hdrBloomDownShader.bind();
+            m_hdrBloomDownShader.setUniformValue("uSourceTex", 0);
+            m_hdrBloomDownShader.setUniformValue("uThreshold", 1.20f);
+            m_hdrBloomDownShader.setUniformValue("uKnee", 0.45f);
 
-        m_scatterBlurShader.bind();
-        m_scatterBlurShader.setUniformValue("uSourceTex", 0);
+            GLuint srcTex = m_sceneColorTex;
+            int srcW = physW;
+            int srcH = physH;
+            for (int i = 0; i < HDR_BLOOM_MIPS; ++i) {
+                glBindFramebuffer(GL_FRAMEBUFFER, m_hdrBloomFBO[i]);
+                glViewport(0, 0, m_hdrBloomW[i], m_hdrBloomH[i]);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, srcTex);
+                m_hdrBloomDownShader.setUniformValue("uTexelSize", QVector2D(1.0f / srcW, 1.0f / srcH));
+                m_hdrBloomDownShader.setUniformValue("uFirstPass", (i == 0) ? 1 : 0);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        for (int iter = 0; iter < 2; ++iter) {
-            glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, (iter == 0) ? m_sceneColorTex : m_bloomTex[1]);
-            m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(1.0f / halfW, 0.0f));
-            m_scatterBlurShader.setUniformValue("uExtractBright", (iter == 0) ? 1 : 0);
-            glDrawArrays(GL_TRIANGLES, 0, 6);
+                srcTex = m_hdrBloomTex[i];
+                srcW = m_hdrBloomW[i];
+                srcH = m_hdrBloomH[i];
+            }
 
-            glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[1]);
-            glBindTexture(GL_TEXTURE_2D, m_bloomTex[0]);
-            m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(0.0f, 1.0f / halfH));
-            m_scatterBlurShader.setUniformValue("uExtractBright", 0);
-            glDrawArrays(GL_TRIANGLES, 0, 6);
+            // Additive tent upsample back up the pyramid
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE);
+            m_hdrBloomUpShader.bind();
+            m_hdrBloomUpShader.setUniformValue("uSourceTex", 0);
+            m_hdrBloomUpShader.setUniformValue("uFilterRadius", 1.35f);
+
+            for (int i = HDR_BLOOM_MIPS - 1; i > 0; --i) {
+                glBindFramebuffer(GL_FRAMEBUFFER, m_hdrBloomFBO[i - 1]);
+                glViewport(0, 0, m_hdrBloomW[i - 1], m_hdrBloomH[i - 1]);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, m_hdrBloomTex[i]);
+                m_hdrBloomUpShader.setUniformValue("uTexelSize",
+                                                   QVector2D(1.0f / m_hdrBloomW[i], 1.0f / m_hdrBloomH[i]));
+                m_hdrBloomUpShader.setUniformValue("uLevelWeight", 0.78f);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+            glDisable(GL_BLEND);
+        } else {
+            const int halfW = std::max(32, physW / 2);
+            const int halfH = std::max(32, physH / 2);
+            glViewport(0, 0, halfW, halfH);
+
+            m_scatterBlurShader.bind();
+            m_scatterBlurShader.setUniformValue("uSourceTex", 0);
+
+            for (int iter = 0; iter < 2; ++iter) {
+                glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, (iter == 0) ? m_sceneColorTex : m_bloomTex[1]);
+                m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(1.0f / halfW, 0.0f));
+                m_scatterBlurShader.setUniformValue("uExtractBright", (iter == 0) ? 1 : 0);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+
+                glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[1]);
+                glBindTexture(GL_TEXTURE_2D, m_bloomTex[0]);
+                m_scatterBlurShader.setUniformValue("uTexelStep", QVector2D(0.0f, 1.0f / halfH));
+                m_scatterBlurShader.setUniformValue("uExtractBright", 0);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
         }
     }
 
@@ -2035,14 +2184,17 @@ void DeepDiveRender::render(const DeepDiveEngine& engine, int physW, int physH, 
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, m_bloomTex[1]);
+    glBindTexture(GL_TEXTURE_2D, camAboveWater ? m_hdrBloomTex[0] : m_bloomTex[1]);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, m_rockTex);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, m_exposureTex[m_exposureIdx]);
 
     m_postProcessShader.setUniformValue("uSceneColorTex", 0);
     m_postProcessShader.setUniformValue("uSceneDepthTex", 1);
     m_postProcessShader.setUniformValue("uBloomTex", 2);
     m_postProcessShader.setUniformValue("uRockTex", 3);
+    m_postProcessShader.setUniformValue("uExposureTex", 4);
     m_postProcessShader.setUniformValue("uInvResolution", QVector2D(1.0f / physW, 1.0f / physH));
     m_postProcessShader.setUniformValue("uSunScreenPos", sunScreen);
     m_postProcessShader.setUniformValue("uWaterTint", visuals.waterShallow);

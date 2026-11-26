@@ -181,6 +181,9 @@ private:
     QOpenGLShaderProgram m_particleShader;
     QOpenGLShaderProgram m_sprayShader;
     QOpenGLShaderProgram m_scatterBlurShader;
+    QOpenGLShaderProgram m_hdrBloomDownShader;
+    QOpenGLShaderProgram m_hdrBloomUpShader;
+    QOpenGLShaderProgram m_autoExposureShader;
     QOpenGLShaderProgram m_postProcessShader;
 
     // Optional OpenGL 4.0+ hardware tessellation programs
@@ -231,7 +234,7 @@ private:
     GLuint m_shadowFBO = 0;
     GLuint m_shadowDepthTex = 0;
 
-    // MSAA HDR & Bloom FBOs
+    // MSAA HDR & Underwater Bloom FBOs
     int m_fbWidth = 0;
     int m_fbHeight = 0;
     GLuint m_msaaFBO = 0;
@@ -244,4 +247,18 @@ private:
 
     GLuint m_bloomFBO[2] = {0, 0};
     GLuint m_bloomTex[2] = {0, 0};
+
+    // 5-cascade HDR bloom pyramid (above-water true HDR)
+    static constexpr int HDR_BLOOM_MIPS = 5;
+    GLuint m_hdrBloomFBO[HDR_BLOOM_MIPS] = {0, 0, 0, 0, 0};
+    GLuint m_hdrBloomTex[HDR_BLOOM_MIPS] = {0, 0, 0, 0, 0};
+    int m_hdrBloomW[HDR_BLOOM_MIPS] = {0, 0, 0, 0, 0};
+    int m_hdrBloomH[HDR_BLOOM_MIPS] = {0, 0, 0, 0, 0};
+
+    // 1x1 GPU ping-pong auto-exposure buffer (eye adaptation)
+    GLuint m_exposureFBO[2] = {0, 0};
+    GLuint m_exposureTex[2] = {0, 0};
+    int m_exposureIdx = 0;
+    bool m_exposureInitialized = false;
+    int64_t m_lastAdaptTimeNs = 0;
 };

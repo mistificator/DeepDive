@@ -236,32 +236,34 @@ vec3 computeUnderwaterFogColor(vec3 rayDir, vec3 L, float heightFactor, float ab
     return mix(fogCol, vec3(0.004, 0.014, 0.028), abyssMask * 0.92);
 }
 
+// Physical HDR sky reflection matched to the upgraded HDR SkyboxFrag
 vec3 sampleDaySkyWater(vec3 dir, vec3 L, bool includeSunDisc) {
     float elev = clamp(dir.y, 0.0, 1.0);
-    vec3 zenith  = vec3(0.10, 0.38, 0.82);
-    vec3 midSky  = vec3(0.28, 0.65, 0.96);
-    vec3 horizon = vec3(0.74, 0.90, 0.99);
+    vec3 zenith  = vec3(0.032, 0.175, 0.66);
+    vec3 midSky  = vec3(0.15,  0.49,  0.95);
+    vec3 horizon = vec3(0.74,  0.91,  1.04);
 
-    vec3 sky = mix(horizon, midSky, smoothstep(0.0, 0.28, elev));
-    sky = mix(sky, zenith, pow(elev, 0.62));
+    vec3 sky = mix(horizon, midSky, smoothstep(0.0, 0.24, elev));
+    sky = mix(sky, zenith, pow(elev, 0.56));
 
     float sunDot = clamp(dot(dir, L), 0.0, 1.0);
-    vec3 middaySun = vec3(1.18, 1.10, 0.94);
-    sky += middaySun * (pow(sunDot, 5.0) * 0.16 + pow(sunDot, 48.0) * 0.34);
+    vec3 hdrSun = vec3(2.75, 2.48, 2.02);
+    sky += hdrSun * (pow(sunDot, 5.0) * 0.16 + pow(sunDot, 38.0) * 0.62);
     if (includeSunDisc) {
-        sky += middaySun * (smoothstep(0.9988, 0.9996, sunDot) * 2.2);
+        sky += hdrSun * (pow(sunDot, 160.0) * 2.2 + smoothstep(0.9986, 0.9995, sunDot) * 16.0);
     }
 
-    // Distant clouds reflected on the water surface (matched to the volumetric weather map)
+    // High-contrast HDR cumulus clouds reflected on the ocean waves
     if (elev > 0.025) {
         vec2 cloudUV = dir.xz / (elev + 0.14);
         vec2 wUV = cloudUV * 0.145 + vec2(uTime * 0.0014, uTime * 0.0009);
         vec4 wMap = texture(uCloudWeatherTex, wUV);
-        float puff = smoothstep(0.18, 0.72, wMap.r);
+        float puff = smoothstep(0.20, 0.72, wMap.r);
         float cloudMask = puff * smoothstep(0.025, 0.18, elev);
-        vec3 cloudCol = mix(vec3(0.68, 0.80, 0.94), vec3(1.18, 1.15, 1.09), 0.45 + 0.55 * wMap.g);
-        cloudCol += middaySun * pow(sunDot, 10.0) * 0.35;
-        sky = mix(sky, cloudCol, cloudMask * 0.78);
+        vec3 cloudShadow = vec3(0.24, 0.38, 0.62);
+        vec3 cloudLit    = vec3(1.95, 1.88, 1.74) + hdrSun * pow(sunDot, 9.0) * 0.42;
+        vec3 cloudCol    = mix(cloudShadow, cloudLit, clamp(0.32 + 0.68 * wMap.g, 0.0, 1.0));
+        sky = mix(sky, cloudCol, cloudMask * 0.82);
     }
     return sky;
 }
@@ -391,11 +393,11 @@ void main() {
     float waveCrest = clamp(0.46 + vWaveH * 0.78 + (s1.a - 0.5) * 0.42 + (s2.a - 0.5) * 0.34, 0.0, 1.0);
 
     // ========================================================================
-    // ABOVE-WATER VIEW: Rolling 3D swells + morphing organic swirls & dancing glints
+    // ABOVE-WATER VIEW: True HDR Ocean — Deep Sapphire, Translucent Crests & Diamond Glints
     // ========================================================================
     if (uCamAboveWater == 1) {
-        vec2 swellSlope  = vWaveGrad * 2.05 + (warpA * 0.14 + warpB * 0.11);
-        vec2 rippleSlope = swellSlope + texSlope * 0.68 + shoreRippleGrad * 0.85;
+        vec2 swellSlope  = vWaveGrad * 2.15 + (warpA * 0.14 + warpB * 0.11);
+        vec2 rippleSlope = swellSlope + texSlope * 0.72 + shoreRippleGrad * 0.85;
 
         vec3 Nswell = normalize(vec3(-swellSlope.x, 1.0, -swellSlope.y));
         vec3 Nup    = normalize(vec3(-rippleSlope.x, 1.0, -rippleSlope.y));
@@ -404,10 +406,10 @@ void main() {
         float fresnel = 0.02 + 0.98 * pow(1.0 - cosV, 5.0);
 
         vec3 R = reflect(rayDir, Nup);
-        R.y = max(R.y, 0.02);
+        R.y = max(R.y, 0.015);
         vec3 reflCol = sampleDaySkyWater(normalize(R), L, true);
 
-        // Refract underwater depth lookup along live wave normals so reefs shimmer beneath the waves
+        // Refract underwater depth lookup along live wave normals so reefs glow beneath the swells
         vec2 refractOff = Nup.xz * (0.026 * clamp(1.0 - dist * 0.012, 0.15, 1.0));
         vec2 refrUV = clamp(screenUV + refractOff, 0.001, 0.999);
         float rawRefrDepth = texture(uSceneDepthTex, refrUV).r;
@@ -417,39 +419,47 @@ void main() {
 
         float waterThickness = (rawSceneDepth < 0.9992 && useSceneLin > waterLin)
                                    ? max(useSceneLin - waterLin, 0.0) : 80.0;
-        float shallowMask = exp(-waterThickness * 0.052);
-        vec3 deepOcean   = mix(uWaterColorDeep * 0.70, vec3(0.010, 0.10, 0.24), 0.50);
-        vec3 shallowTurq = mix(uWaterColorShallow * 1.18, vec3(0.06, 0.60, 0.72), 0.35);
+        float shallowMask = exp(-waterThickness * 0.056);
+
+        // Deep rich sapphire ocean vs jewel-like turquoise shoals over reefs
+        vec3 deepOcean   = mix(uWaterColorDeep * 0.38, vec3(0.004, 0.048, 0.155), 0.62);
+        vec3 shallowTurq = mix(uWaterColorShallow * 1.16, vec3(0.02, 0.56, 0.74), 0.44);
         vec3 waterBody   = mix(deepOcean, shallowTurq, shallowMask);
 
-        // Translucent emerald-turquoise subsurface glow through sunlit rolling crests
-        float sss = pow(clamp(dot(V, -L + Nswell * 0.52), 0.0, 1.0), 2.8) * smoothstep(0.35, 0.95, waveCrest);
-        float crestLight = smoothstep(0.42, 0.94, waveCrest) * clamp(dot(Nswell, L) * 0.5 + 0.5, 0.0, 1.0);
-        waterBody += shallowTurq * (sss * 0.62 + crestLight * 0.20);
+        // Vivid translucent emerald-turquoise subsurface scattering through sunlit rolling wave crests
+        float sss = pow(clamp(dot(V, -L + Nswell * 0.56), 0.0, 1.0), 2.5) * smoothstep(0.32, 0.94, waveCrest);
+        float crestLight = smoothstep(0.40, 0.94, waveCrest) * clamp(dot(Nswell, L) * 0.5 + 0.5, 0.0, 1.0);
+        vec3 sssTint = mix(shallowTurq, vec3(0.04, 0.82, 0.78), 0.45);
+        waterBody += sssTint * (sss * 1.15 + crestLight * 0.24);
 
-        vec3 surfaceCol = mix(waterBody, reflCol, clamp(fresnel * 1.02, 0.02, 0.95));
+        // Grazing Fresnel sky mirror vs deep transparent water looking straight down
+        vec3 surfaceCol = mix(waterBody, reflCol, clamp(fresnel * 1.04, 0.02, 0.96));
 
-        // Dual-scale moving solar specular: broad rolling swell sheen + dancing fine sparkles
+        // Triple-scale true HDR solar glitter (feeds the 5-cascade Karis HDR bloom cleanly)
         vec3 H = normalize(L + V + vec3(0.0001));
         float ndhSwell  = clamp(dot(Nswell, H), 0.0, 1.0);
         float ndhRipple = clamp(dot(Nup, H), 0.0, 1.0);
-        vec3 sunGlintCol = vec3(1.24, 1.15, 0.96);
-        float glintSparkle = pow(max(ndhRipple, 0.0001), 220.0) * 3.8 * (0.45 + 0.55 * s3.a);
-        float glintSheen   = pow(max(ndhSwell,  0.0001), 28.0)  * 0.28;
-        surfaceCol += sunGlintCol * (glintSparkle + glintSheen);
+        vec3 hdrSunCol  = vec3(2.85, 2.52, 2.04);
 
-        // White shoreline / whale foam + wind-swept crest foam wisps
-        float crestFoam = smoothstep(0.76, 0.96, waveCrest) * smoothstep(0.48, 0.84, s2.a * 0.6 + s3.a * 0.4) * 0.44;
-        float totalFoam = clamp(shoreFoam * 0.92 + crestFoam, 0.0, 1.0);
-        vec3 dayFoamCol = vec3(0.97, 0.99, 1.02) * (0.86 + 0.24 * clamp(dot(Nup, L), 0.0, 1.0));
+        float sparkNoise   = smoothstep(0.36, 0.86, s3.a * 0.62 + s4.a * 0.38);
+        float glintDiamond = pow(max(ndhRipple, 0.0001), 420.0) * 14.5 * (0.28 + 0.72 * sparkNoise);
+        float glintMid     = pow(max(ndhRipple, 0.0001), 92.0)  * 1.45 * (0.45 + 0.55 * s3.a);
+        float glintSheen   = pow(max(ndhSwell,  0.0001), 24.0)  * 0.36;
+        surfaceCol += hdrSunCol * (glintDiamond + glintMid + glintSheen);
+
+        // Sculpted HDR sunlit foam (bright sun-facing crests vs cool sky-lit shadows)
+        float crestFoam = smoothstep(0.75, 0.96, waveCrest) * smoothstep(0.46, 0.84, s2.a * 0.6 + s3.a * 0.4) * 0.48;
+        float totalFoam = clamp(shoreFoam * 0.94 + crestFoam, 0.0, 1.0);
+        float foamNdl = clamp(dot(Nup, L), 0.0, 1.0);
+        vec3 dayFoamCol = mix(vec3(0.46, 0.64, 0.84), vec3(1.55, 1.60, 1.66), 0.35 + 0.65 * foamNdl);
         surfaceCol = mix(surfaceCol, dayFoamCol, totalFoam);
-        surfaceCol += vec3(1.0, 1.04, 1.08) * shoreBubbles * 0.35;
+        surfaceCol += vec3(1.55, 1.65, 1.75) * shoreBubbles * 0.45;
 
-        // Height-integrated marine mist above the water surface + smooth horizon blend
+        // Clean, crisp aerial perspective & subtle marine horizon mist (no washed-out milkiness)
         float y0 = max(uCamPos.y - uWaterY, 0.0);
         float y1 = max(vWorldPos.y - uWaterY, 0.0);
         float dy = y1 - y0;
-        const float k = 0.05;
+        const float k = 0.055;
         float heightIntegral = (abs(dy) > 0.02)
             ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
             : exp(-k * 0.5 * (y0 + y1));
@@ -457,31 +467,31 @@ void main() {
         float mistNoise = texture(uRockTex, vWorldPos.xz * 0.0026 + vec2(uTime * 0.0055, uTime * 0.0032)).a;
         float mistMod = mix(0.84, 1.18, mistNoise);
 
-        float effDist = max(dist - 18.0, 0.0);
-        float tauAir  = dist * 0.00072;
-        float tauMist = effDist * 0.00165 * heightIntegral * mistMod;
+        float effDist  = max(dist - 32.0, 0.0);
+        float tauAir   = dist * 0.00046;
+        float tauMist  = effDist * 0.00092 * heightIntegral * mistMod;
         float tauTotal = tauAir + tauMist;
 
         float fogFactor = 1.0 - exp(-tauTotal);
-        float farFade = smoothstep(uFarPlane * 0.78, uFarPlane * 0.96, dist);
+        float farFade = smoothstep(uFarPlane * 0.76, uFarPlane * 0.96, dist);
         fogFactor = clamp(max(fogFactor, farFade), 0.0, 1.0);
 
         float sunDot = clamp(dot(rayDir, L), 0.0, 1.0);
-        vec3 hazeDir = normalize(vec3(rayDir.x, 0.03, rayDir.z));
+        vec3 hazeDir = normalize(vec3(rayDir.x, 0.025, rayDir.z));
         vec3 airHaze = sampleDaySkyWater(hazeDir, L, false);
-        vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + vec3(1.24, 1.15, 0.96) * (pow(sunDot, 5.0) * 0.24);
+        vec3 marineMistCol = vec3(0.76, 0.91, 1.02) + hdrSunCol * (pow(sunDot, 5.0) * 0.16);
 
         float mistShare = clamp(tauMist / max(tauTotal, 0.0001), 0.0, 1.0);
-        float colorBlend = mix(mistShare * 0.88, 0.76, farFade);
+        float colorBlend = mix(mistShare * 0.72, 0.74, farFade);
         vec3 horizonCol = mix(airHaze, marineMistCol, colorBlend);
 
         vec3 outCol = mix(surfaceCol, horizonCol, fogFactor);
-        FragColor = vec4(clamp(outCol, 0.0, 8.0), 1.0);
+        FragColor = vec4(clamp(outCol, 0.0, 48.0), 1.0);
         return;
     }
 
     // ========================================================================
-    // UNDERWATER VIEW: Snell's Window, TIR & Spectral Underwater Fog
+    // UNDERWATER VIEW: Snell's Window, TIR & Spectral Underwater Fog (100% unchanged)
     // ========================================================================
     vec2 totalSlope = vWaveGrad * 1.90 + texSlope * 0.85 + shoreRippleGrad;
     vec3 N = normalize(vec3(totalSlope.x, -1.0, totalSlope.y));
@@ -571,7 +581,7 @@ inline const char* WaterSurfaceFrag400 =
 #undef DEEPDIVE_WATER_FRAG_PART2
 
 // ============================================================================
-// DUAL-MEDIUM SKYBOX (UNDERWATER GRADIENT + MIDDAY SUN & DISTANT CLOUDS)
+// DUAL-MEDIUM SKYBOX (UNDERWATER GRADIENT + PHYSICAL HDR DAY SKY & CLOUDS)
 // ============================================================================
 
 inline const char* SkyboxVert = R"(#version 330 core
@@ -704,7 +714,7 @@ float marchCloudLight(vec3 pos, vec3 planetCenter, vec3 L, float viewDist, float
         totalDensity += sampleCloudDensity(p, h, viewDist, sunClear, i < 2) * (lightStep * stepMul);
     }
 
-    return totalDensity * 0.0085;
+    return totalDensity * 0.0095;
 }
 
 void main() {
@@ -714,43 +724,50 @@ void main() {
 
     if (uCamAboveWater == 1) {
         float elev = clamp(dir.y, 0.0, 1.0);
-        vec3 zenith  = vec3(0.07, 0.32, 0.76);
-        vec3 midSky  = vec3(0.24, 0.60, 0.94);
-        vec3 horizon = vec3(0.75, 0.91, 0.99);
-
-        vec3 skyCol = mix(horizon, midSky, smoothstep(0.0, 0.26, elev));
-        skyCol = mix(skyCol, zenith, pow(elev, 0.58));
-
-        // Midday sun glow, corona & crisp solar disc
         float sunDot = clamp(dot(dir, L), 0.0, 1.0);
-        vec3 middaySun = vec3(1.24, 1.15, 0.96);
 
-        // Soft marine mist band hovering along the ocean horizon
-        vec3 marineMistCol = vec3(0.80, 0.92, 0.98) + middaySun * (pow(sunDot, 5.0) * 0.14);
+        // Deep physical Rayleigh-inspired tropical sky dome
+        vec3 zenith  = vec3(0.028, 0.165, 0.66);
+        vec3 midSky  = vec3(0.14,  0.48,  0.94);
+        vec3 horizon = vec3(0.74,  0.91,  1.04);
+
+        vec3 skyCol = mix(horizon, midSky, smoothstep(0.0, 0.24, elev));
+        skyCol = mix(skyCol, zenith, pow(elev, 0.56));
+
+        // Subtle anti-solar deepening opposite the sun for atmospheric dimensionality
+        float antiSun = smoothstep(0.15, -0.75, dot(dir, L)) * smoothstep(0.02, 0.45, elev);
+        skyCol *= mix(vec3(1.0), vec3(0.84, 0.90, 1.04), antiSun * 0.45);
+
+        // Warm HDR solar radiance
+        vec3 hdrSun = vec3(2.75, 2.48, 2.02);
+
+        // Clean luminous marine mist ribbon hovering right along the horizon
+        vec3 marineMistCol = vec3(0.76, 0.91, 1.02) + hdrSun * (pow(sunDot, 5.0) * 0.14);
         if (dir.y < 0.0) {
-            skyCol = mix(marineMistCol, vec3(0.06, 0.24, 0.42), smoothstep(0.0, -0.22, dir.y));
+            skyCol = mix(marineMistCol, vec3(0.02, 0.14, 0.30), smoothstep(0.0, -0.22, dir.y));
         } else {
-            float mistBand = exp(-pow(elev / 0.075, 1.35));
-            skyCol = mix(skyCol, marineMistCol, mistBand * 0.76);
+            float mistBand = exp(-pow(elev / 0.058, 1.45));
+            skyCol = mix(skyCol, marineMistCol, mistBand * 0.64);
         }
 
-        float mieWide  = pow(sunDot, 5.0)   * 0.16;
-        float mieTight = pow(sunDot, 32.0)  * 0.44;
-        float sunHalo  = pow(sunDot, 160.0) * 1.55;
-        float sunDisc  = smoothstep(0.9985, 0.99945, sunDot) * 8.5;
+        // Physical Mie forward-scattering aura + intense HDR solar disc
+        float mieWide  = pow(sunDot, 4.5)   * 0.18;
+        float mieTight = pow(sunDot, 32.0)  * 0.72;
+        float sunHalo  = pow(sunDot, 165.0) * 3.80;
+        float sunDisc  = smoothstep(0.99855, 0.99945, sunDot) * 38.0;
 
-        vec3 col = skyCol + middaySun * (mieWide + mieTight) * smoothstep(-0.04, 0.06, dir.y);
+        vec3 col = skyCol + hdrSun * (mieWide + mieTight) * smoothstep(-0.04, 0.06, dir.y);
 
-        // Subtle high-altitude cirrus streaks
+        // Crisp high-altitude sunlit cirrus wisps
         if (dir.y > 0.03) {
             vec2 cirrusUV = dir.xz / (dir.y + 0.16) * 0.12 + vec2(uTime * 0.00045, uTime * 0.00028);
             float cirrus = textureLod(uCloudWeatherTex, cirrusUV, 0.0).b;
-            float cirrusMask = cirrus * smoothstep(0.03, 0.22, dir.y) * 0.14;
-            vec3 cirrusCol = mix(vec3(0.86, 0.93, 1.00), vec3(1.08, 1.06, 1.02), 0.5 + 0.5 * sunDot);
+            float cirrusMask = cirrus * smoothstep(0.03, 0.22, dir.y) * 0.16;
+            vec3 cirrusCol = mix(vec3(0.92, 0.97, 1.05), vec3(1.85, 1.78, 1.66), 0.42 + 0.58 * sunDot);
             col = mix(col, cirrusCol, cirrusMask);
         }
 
-        // Volumetric HZD / Nubis cloud raymarching inside spherical atmospheric shell
+        // Volumetric HZD / Nubis cloud raymarching with true HDR luminance & silver lining
         float cloudTransmittance = 1.0;
         if (dir.y > 0.010) {
             vec3 planetCenter = vec3(0.0, uWaterY - EARTH_RADIUS, 0.0);
@@ -773,10 +790,10 @@ void main() {
                 float sunClear = mix(0.22, 1.0, smoothstep(0.996, 0.945, sunDot));
 
                 float cosTheta  = dot(dir, L);
-                float hgForward = henyeyGreenstein(cosTheta, 0.66);
-                float hgBack    = henyeyGreenstein(cosTheta, -0.25);
-                float phase     = clamp(mix(hgBack, hgForward, 0.62) * 3.14159265, 0.50, 1.75);
-                float silverRim = clamp(henyeyGreenstein(cosTheta, 0.86) * 0.45, 0.0, 0.85);
+                float hgForward = henyeyGreenstein(cosTheta, 0.68);
+                float hgBack    = henyeyGreenstein(cosTheta, -0.26);
+                float phase     = clamp(mix(hgBack, hgForward, 0.64) * 3.14159265, 0.48, 1.95);
+                float silverRim = clamp(henyeyGreenstein(cosTheta, 0.88) * 0.85, 0.0, 1.85);
 
                 vec3 scatteredLight = vec3(0.0);
                 float firstHitT = tEnd;
@@ -801,27 +818,27 @@ void main() {
 
                             float lightTau = marchCloudLight(pos, planetCenter, L, t, sunClear);
 
-                            // Calibrated Beer-Powder + multi-scattering (strong 3D shadow contrast, no white clip)
+                            // Calibrated HDR Beer-Powder + multi-scattering (sculpted dark bellies & glowing rims)
                             float beer1  = exp(-lightTau);
-                            float beer2  = exp(-lightTau * 0.25);
-                            float powder = 1.0 - exp(-lightTau * 1.9);
-                            float powderFactor = mix(0.52 + 0.68 * powder, 1.0, clamp(cosTheta * 0.5 + 0.5, 0.0, 1.0));
+                            float beer2  = exp(-lightTau * 0.22);
+                            float powder = 1.0 - exp(-lightTau * 2.1);
+                            float powderFactor = mix(0.46 + 0.78 * powder, 1.0, clamp(cosTheta * 0.5 + 0.5, 0.0, 1.0));
 
-                            float directEnergy = beer1 * (phase * 0.72 + silverRim * 0.35) * powderFactor
-                                               + beer2 * 0.26;
+                            float directEnergy = beer1 * (phase * 0.78 + silverRim * 0.58) * powderFactor
+                                               + beer2 * 0.24;
 
-                            // Deep cool blue-grey shadowed undersides vs bright crisp sunlit upper domes
-                            vec3 ambBottom   = vec3(0.20, 0.34, 0.54);
-                            vec3 ambTop      = vec3(0.66, 0.78, 0.94);
+                            // Deep cool blue-slate undersides vs bright sunlit cauliflower domes
+                            vec3 ambBottom   = vec3(0.11, 0.23, 0.44);
+                            vec3 ambTop      = vec3(0.52, 0.68, 0.94);
                             vec3 skyFill     = mix(ambBottom, ambTop, smoothstep(0.0, 0.85, h));
-                            vec3 oceanBounce = mix(uWaterColorShallow, vec3(0.18, 0.54, 0.68), 0.5) * (1.0 - h) * 0.08;
-                            float heightAO   = mix(0.34, 1.0, pow(h, 0.75));
-                            float depthAO    = mix(0.58, 1.0, exp(-dens * 1.6));
+                            vec3 oceanBounce = mix(uWaterColorShallow, vec3(0.08, 0.56, 0.74), 0.5) * (1.0 - h) * 0.11;
+                            float heightAO   = mix(0.28, 1.0, pow(h, 0.78));
+                            float depthAO    = mix(0.52, 1.0, exp(-dens * 1.7));
 
-                            vec3 lum = middaySun * (directEnergy * 0.92)
-                                     + (skyFill + oceanBounce) * (heightAO * depthAO * 0.48);
+                            vec3 lum = hdrSun * (directEnergy * 0.98)
+                                     + (skyFill + oceanBounce) * (heightAO * depthAO * 0.52);
 
-                            float stepExt = dens * stepLen * 0.0068;
+                            float stepExt = dens * stepLen * 0.0072;
                             float stepTrans = exp(-stepExt);
 
                             scatteredLight += cloudTransmittance * lum * (1.0 - stepTrans);
@@ -837,7 +854,7 @@ void main() {
                     vec3 cloudCol = scatteredLight / max(cloudAlpha, 0.0001);
                     vec3 hazeCol  = mix(marineMistCol, skyCol, smoothstep(0.02, 0.25, dir.y));
 
-                    float distVis   = exp(-max(firstHitT - 6000.0, 0.0) * 0.000038);
+                    float distVis   = exp(-max(firstHitT - 6500.0, 0.0) * 0.000034);
                     float horizMask = smoothstep(0.012, 0.075, dir.y);
 
                     cloudCol = mix(hazeCol, cloudCol, distVis);
@@ -849,15 +866,16 @@ void main() {
             }
         }
 
-        // Midday sun disc & corona gleaming cleanly in the zenith
+        // Intense HDR solar disc & corona (triggers multi-cascade bloom organically)
         float sunVis = pow(clamp(cloudTransmittance, 0.0, 1.0), 0.75);
-        col += middaySun * (sunHalo * (0.28 + 0.72 * sunVis) + sunDisc * sunVis)
+        col += hdrSun * (sunHalo * (0.25 + 0.75 * sunVis) + sunDisc * sunVis)
              * smoothstep(-0.04, 0.06, dir.y);
 
-        FragColor = vec4(clamp(col, 0.0, 8.0), 1.0);
+        FragColor = vec4(clamp(col, 0.0, 48.0), 1.0);
         return;
     }
 
+    // Underwater sky dome (100% unchanged)
     float camAbyss = smoothstep(-20.0, -54.0, uCamPos.y);
     float camHeightFactor = clamp((uCamPos.y + 34.0) / 62.0, 0.06, 1.0);
 
@@ -1204,22 +1222,22 @@ void main() {
     vec3 D = dist > 0.0001 ? (viewVec / dist) : vec3(0.0, 0.0, 1.0);
     vec3 L = normalize(uSunDir);
 
-    // Sunlit forward scattering ("silver lining" when spray is backlit by midday sun)
+    // HDR sunlit forward scattering ("silver lining" when spray is backlit by midday sun)
     float sunDot = clamp(dot(D, L), 0.0, 1.0);
-    float forwardScatter = pow(sunDot, 5.0) * 0.55;
-    vec3 middaySun = vec3(1.18, 1.12, 0.98);
+    float forwardScatter = pow(sunDot, 5.0) * 0.75;
+    vec3 hdrSun = vec3(2.45, 2.24, 1.88);
 
     vec3 col;
     float alpha;
 
     if (vIsDrop > 0.5) {
-        // Crisp glistening water droplet with bright solar specular glint
+        // Crisp glistening HDR water droplet that catches sunlight sparkles
         float core = smoothstep(1.0, 0.25, r2);
         float rim  = smoothstep(0.35, 0.88, r2) * (1.0 - smoothstep(0.88, 1.0, r2));
         float glint = pow(clamp(1.0 - length(uv - vec2(-0.30, -0.32)) * 1.65, 0.0, 1.0), 3.0);
 
-        col = mix(vec3(0.76, 0.92, 0.99), vec3(1.04, 1.06, 1.08), core * 0.65) * vTint;
-        col += middaySun * (glint * 0.95 + forwardScatter * 0.70);
+        col = mix(vec3(0.55, 0.80, 0.96), vec3(1.25, 1.32, 1.38), core * 0.65) * vTint;
+        col += hdrSun * (glint * 1.35 + forwardScatter * 0.75);
         alpha = clamp((core * 0.68 + rim * 0.45 + glint * 0.45) * vAlpha, 0.0, 0.96);
     } else {
         // Soft sunlit mist / whale blow vapour puff broken up by rotated noise
@@ -1232,28 +1250,28 @@ void main() {
         float puff = radial * radial * smoothstep(0.18, 0.86, n * 0.65 + radial * 0.55);
         if (puff <= 0.005) discard;
 
-        // Subtle vertical sky/shadow gradient across the puff
-        float topShade = clamp(0.78 - uv.y * 0.22, 0.55, 1.05);
-        col = mix(vec3(0.78, 0.89, 0.96), vec3(1.06, 1.07, 1.05), topShade) * vTint;
-        col += middaySun * (forwardScatter * 0.65);
+        // Subtle sky-shadow underside vs sunlit top
+        float topShade = clamp(0.74 - uv.y * 0.28, 0.48, 1.05);
+        col = mix(vec3(0.48, 0.68, 0.86), vec3(1.38, 1.40, 1.36), topShade) * vTint;
+        col += hdrSun * (forwardScatter * 0.62);
         alpha = clamp(puff * vAlpha * 0.78, 0.0, 0.85);
     }
 
-    // Height-integrated marine mist fade for distant spray and whale blow spouts
+    // Crisp aerial perspective matching HDR ocean & sky
     float y0 = max(uCamPos.y - uWaterY, 0.0);
     float y1 = max(vWorldPos.y - uWaterY, 0.0);
     float dy = y1 - y0;
-    const float k = 0.05;
+    const float k = 0.055;
     float hInt = (abs(dy) > 0.02)
         ? (exp(-k * y0) - exp(-k * y1)) / (k * dy)
         : exp(-k * 0.5 * (y0 + y1));
 
-    float tau = dist * 0.00072 + max(dist - 18.0, 0.0) * 0.00165 * hInt;
+    float tau = dist * 0.00046 + max(dist - 32.0, 0.0) * 0.00092 * hInt;
     float fogF = clamp(max(1.0 - exp(-tau), smoothstep(uFarPlane * 0.80, uFarPlane * 0.98, dist)), 0.0, 1.0);
-    vec3 horizonHaze = vec3(0.80, 0.92, 0.98) + middaySun * (pow(sunDot, 5.0) * 0.22);
+    vec3 horizonHaze = vec3(0.76, 0.91, 1.02) + hdrSun * (pow(sunDot, 5.0) * 0.16);
     col = mix(col, horizonHaze, fogF);
 
-    FragColor = vec4(clamp(col, 0.0, 6.0), alpha);
+    FragColor = vec4(clamp(col, 0.0, 24.0), alpha);
 }
 )";
 
@@ -1266,6 +1284,7 @@ void main() {
 }
 )";
 
+// Underwater half-res scatter blur (100% unchanged)
 inline const char* ScatterBlurFrag = R"(#version 330 core
 in vec2 vUV;
 uniform sampler2D uSourceTex;
@@ -1308,6 +1327,177 @@ void main() {
 }
 )";
 
+// Above-water 13-tap HDR bloom downsample with Karis average anti-firefly filter
+inline const char* HdrBloomDownFrag = R"(#version 330 core
+in vec2 vUV;
+uniform sampler2D uSourceTex;
+uniform vec2 uTexelSize;
+uniform int uFirstPass;
+uniform float uThreshold;
+uniform float uKnee;
+
+out vec4 FragColor;
+
+vec3 sanitizeHDR(vec3 c) {
+    if (any(isnan(c)) || any(isinf(c))) return vec3(0.0);
+    return clamp(c, vec3(0.0), vec3(64.0));
+}
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 prefilterBright(vec3 c) {
+    vec3 s = sanitizeHDR(c);
+    float br = max(s.r, max(s.g, s.b));
+    float soft = clamp(br - uThreshold + uKnee, 0.0, 2.0 * uKnee);
+    soft = (soft * soft) / max(4.0 * uKnee, 0.0001);
+    float contrib = max(soft, br - uThreshold) / max(br, 0.0001);
+    return s * max(contrib, 0.0);
+}
+
+vec3 tap(vec2 offset) {
+    vec3 c = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + offset, 0.0005, 0.9995), 0.0).rgb);
+    return (uFirstPass == 1) ? prefilterBright(c) : c;
+}
+
+void main() {
+    vec2 t = uTexelSize;
+
+    vec3 a = tap(vec2(-2.0 * t.x,  2.0 * t.y));
+    vec3 b = tap(vec2( 0.0,        2.0 * t.y));
+    vec3 c = tap(vec2( 2.0 * t.x,  2.0 * t.y));
+
+    vec3 d = tap(vec2(-t.x,        t.y));
+    vec3 e = tap(vec2( t.x,        t.y));
+
+    vec3 f = tap(vec2(-2.0 * t.x,  0.0));
+    vec3 g = tap(vec2( 0.0,        0.0));
+    vec3 h = tap(vec2( 2.0 * t.x,  0.0));
+
+    vec3 i = tap(vec2(-t.x,       -t.y));
+    vec3 j = tap(vec2( t.x,       -t.y));
+
+    vec3 k = tap(vec2(-2.0 * t.x, -2.0 * t.y));
+    vec3 l = tap(vec2( 0.0,       -2.0 * t.y));
+    vec3 m = tap(vec2( 2.0 * t.x, -2.0 * t.y));
+
+    vec3 g0 = (d + e + i + j) * 0.25;
+    vec3 g1 = (a + b + f + g) * 0.25;
+    vec3 g2 = (b + c + g + h) * 0.25;
+    vec3 g3 = (f + g + k + l) * 0.25;
+    vec3 g4 = (g + h + l + m) * 0.25;
+
+    vec3 res;
+    if (uFirstPass == 1) {
+        // Karis average suppresses single-pixel wave specular flicker
+        float w0 = 0.500 / (1.0 + luma(g0));
+        float w1 = 0.125 / (1.0 + luma(g1));
+        float w2 = 0.125 / (1.0 + luma(g2));
+        float w3 = 0.125 / (1.0 + luma(g3));
+        float w4 = 0.125 / (1.0 + luma(g4));
+        res = (g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4) / max(w0 + w1 + w2 + w3 + w4, 0.0001);
+    } else {
+        res = g0 * 0.500 + (g1 + g2 + g3 + g4) * 0.125;
+    }
+
+    FragColor = vec4(sanitizeHDR(res), 1.0);
+}
+)";
+
+// Above-water 9-tap tent upsample (accumulated additively up the bloom pyramid)
+inline const char* HdrBloomUpFrag = R"(#version 330 core
+in vec2 vUV;
+uniform sampler2D uSourceTex;
+uniform vec2 uTexelSize;
+uniform float uFilterRadius;
+uniform float uLevelWeight;
+
+out vec4 FragColor;
+
+vec3 sanitizeHDR(vec3 c) {
+    if (any(isnan(c)) || any(isinf(c))) return vec3(0.0);
+    return clamp(c, vec3(0.0), vec3(64.0));
+}
+
+void main() {
+    vec2 d = uTexelSize * uFilterRadius;
+
+    vec3 a = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2(-d.x,  d.y), 0.0005, 0.9995), 0.0).rgb);
+    vec3 b = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2( 0.0,  d.y), 0.0005, 0.9995), 0.0).rgb);
+    vec3 c = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2( d.x,  d.y), 0.0005, 0.9995), 0.0).rgb);
+
+    vec3 e = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2(-d.x,  0.0), 0.0005, 0.9995), 0.0).rgb);
+    vec3 f = sanitizeHDR(textureLod(uSourceTex, clamp(vUV,                    0.0005, 0.9995), 0.0).rgb);
+    vec3 g = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2( d.x,  0.0), 0.0005, 0.9995), 0.0).rgb);
+
+    vec3 h = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2(-d.x, -d.y), 0.0005, 0.9995), 0.0).rgb);
+    vec3 i = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2( 0.0, -d.y), 0.0005, 0.9995), 0.0).rgb);
+    vec3 j = sanitizeHDR(textureLod(uSourceTex, clamp(vUV + vec2( d.x, -d.y), 0.0005, 0.9995), 0.0).rgb);
+
+    vec3 tent = (a + c + h + j) * (1.0 / 16.0)
+              + (b + e + g + i) * (2.0 / 16.0)
+              +  f              * (4.0 / 16.0);
+
+    FragColor = vec4(sanitizeHDR(tent * uLevelWeight), 1.0);
+}
+)";
+
+// 1x1 GPU ping-pong auto-exposure (smooth eye adaptation without CPU stalls)
+inline const char* AutoExposureFrag = R"(#version 330 core
+in vec2 vUV;
+uniform sampler2D uSceneColorTex;
+uniform sampler2D uPrevExposureTex;
+uniform float uLumaMip;
+uniform float uRealDt;
+uniform int uCamAboveWater;
+uniform int uResetExposure;
+
+out vec4 FragColor;
+
+void main() {
+    float logSum = 0.0;
+    float weightSum = 0.0;
+
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 5; ++x) {
+            vec2 uv = vec2(0.14 + float(x) * 0.18, 0.14 + float(y) * 0.18);
+            vec3 c = textureLod(uSceneColorTex, uv, uLumaMip).rgb;
+            if (any(isnan(c)) || any(isinf(c))) c = vec3(0.45);
+
+            float lum = dot(max(c, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+            lum = clamp(lum, 0.04, 8.0);
+
+            vec2 d = uv - 0.5;
+            float w = 0.45 + 1.15 * exp(-dot(d, d) * 4.5);
+            logSum += log2(lum) * w;
+            weightSum += w;
+        }
+    }
+
+    float avgLum = exp2(logSum / max(weightSum, 0.0001));
+
+    // Keep underwater exposure primed higher so breaching into midday sun gives a natural eye-adaptation flash
+    float targetExp;
+    if (uCamAboveWater == 1) {
+        const float keyValue = 0.46;
+        targetExp = clamp(keyValue / max(avgLum, 0.08), 0.46, 1.42);
+    } else {
+        targetExp = 1.42;
+    }
+
+    float prevExp = texture(uPrevExposureTex, vec2(0.5)).r;
+    if (uResetExposure == 1 || isnan(prevExp) || isinf(prevExp) || prevExp <= 0.01) {
+        prevExp = targetExp;
+    }
+
+    float adaptSpeed = (targetExp < prevExp) ? 2.6 : 1.3;
+    float adaptedExp = mix(prevExp, targetExp, 1.0 - exp(-clamp(uRealDt, 0.001, 0.1) * adaptSpeed));
+
+    FragColor = vec4(adaptedExp, avgLum, 0.0, 1.0);
+}
+)";
+
 inline const char* PostProcessFrag = R"(#version 330 core
 in vec2 vUV;
 
@@ -1315,6 +1505,7 @@ uniform sampler2D uSceneColorTex;
 uniform sampler2D uSceneDepthTex;
 uniform sampler2D uBloomTex;
 uniform sampler2D uRockTex;
+uniform sampler2D uExposureTex;
 
 uniform vec2 uInvResolution;
 uniform vec3 uSunScreenPos;
@@ -1332,7 +1523,7 @@ out vec4 FragColor;
 
 vec3 sanitizeHDR(vec3 c) {
     if (any(isnan(c)) || any(isinf(c))) return vec3(0.0);
-    return clamp(c, vec3(0.0), vec3(10.0));
+    return clamp(c, vec3(0.0), vec3(64.0));
 }
 
 float linearizeDepth(float d) {
@@ -1342,13 +1533,30 @@ float linearizeDepth(float d) {
     return (2.0 * zNear * zFar) / max(zFar + zNear - z_n * (zFar - zNear), 0.0001);
 }
 
+// Underwater tone mapping (100% unchanged)
 vec3 acesToneMapping(vec3 x) {
-    vec3 s = sanitizeHDR(x);
+    vec3 s = clamp(sanitizeHDR(x), vec3(0.0), vec3(10.0));
     const float a = 2.51;
     const float b = 0.03;
     const float c = 2.43;
     const float d = 0.59;
     const float e = 0.14;
+    return clamp((s * (a * s + b)) / (s * (c * s + d) + e), 0.0, 1.0);
+}
+
+// Above-water HDR filmic tone mapping: deep blacks, vibrant midtones & smooth AgX-like highlight roll-off to white
+vec3 hdrFilmicToneMap(vec3 x) {
+    vec3 s = sanitizeHDR(x);
+    float peak = max(s.r, max(s.g, s.b));
+    float lum  = dot(s, vec3(0.2126, 0.7152, 0.0722));
+    float hiDesat = smoothstep(1.2, 8.5, peak) * 0.50;
+    s = mix(s, vec3(lum), hiDesat);
+
+    const float a = 2.51;
+    const float b = 0.024;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.16;
     return clamp((s * (a * s + b)) / (s * (c * s + d) + e), 0.0, 1.0);
 }
 
@@ -1364,7 +1572,7 @@ vec3 evalLensDroplets(vec2 uv, float aspect, float wetness, float t) {
 
     vec2 gridScale = vec2(9.5 * aspect, 9.5);
     vec2 gUV = uv * gridScale;
-    gUV.y += t * 0.55; // droplets slowly slide down the lens
+    gUV.y += t * 0.55;
 
     vec2 cell = floor(gUV);
     vec2 f = fract(gUV) - 0.5;
@@ -1376,7 +1584,7 @@ vec3 evalLensDroplets(vec2 uv, float aspect, float wetness, float t) {
 
     vec2 center = vec2((h2 - 0.5) * 0.52, (h3 - 0.5) * 0.48);
     vec2 d = f - center;
-    d.y *= 0.80; // slight vertical teardrop elongation
+    d.y *= 0.80;
     float r = 0.11 + 0.12 * fract(h1 * 7.31);
     float dist = length(d);
     float mask = smoothstep(r, r * 0.35, dist) * wetness;
@@ -1389,7 +1597,7 @@ vec3 evalLensDroplets(vec2 uv, float aspect, float wetness, float t) {
 
 void main() {
     if (uEnablePost == 0) {
-        FragColor = vec4(clamp(sanitizeHDR(texture(uSceneColorTex, vUV).rgb), 0.0, 1.0), 1.0);
+        FragColor = vec4(clamp(sanitizeHDR(textureLod(uSceneColorTex, vUV, 0.0).rgb), 0.0, 1.0), 1.0);
         return;
     }
 
@@ -1400,7 +1608,7 @@ void main() {
     vec3 mapped;
 
     if (uCamAboveWater == 1) {
-        // Above-water: crisp sunlit air + dripping lens droplets + soft solar bloom
+        // True HDR above-water composite: Auto-Exposure, 5-cascade Karis bloom, optical flare & filmic grading
         vec3 drop = evalLensDroplets(vUV, aspect, uLensWetness, uTime);
         vec2 uv = clamp(vUV + drop.xy, 0.001, 0.999);
 
@@ -1408,31 +1616,57 @@ void main() {
         vec2 caShift = edgeVec * (caAmp * radialDist);
 
         vec3 sceneCol;
-        sceneCol.r = sanitizeHDR(texture(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999)).rgb).r;
-        sceneCol.g = sanitizeHDR(texture(uSceneColorTex, uv).rgb).g;
-        sceneCol.b = sanitizeHDR(texture(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999)).rgb).b;
+        sceneCol.r = sanitizeHDR(textureLod(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999), 0.0).rgb).r;
+        sceneCol.g = sanitizeHDR(textureLod(uSceneColorTex, uv, 0.0).rgb).g;
+        sceneCol.b = sanitizeHDR(textureLod(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999), 0.0).rgb).b;
 
+        // 5-cascade HDR bloom (only true HDR peaks: sun, cloud silver lining, diamond ocean glints)
         vec3 bloom = sanitizeHDR(texture(uBloomTex, uv).rgb);
-        sceneCol += bloom * 0.18;
+        sceneCol += bloom * 0.22;
 
-        // Subtle warm solar glare when looking toward midday sun
+        // Subtle warm solar glare + crisp horizontal optical streak when facing midday sun
         if (uSunScreenPos.z > 0.0) {
-            float sunDist = length(uv - uSunScreenPos.xy);
-            float glare = exp(-sunDist * 2.8) * clamp(uSunScreenPos.z, 0.0, 1.0);
-            sceneCol += vec3(1.05, 0.98, 0.84) * glare * 0.14;
+            vec2 sunDelta = (uv - uSunScreenPos.xy) * vec2(aspect, 1.0);
+            float sunDist = length(sunDelta);
+            float sunFacing = clamp(uSunScreenPos.z, 0.0, 1.0);
+            float glare = exp(-sunDist * 3.8) * sunFacing;
+            float streak = exp(-abs(sunDelta.y) * 28.0) * exp(-abs(sunDelta.x) * 2.5) * sunFacing;
+            sceneCol += vec3(1.25, 1.10, 0.84) * (glare * 0.16 + streak * 0.07);
         }
 
-        // Droplet specular glint
-        sceneCol += vec3(0.95, 1.02, 1.08) * drop.z * 0.65;
+        // Sparkling HDR highlight on water droplets sliding down the lens
+        sceneCol += vec3(1.45, 1.50, 1.58) * drop.z * 0.78;
 
-        mapped = acesToneMapping(sceneCol * (1.06 + uBulletTime * 0.05));
-        mapped = pow(max(mapped, vec3(0.0001)), vec3(0.97));
+        // Smooth GPU eye-adaptation exposure
+        float adaptedExp = texture(uExposureTex, vec2(0.5)).r;
+        if (isnan(adaptedExp) || isinf(adaptedExp) || adaptedExp <= 0.05) {
+            adaptedExp = 1.0;
+        }
+        vec3 exposed = sceneCol * adaptedExp * (1.16 + uBulletTime * 0.06);
 
-        float vigStrength = mix(0.84, 0.68, uBulletTime);
-        float vignette = smoothstep(1.08, 0.30, radialDist);
+        mapped = hdrFilmicToneMap(exposed);
+
+        // Rich midtone vibrance + gentle filmic S-curve contrast
+        float lumaM = dot(mapped, vec3(0.2126, 0.7152, 0.0722));
+        float sat = max(mapped.r, max(mapped.g, mapped.b)) - min(mapped.r, min(mapped.g, mapped.b));
+        float vibBoost = mix(1.18, 1.03, clamp(sat * 1.35, 0.0, 1.0));
+        mapped = clamp(mix(vec3(lumaM), mapped, vibBoost), 0.0, 1.0);
+
+        vec3 sCurve = mapped * mapped * (3.0 - 2.0 * mapped);
+        mapped = mix(mapped, sCurve, 0.16);
+
+        // Subtle split-toning: cool deep shadows vs warm sunlit highlights
+        vec3 shadowTint = vec3(0.95, 0.99, 1.05);
+        vec3 hiTint     = vec3(1.03, 1.01, 0.97);
+        mapped *= mix(shadowTint, hiTint, smoothstep(0.18, 0.78, lumaM));
+
+        mapped = pow(max(mapped, vec3(0.0001)), vec3(0.96));
+
+        float vigStrength = mix(0.82, 0.66, uBulletTime);
+        float vignette = smoothstep(1.08, 0.28, radialDist);
         mapped *= mix(vigStrength, 1.0, vignette);
     } else {
-        // Underwater: subtle optical refraction, depth turbidity blur, bloom & god rays
+        // Underwater: subtle optical refraction, depth turbidity blur, bloom & god rays (100% unchanged)
         vec2 waveOffset = vec2(
             sin(vUV.y * 13.0 + uTime * 1.45) * cos(vUV.x * 10.0 + uTime * 0.95),
             cos(vUV.x * 12.0 - uTime * 1.15) * sin(vUV.y * 11.0 + uTime * 0.85)
@@ -1446,16 +1680,16 @@ void main() {
         vec2 caShift = edgeVec * (0.0030 * radialDist);
 
         vec3 centerCol;
-        centerCol.r = sanitizeHDR(texture(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999)).rgb).r;
-        centerCol.g = sanitizeHDR(texture(uSceneColorTex, uv).rgb).g;
-        centerCol.b = sanitizeHDR(texture(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999)).rgb).b;
+        centerCol.r = sanitizeHDR(textureLod(uSceneColorTex, clamp(uv + caShift, 0.001, 0.999), 0.0).rgb).r;
+        centerCol.g = sanitizeHDR(textureLod(uSceneColorTex, uv, 0.0).rgb).g;
+        centerCol.b = sanitizeHDR(textureLod(uSceneColorTex, clamp(uv - caShift, 0.001, 0.999), 0.0).rgb).b;
 
         vec2 blurStep = uInvResolution * (1.2 + turbidityBlur * 2.4);
         vec3 ringCol = (
-            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2( blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
-            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x,  blurStep.y), 0.001, 0.999)).rgb) +
-            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2( blurStep.x, -blurStep.y), 0.001, 0.999)).rgb) +
-            sanitizeHDR(texture(uSceneColorTex, clamp(uv + vec2(-blurStep.x, -blurStep.y), 0.001, 0.999)).rgb)
+            sanitizeHDR(textureLod(uSceneColorTex, clamp(uv + vec2( blurStep.x,  blurStep.y), 0.001, 0.999), 0.0).rgb) +
+            sanitizeHDR(textureLod(uSceneColorTex, clamp(uv + vec2(-blurStep.x,  blurStep.y), 0.001, 0.999), 0.0).rgb) +
+            sanitizeHDR(textureLod(uSceneColorTex, clamp(uv + vec2( blurStep.x, -blurStep.y), 0.001, 0.999), 0.0).rgb) +
+            sanitizeHDR(textureLod(uSceneColorTex, clamp(uv + vec2(-blurStep.x, -blurStep.y), 0.001, 0.999), 0.0).rgb)
         ) * 0.25;
 
         vec3 sceneCol = mix(centerCol, ringCol, turbidityBlur * 0.46);
