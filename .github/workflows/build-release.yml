@@ -62,6 +62,14 @@ jobs:
         shell: pwsh
         run: |
           cpack --config build/CPackConfig.cmake -C Release -G "NSIS;ZIP" -B dist
+          if ($LASTEXITCODE -ne 0) {
+            $nsisLog = "dist/_CPack_Packages/win64/NSIS/NSISOutput.log"
+            if (Test-Path $nsisLog) {
+              Write-Host "=== NSISOutput.log ==="
+              Get-Content $nsisLog
+            }
+            exit $LASTEXITCODE
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

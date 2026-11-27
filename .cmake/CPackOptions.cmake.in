@@ -1,14 +1,15 @@
 if(CPACK_GENERATOR STREQUAL "NSIS")
     set(CPACK_PACKAGE_FILE_NAME "DeepDive-@PROJECT_VERSION@-@DEEPDIVE_ARCH@-setup")
 
-    set(CPACK_NSIS_MUI_ICON "@DEEPDIVE_ICON_DIR@/deepdive.ico")
-    set(CPACK_NSIS_MUI_UNIICON "@DEEPDIVE_ICON_DIR@/deepdive.ico")
-    set(CPACK_NSIS_MUI_WELCOMEFINISHPAGE_BITMAP "@DEEPDIVE_ICON_DIR@/nsis_welcome.bmp")
-    set(CPACK_NSIS_MUI_UNWELCOMEFINISHPAGE_BITMAP "@DEEPDIVE_ICON_DIR@/nsis_welcome.bmp")
-
-    # В CPack NSIS переменная CPACK_PACKAGE_ICON задаёт MUI_HEADERIMAGE_BITMAP (150x57 BMP)
+    file(TO_NATIVE_PATH "@DEEPDIVE_ICON_DIR@/deepdive.ico" _nsis_icon)
+    file(TO_NATIVE_PATH "@DEEPDIVE_ICON_DIR@/nsis_welcome.bmp" _nsis_welcome_bmp)
     file(TO_NATIVE_PATH "@DEEPDIVE_ICON_DIR@/nsis_header.bmp" _nsis_header_bmp)
-    set(CPACK_PACKAGE_ICON "${_nsis_header_bmp}")
+
+    set(CPACK_NSIS_MUI_ICON "${_nsis_icon}")
+    set(CPACK_NSIS_MUI_UNIICON "${_nsis_icon}")
+    set(CPACK_NSIS_MUI_WELCOMEFINISHPAGE_BITMAP "${_nsis_welcome_bmp}")
+    set(CPACK_NSIS_MUI_UNWELCOMEFINISHPAGE_BITMAP "${_nsis_welcome_bmp}")
+    set(CPACK_NSIS_MUI_HEADERIMAGE "${_nsis_header_bmp}")
 
 elseif(CPACK_GENERATOR STREQUAL "ZIP")
     if(APPLE)
