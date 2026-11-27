@@ -56,6 +56,9 @@ private:
     void runNextInitStep();
     void startAsyncWorldLoad(uint32_t seed, bool generateRockTex, bool probeAdapters = false);
     void tryFinishLoading();
+    void applyNativeWindowIcon();
+
+    bool m_nativeIconApplied = false;
 
     std::unique_ptr<DeepDiveEngine> m_engine;
     std::unique_ptr<DeepDiveRender> m_render;

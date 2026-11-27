@@ -186,7 +186,7 @@ inline QImage renderImage(int pixelSize) {
 // Иконка приложения с набором чётких размеров для Qt (окно, панель задач, Alt+Tab)
 inline QIcon createAppIcon() {
     QIcon icon;
-    static constexpr int kSizes[] = {16, 24, 32, 48, 64, 128, 256};
+    static constexpr int kSizes[] = {16, 20, 24, 32, 40, 48, 64, 128, 256};
     for (int sz : kSizes) {
         icon.addPixmap(QPixmap::fromImage(renderImage(sz)));
     }

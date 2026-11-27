@@ -116,7 +116,7 @@ bool writeWindowsIco(const QString& path) {
         QByteArray payload;
     };
 
-    static constexpr int kIcoSizes[] = {16, 24, 32, 48, 64, 256};
+    static constexpr int kIcoSizes[] = {16, 20, 24, 32, 40, 48, 64, 256};
     std::vector<Entry> entries;
     entries.reserve(std::size(kIcoSizes));
 

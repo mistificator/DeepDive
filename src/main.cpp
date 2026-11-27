@@ -56,8 +56,10 @@ int main(int argc, char* argv[]) {
     app.setApplicationVersion(DEEPDIVE_VERSION_STRING);
     app.setDesktopFileName("deepdive");
 
+#if !defined(Q_OS_MACOS)
     const QIcon appIcon = AppIcon::createAppIcon();
     app.setWindowIcon(appIcon);
+#endif
 
     const bool forceGl33 = app.arguments().contains("--gl33");
     int glMajor = 3;
@@ -84,7 +86,9 @@ int main(int argc, char* argv[]) {
     QSurfaceFormat::setDefaultFormat(fmt);
 
     DeepDiveWidget window;
+#if !defined(Q_OS_MACOS)
     window.setWindowIcon(appIcon);
+#endif
     window.setWindowTitle(
         QString("Deep Dive v%1 — Procedural Underwater World (Qt6 / OpenGL %2.%3)")
             .arg(DEEPDIVE_VERSION_STRING)

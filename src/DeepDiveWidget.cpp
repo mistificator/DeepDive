@@ -20,6 +20,13 @@
 #include <algorithm>
 #include <utility>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace {
 
 int mapSet1ScanCodeToQtKey(quint32 sc) {
@@ -579,8 +586,38 @@ void DeepDiveWidget::resizeGL(int w, int h) {
     m_render->resize(int(w * dpr), int(h * dpr));
 }
 
+void DeepDiveWidget::applyNativeWindowIcon() {
+    if (m_nativeIconApplied) return;
+    m_nativeIconApplied = true;
+
+#ifdef Q_OS_WIN
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (!hwnd) return;
+
+    const HINSTANCE hInst = GetModuleHandleW(nullptr);
+    const HANDLE hBig = LoadImageW(
+        hInst, L"IDI_ICON1", IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+        LR_SHARED);
+    const HANDLE hSmall = LoadImageW(
+        hInst, L"IDI_ICON1", IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+        LR_SHARED);
+
+    if (hBig) {
+        SetClassLongPtrW(hwnd, GCLP_HICON, reinterpret_cast<LONG_PTR>(hBig));
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hBig));
+    }
+    if (hSmall) {
+        SetClassLongPtrW(hwnd, GCLP_HICONSM, reinterpret_cast<LONG_PTR>(hSmall));
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hSmall));
+    }
+#endif
+}
+
 void DeepDiveWidget::showEvent(QShowEvent* event) {
     QOpenGLWidget::showEvent(event);
+    applyNativeWindowIcon();
     updateHudGeometry();
     if (m_loadingOverlay) {
         m_loadingOverlay->setGeometry(rect());
