@@ -1,12 +1,13 @@
 ; ==============================================================================
 ; Deep Dive — Multi-user (All Users / Current User) support for CPack NSIS
-; Требует предварительных !define:
+; Requires prior !define:
 ;   DEEPDIVE_REG_KEY, DEEPDIVE_UNINST_KEY, DEEPDIVE_INSTALL_SUBDIR
 ; ==============================================================================
 
 Var DeepDiveIsAdmin
-Var DeepDiveInstallMode     ; "all" или "current"
-Var DeepDivePrevMode        ; отслеживаем смену режима, чтобы не затирать путь пользователя
+Var DeepDiveInstallMode       ; "all" or "current"
+Var DeepDivePrevMode          ; tracks mode switch to avoid overwriting custom $INSTDIR
+Var DeepDiveUserLocalAppData  ; real per-user %LOCALAPPDATA% (independent of SetShellVarContext)
 Var DeepDiveScopeDialog
 Var DeepDiveScopeLabel
 Var DeepDiveScopeRadioAll
@@ -15,19 +16,23 @@ Var DeepDiveScopeHintAll
 Var DeepDiveScopeHintUser
 Var DeepDiveScopeNote
 
-; Обёртка поверх оригинального .onInit из шаблона CPack
+; Wraps original .onInit from CPack NSIS template
 Function .onInit
   Call _CPack_orig_onInit
   Call DeepDiveInitScope
 FunctionEnd
 
-; Обёртка поверх оригинального un.onInit из шаблона CPack
+; Wraps original un.onInit from CPack NSIS template
 Function un.onInit
   Call un._CPack_orig_onInit
   Call un.DeepDiveInitScope
 FunctionEnd
 
 Function DeepDiveInitScope
+  ; Capture actual user %LOCALAPPDATA% before potentially switching to SetShellVarContext all
+  SetShellVarContext current
+  StrCpy $DeepDiveUserLocalAppData "$LOCALAPPDATA"
+
   StrCpy $DeepDiveIsAdmin "0"
   ClearErrors
   UserInfo::GetAccountType
@@ -39,12 +44,11 @@ Function DeepDiveInitScope
   ${EndIf}
 deepdive_not_admin:
 
-  ; Проверяем ранее установленные копии в HKLM и HKCU
+  ; Check existing installations in HKLM and HKCU
   ReadRegStr $1 HKLM "${DEEPDIVE_REG_KEY}" ""
   ReadRegStr $2 HKCU "${DEEPDIVE_REG_KEY}" ""
 
   ${If} $DeepDiveIsAdmin == "1"
-    ; Если ранее ставили только для текущего пользователя (а системной копии нет) — выберем этот режим по умолчанию
     ${If} $2 != ""
     ${AndIf} $1 == ""
       StrCpy $DeepDiveInstallMode "current"
@@ -60,7 +64,7 @@ deepdive_not_admin:
 
   StrCpy $DeepDivePrevMode $DeepDiveInstallMode
 
-  ; Подставляем корректный $INSTDIR по умолчанию (не трогая явный /D=... из командной строки)
+  ; Set default $INSTDIR unless user passed an explicit /D=... path
   ${If} $DeepDiveInstallMode == "current"
     ${If} $INSTDIR == ""
     ${OrIf} $INSTDIR == "$PROGRAMFILES64\${DEEPDIVE_INSTALL_SUBDIR}"
@@ -68,7 +72,7 @@ deepdive_not_admin:
       ${If} $2 != ""
         StrCpy $INSTDIR $2
       ${Else}
-        StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${DEEPDIVE_INSTALL_SUBDIR}"
+        StrCpy $INSTDIR "$DeepDiveUserLocalAppData\Programs\${DEEPDIVE_INSTALL_SUBDIR}"
       ${EndIf}
     ${EndIf}
   ${Else}
@@ -80,7 +84,7 @@ deepdive_not_admin:
 FunctionEnd
 
 Function DeepDiveScopePageCreate
-  !insertmacro MUI_HEADER_TEXT "$(DEEPDIVE_SCOPE_TITLE)" "$(DEEPDIVE_SCOPE_SUBTITLE)"
+  !insertmacro MUI_HEADER_TEXT "Choose Installation Options" "Choose for which users to install $(^NameDA)."
 
   nsDialogs::Create 1018
   Pop $DeepDiveScopeDialog
@@ -88,10 +92,10 @@ Function DeepDiveScopePageCreate
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 296u 24u "$(DEEPDIVE_SCOPE_TOP)"
+  ${NSD_CreateLabel} 0 0 296u 24u "Please select whether you wish to make this software available to all users or just yourself."
   Pop $DeepDiveScopeLabel
 
-  ${NSD_CreateRadioButton} 12u 30u 284u 12u "$(DEEPDIVE_SCOPE_ALL)"
+  ${NSD_CreateRadioButton} 12u 30u 284u 12u "Install for anyone using this computer (all users)"
   Pop $DeepDiveScopeRadioAll
   ${NSD_AddStyle} $DeepDiveScopeRadioAll ${WS_GROUP}
 
@@ -99,16 +103,16 @@ Function DeepDiveScopePageCreate
   Pop $DeepDiveScopeHintAll
   SetCtlColors $DeepDiveScopeHintAll 606060 transparent
 
-  ${NSD_CreateRadioButton} 12u 66u 284u 12u "$(DEEPDIVE_SCOPE_CURRENT)"
+  ${NSD_CreateRadioButton} 12u 66u 284u 12u "Install just for me (current user)"
   Pop $DeepDiveScopeRadioUser
 
-  ${NSD_CreateLabel} 24u 80u 272u 12u "$LOCALAPPDATA\Programs\${DEEPDIVE_INSTALL_SUBDIR}"
+  ${NSD_CreateLabel} 24u 80u 272u 12u "$DeepDiveUserLocalAppData\Programs\${DEEPDIVE_INSTALL_SUBDIR}"
   Pop $DeepDiveScopeHintUser
   SetCtlColors $DeepDiveScopeHintUser 606060 transparent
 
   ${If} $DeepDiveIsAdmin != "1"
     EnableWindow $DeepDiveScopeRadioAll 0
-    ${NSD_CreateLabel} 0 106u 296u 26u "$(DEEPDIVE_SCOPE_NOADMIN)"
+    ${NSD_CreateLabel} 0 106u 296u 24u "Administrator privileges are required to install for all users."
     Pop $DeepDiveScopeNote
     SetCtlColors $DeepDiveScopeNote 606060 transparent
   ${EndIf}
@@ -132,7 +136,7 @@ Function DeepDiveScopePageLeave
     SetShellVarContext current
   ${EndIf}
 
-  ; Обновляем путь установки только если пользователь переключил режим
+  ; Update install path only when the user switched modes
   ${If} $DeepDiveInstallMode != $DeepDivePrevMode
     StrCpy $DeepDivePrevMode $DeepDiveInstallMode
     ${If} $DeepDiveInstallMode == "all"
@@ -147,13 +151,13 @@ Function DeepDiveScopePageLeave
       ${If} $1 != ""
         StrCpy $INSTDIR $1
       ${Else}
-        StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${DEEPDIVE_INSTALL_SUBDIR}"
+        StrCpy $INSTDIR "$DeepDiveUserLocalAppData\Programs\${DEEPDIVE_INSTALL_SUBDIR}"
       ${EndIf}
     ${EndIf}
   ${EndIf}
 FunctionEnd
 
-; Точное определение контекста при удалении по фактическому $INSTDIR
+; Match uninstall context to the actual $INSTDIR being removed
 Function un.DeepDiveInitScope
   SetShellVarContext current
 
@@ -169,7 +173,6 @@ Function un.DeepDiveInitScope
     Return
   ${EndIf}
 
-  ; Резервная проверка по ключу Uninstall (если путь нестандартный)
   ReadRegStr $0 HKCU "${DEEPDIVE_UNINST_KEY}" "UninstallString"
   ${If} $0 != ""
     SetShellVarContext current
@@ -183,7 +186,7 @@ Function un.DeepDiveInitScope
   ${EndIf}
 FunctionEnd
 
-; Запуск DeepDive.exe после установки с обычными правами пользователя
+; Launch DeepDive.exe without admin elevation after setup completes
 Function DeepDiveLaunchAsUser
   ${If} $DeepDiveIsAdmin == "1"
     Exec '"$WINDIR\explorer.exe" "$INSTDIR\DeepDive.exe"'

@@ -34,12 +34,8 @@ set(CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "Deep Dive")
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-endif()
-
 # ==============================================================================
-# Windows NSIS
+# Windows NSIS (English-only, Multi-User, без страницы лицензии)
 # ==============================================================================
 set(CPACK_NSIS_DISPLAY_NAME "Deep Dive")
 set(CPACK_NSIS_PACKAGE_NAME "Deep Dive ${PROJECT_VERSION}")
@@ -55,11 +51,6 @@ set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS
 set(CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS
     "System::Call 'shell32.dll::SHChangeNotify(i 0x08000000, i 0, i 0, i 0)'")
 
-# Патчим встроенный NSIS.template.in на этапе конфигурации:
-#   - Unicode True (с сохранением UTF-8 BOM строго в байте 0): корректный перенос русских слов;
-#   - RequestExecutionLevel highest + страница выбора пользователей (все / текущий);
-#   - *_TITLE_3LINES и DEEPDIVE_WELCOME_TEXT (UTF-8 с BOM);
-#   - DeepDiveLaunchAsUser: запуск DeepDive.exe после установки без прав администратора.
 set(DEEPDIVE_CPACK_TEMPLATE_DIR "${DEEPDIVE_GENERATED_DIR}/cpack_templates")
 if(WIN32)
     set(_cpack_nsis_tpl_src "${CMAKE_ROOT}/Modules/Internal/CPack/NSIS.template.in")
@@ -69,41 +60,19 @@ if(WIN32)
 
     if(EXISTS "${_cpack_nsis_tpl_src}")
         file(MAKE_DIRECTORY "${DEEPDIVE_CPACK_TEMPLATE_DIR}")
-
-        # Локализованные строки с UTF-8 BOM (чтобы makensis на англоязычном CI не ломал кириллицу)
-        string(ASCII 239 187 191 _utf8_bom)
-        file(WRITE "${DEEPDIVE_CPACK_TEMPLATE_DIR}/deepdive_lang.nsh"
-            "${_utf8_bom}!ifdef LANG_ENGLISH\n"
-            "  LangString DEEPDIVE_WELCOME_TEXT \${LANG_ENGLISH} \"This wizard will guide you through the installation of $(^NameDA).$\\r$\\n$\\r$\\nClick Next to continue.\"\n"
-            "  LangString DEEPDIVE_SCOPE_TITLE \${LANG_ENGLISH} \"Choose Installation Options\"\n"
-            "  LangString DEEPDIVE_SCOPE_SUBTITLE \${LANG_ENGLISH} \"Choose for which users to install $(^NameDA).\"\n"
-            "  LangString DEEPDIVE_SCOPE_TOP \${LANG_ENGLISH} \"Please select whether you wish to make this software available to all users or just yourself.\"\n"
-            "  LangString DEEPDIVE_SCOPE_ALL \${LANG_ENGLISH} \"Install for anyone using this computer (all users)\"\n"
-            "  LangString DEEPDIVE_SCOPE_CURRENT \${LANG_ENGLISH} \"Install just for me (current user)\"\n"
-            "  LangString DEEPDIVE_SCOPE_NOADMIN \${LANG_ENGLISH} \"Administrator privileges are required to install for all users.\"\n"
-            "!endif\n"
-            "!ifdef LANG_RUSSIAN\n"
-            "  LangString DEEPDIVE_WELCOME_TEXT \${LANG_RUSSIAN} \"Эта программа установит $(^NameDA) на ваш компьютер.$\\r$\\n$\\r$\\nНажмите «Далее» для продолжения.\"\n"
-            "  LangString DEEPDIVE_SCOPE_TITLE \${LANG_RUSSIAN} \"Выбор пользователей\"\n"
-            "  LangString DEEPDIVE_SCOPE_SUBTITLE \${LANG_RUSSIAN} \"Выберите, для кого установить $(^NameDA).\"\n"
-            "  LangString DEEPDIVE_SCOPE_TOP \${LANG_RUSSIAN} \"Выберите, следует ли установить программу для всех пользователей этого компьютера или только для вас.\"\n"
-            "  LangString DEEPDIVE_SCOPE_ALL \${LANG_RUSSIAN} \"Для всех пользователей этого компьютера\"\n"
-            "  LangString DEEPDIVE_SCOPE_CURRENT \${LANG_RUSSIAN} \"Только для текущего пользователя\"\n"
-            "  LangString DEEPDIVE_SCOPE_NOADMIN \${LANG_RUSSIAN} \"Для установки для всех пользователей запустите установщик от имени администратора.\"\n"
-            "!endif\n"
-        )
-        file(TO_NATIVE_PATH "${DEEPDIVE_CPACK_TEMPLATE_DIR}/deepdive_lang.nsh" _nsis_lang_nsh)
         file(TO_NATIVE_PATH "${CMAKE_CURRENT_LIST_DIR}/nsis_multiuser.nsh" _nsis_multiuser_nsh)
 
+        string(ASCII 239 187 191 _utf8_bom)
         file(READ "${_cpack_nsis_tpl_src}" _nsis_tpl)
 
         # Снимаем исходный UTF-8 BOM шаблона CMake до вставки Unicode True,
-        # иначе BOM съезжает на 2-ю строку перед ';'
+        # чтобы BOM остался строго в байте 0 и не попал на 2-ю строку перед ';'
         string(FIND "${_nsis_tpl}" "${_utf8_bom}" _bom_pos)
         if(_bom_pos EQUAL 0)
             string(SUBSTRING "${_nsis_tpl}" 3 -1 _nsis_tpl)
         endif()
 
+        # Unicode True нужен для корректной работы с нелатинскими именами профилей Windows (%LOCALAPPDATA%)
         if(NOT _nsis_tpl MATCHES "(^|\n)[ \t]*Unicode[ \t]+")
             set(_nsis_tpl "Unicode True\n${_nsis_tpl}")
         endif()
@@ -124,16 +93,23 @@ if(WIN32)
             )
         endif()
 
-        # Страница приветствия + сразу за ней страница выбора пользователей
+        # Страница приветствия (без абзаца про системные файлы) + выбор пользователей
         if(NOT _nsis_tpl MATCHES "DeepDiveScopePageCreate")
             string(REPLACE
                 "!insertmacro MUI_PAGE_WELCOME"
-                "!define MUI_WELCOMEPAGE_TITLE_3LINES\n  !define MUI_WELCOMEPAGE_TEXT \"$(DEEPDIVE_WELCOME_TEXT)\"\n  !insertmacro MUI_PAGE_WELCOME\n  Page custom DeepDiveScopePageCreate DeepDiveScopePageLeave"
+                "!define MUI_WELCOMEPAGE_TITLE_3LINES\n  !define MUI_WELCOMEPAGE_TEXT \"This wizard will guide you through the installation of $(^NameDA).\\r\\n\\r\\nClick Next to continue.\"\n  !insertmacro MUI_PAGE_WELCOME\n  Page custom DeepDiveScopePageCreate DeepDiveScopePageLeave"
                 _nsis_tpl "${_nsis_tpl}"
             )
         endif()
 
-        # Финальная страница с запуском без прав администратора
+        # Убираем страницу лицензии из мастера установки
+        string(REGEX REPLACE
+            "(^|\n)[ \t]*!insertmacro[ \t]+MUI_PAGE_LICENSE[^\r\n]*"
+            "\\1  ; License page disabled"
+            _nsis_tpl "${_nsis_tpl}"
+        )
+
+        # Финальная страница с запуском DeepDive.exe без прав администратора
         if(NOT _nsis_tpl MATCHES "MUI_FINISHPAGE_TITLE_3LINES")
             string(REPLACE
                 "!insertmacro MUI_PAGE_FINISH"
@@ -141,6 +117,23 @@ if(WIN32)
                 _nsis_tpl "${_nsis_tpl}"
             )
         endif()
+
+        # Оставляем только английский язык установщика
+        string(REGEX REPLACE
+            "(^|\n)[ \t]*!insertmacro[ \t]+MUI_LANGUAGE[ \t]+\"English\"[^\r\n]*"
+            "\\1  __DEEPDIVE_MUI_ENGLISH__"
+            _nsis_tpl "${_nsis_tpl}"
+        )
+        string(REGEX REPLACE
+            "(^|\n)[ \t]*!insertmacro[ \t]+MUI_LANGUAGE[ \t]+[^\r\n]*"
+            "\\1  ; non-English language disabled"
+            _nsis_tpl "${_nsis_tpl}"
+        )
+        string(REPLACE
+            "__DEEPDIVE_MUI_ENGLISH__"
+            "!insertmacro MUI_LANGUAGE \"English\""
+            _nsis_tpl "${_nsis_tpl}"
+        )
 
         # Переименовываем оригинальные .onInit / un.onInit, чтобы обернуть их в nsis_multiuser.nsh
         string(REGEX REPLACE
@@ -155,14 +148,6 @@ if(WIN32)
         )
         if(NOT _nsis_tpl MATCHES "_CPack_orig_onInit")
             message(WARNING "Could not wrap .onInit in NSIS.template.in; multi-user hooks may not run")
-        endif()
-
-        if(NOT _nsis_tpl MATCHES "deepdive_lang\\.nsh")
-            string(REPLACE
-                "!insertmacro MUI_LANGUAGE \"Russian\""
-                "!insertmacro MUI_LANGUAGE \"Russian\"\n  !include \"${_nsis_lang_nsh}\""
-                _nsis_tpl "${_nsis_tpl}"
-            )
         endif()
 
         # Подключаем nsis_multiuser.nsh в самом конце шаблона (после языков и оригинальных функций)
