@@ -3,10 +3,11 @@
 **Deep Dive** is a real-time, 100% procedural 3D underwater exploration tech demo built with **C++20**, **Qt 6**, and **OpenGL 3.3 Core**. Every element in the scene — terrain bathymetry, rock normal/height textures, coral ecosystems, skeletal shipwrecks, marine fauna, dynamic water optics, and the reactive stereo soundscape — is synthesized mathematically on the fly with zero external 3D models, texture assets, or audio files.
 
 ---
-<img width="2560" height="1528" alt="image" src="https://github.com/user-attachments/assets/a40075ab-7ef4-4a27-b27a-13cfe30be433" />
-<img width="2560" height="1528" alt="image" src="https://github.com/user-attachments/assets/7b3d1b5d-11f2-4d70-bdbf-c504fa5bd292" />
-<img width="2560" height="1528" alt="image" src="https://github.com/user-attachments/assets/b510010c-8841-4d5e-ac28-2c6f28c1a6f8" />
-<img width="2560" height="1528" alt="image" src="https://github.com/user-attachments/assets/68d3cde0-eed2-426e-86f4-d4f4178ffa90" />
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/c58e00c5-8859-4b4c-9915-229dcffa0084" />
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/2e5a81f9-62f9-4bbc-a45a-1ef4defaf2c4" />
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/014692fb-18bb-44c4-8c92-90176e938f1e" />
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/4fcc64da-6ef9-490a-8ed7-25c8afceb712" />
+<img width="2560" height="1600" alt="image" src="https://github.com/user-attachments/assets/1dde0871-2662-4f1f-9ec6-ed73740d6ec2" />
 ---
 
 ## What You Will See
