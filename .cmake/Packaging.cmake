@@ -102,12 +102,29 @@ if(WIN32)
             )
         endif()
 
-        # Убираем страницу лицензии из мастера установки
+        # Убираем страницу лицензии из мастера установки:
+        #   1) прямой вызов !insertmacro MUI_PAGE_LICENSE ...
+        #   2) CPack-плейсхолдер вида @CPACK_...LICENSE...@ (в новых версиях CMake)
+        #   3) резервный пропуск через MUI_PAGE_CUSTOMFUNCTION_PRE, если плейсхолдер нестандартный
+        set(_nsis_tpl_before_lic "${_nsis_tpl}")
         string(REGEX REPLACE
-            "(^|\n)[ \t]*!insertmacro[ \t]+MUI_PAGE_LICENSE[^\r\n]*"
+            "(^|\n)[^\r\n]*MUI_PAGE_LICENSE[^\r\n]*"
             "\\1  ; License page disabled"
             _nsis_tpl "${_nsis_tpl}"
         )
+        string(REGEX REPLACE
+            "(^|\n)[ \t]*@CPACK_[^@\r\n]*LICENSE[^@\r\n]*@[^\r\n]*"
+            "\\1  ; License page placeholder disabled"
+            _nsis_tpl "${_nsis_tpl}"
+        )
+        if(_nsis_tpl STREQUAL _nsis_tpl_before_lic)
+            message(STATUS "NSIS.template.in: no direct license directive matched; enabling MUI_PAGE_CUSTOMFUNCTION_PRE skip")
+            string(REPLACE
+                "Page custom DeepDiveScopePageCreate DeepDiveScopePageLeave"
+                "Page custom DeepDiveScopePageCreate DeepDiveScopePageLeave\n  !define DEEPDIVE_SKIP_LICENSE_PRE\n  !define MUI_PAGE_CUSTOMFUNCTION_PRE DeepDiveSkipLicense"
+                _nsis_tpl "${_nsis_tpl}"
+            )
+        endif()
 
         # Финальная страница с запуском DeepDive.exe без прав администратора
         if(NOT _nsis_tpl MATCHES "MUI_FINISHPAGE_TITLE_3LINES")

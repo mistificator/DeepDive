@@ -194,3 +194,10 @@ Function DeepDiveLaunchAsUser
     Exec '"$INSTDIR\DeepDive.exe"'
   ${EndIf}
 FunctionEnd
+
+; Fallback: skip the License page if NSIS.template.in injects it via an unknown placeholder
+!ifdef DEEPDIVE_SKIP_LICENSE_PRE
+Function DeepDiveSkipLicense
+  Abort
+FunctionEnd
+!endif
